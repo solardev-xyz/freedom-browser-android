@@ -76,18 +76,87 @@ class FullscreenNoticeTest {
         assertEquals(2, notice.shows)
     }
 
+    private fun FullscreenNotice.swipe(x0: Float, y0: Float, x1: Float, y1: Float) {
+        onPress(x0, y0, width = W, height = H, edge = EDGE)
+        onMove((x0 + x1) / 2, (y0 + y1) / 2, SWIPE)
+        onMove(x1, y1, SWIPE)
+        onRelease(cancelled = false)
+    }
+
+    private fun FullscreenNotice.tap(x: Float, y: Float) {
+        onPress(x, y, width = W, height = H, edge = EDGE)
+        onRelease(cancelled = false)
+    }
+
     @Test
-    fun `a touch at the top or bottom edge, where the bars are swiped in, shows it again`() {
+    fun `a swipe in from the top or bottom edge, where the bars come back, shows it again`() {
         // Transient bars swiped in over the page don't change the insets,
-        // so the swipe's own start is what counts.
+        // so the swipe itself is what counts.
         val notice = FullscreenNotice()
-        notice.onPress(y = 500f, height = 2400f, edge = 63f)
-        assertEquals(1, notice.shows)
-        notice.onPress(y = 2f, height = 2400f, edge = 63f)
+        notice.swipe(540f, 2f, 540f, 600f)
         assertEquals(2, notice.shows)
-        notice.onPress(y = 2390f, height = 2400f, edge = 63f)
+        notice.swipe(540f, 2398f, 540f, 1800f)
         assertEquals(3, notice.shows)
-        notice.onPress(y = 64f, height = 2400f, edge = 63f)
+        // One just inside the edge is the page's own swipe.
+        notice.swipe(540f, 70f, 540f, 600f)
         assertEquals(3, notice.shows)
+    }
+
+    @Test
+    fun `a swipe in from the side edge, where a landscape nav bar sits, shows it again`() {
+        // Landscape, 3-button nav: the bar comes back from the right (or
+        // left) edge, and the press is halfway down that side.
+        val notice = FullscreenNotice()
+        notice.swipe(1079f, 1200f, 580f, 1200f)
+        assertEquals(2, notice.shows)
+        notice.swipe(0f, 1200f, 500f, 1200f)
+        assertEquals(3, notice.shows)
+    }
+
+    @Test
+    fun `a swipe counts once, however far it goes`() {
+        val notice = FullscreenNotice()
+        notice.onPress(540f, 2398f, W, H, EDGE)
+        for (y in 2390 downTo 1000 step 10) notice.onMove(540f, y.toFloat(), SWIPE)
+        notice.onRelease(cancelled = false)
+        assertEquals(2, notice.shows)
+    }
+
+    @Test
+    fun `a tap on the page's own control at the edge doesn't show it`() {
+        // A video scrubber along the bottom edge: taps, and drags along it.
+        val notice = FullscreenNotice()
+        notice.tap(540f, 2390f)
+        notice.tap(1075f, 1200f)
+        notice.tap(540f, 3f)
+        assertEquals(1, notice.shows)
+        notice.swipe(200f, 2390f, 900f, 2370f)
+        assertEquals(1, notice.shows)
+        // A wobble inward that stays under the swipe distance.
+        notice.onPress(540f, 2390f, W, H, EDGE)
+        notice.onMove(545f, 2380f, SWIPE)
+        notice.onRelease(cancelled = false)
+        assertEquals(1, notice.shows)
+    }
+
+    @Test
+    fun `an edge touch the system takes over shows it again`() {
+        // The system's own edge gesture cancels the window's touch.
+        val notice = FullscreenNotice()
+        notice.onPress(1079f, 1200f, W, H, EDGE)
+        notice.onMove(1070f, 1200f, SWIPE)
+        notice.onRelease(cancelled = true)
+        assertEquals(2, notice.shows)
+        // A cancelled touch that didn't start at an edge is not the system's.
+        notice.onPress(540f, 1200f, W, H, EDGE)
+        notice.onRelease(cancelled = true)
+        assertEquals(2, notice.shows)
+    }
+
+    private companion object {
+        const val W = 1080f
+        const val H = 2400f
+        const val EDGE = 63f
+        const val SWIPE = 42f
     }
 }

@@ -55,6 +55,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 
 /**
  * Screen-covering host for an HTML5 fullscreen session (see
@@ -117,19 +118,33 @@ internal fun FullscreenCustomView(
 
     // Transient bars (swiped in over the page) don't change the window's
     // insets, so [areSystemBarsVisible] never sees them; the swipe that
-    // brings them does reach the window, though. Watched in the Initial
-    // pass and never consumed: the page still gets every touch.
-    val edge = with(LocalDensity.current) { FULLSCREEN_EDGE.toPx() }
+    // brings them does reach the window, though, from whichever edge the
+    // bars sit at (the side, for a landscape 3-button nav bar). Watched
+    // in the Initial pass and never consumed: the page still gets every
+    // touch.
+    val density = LocalDensity.current
+    val edge = with(density) { FULLSCREEN_EDGE.toPx() }
+    val swipe = with(density) { FULLSCREEN_SWIPE.toPx() }
     Box(
         Modifier
             .fillMaxSize()
-            .pointerInput(notice, edge) {
+            .pointerInput(notice, edge, swipe) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (event.type != PointerEventType.Press) continue
-                        val y = event.changes.firstOrNull()?.position?.y ?: continue
-                        notice.onPress(y, size.height.toFloat(), edge)
+                        val change = event.changes.firstOrNull() ?: continue
+                        val at = change.position
+                        when {
+                            event.type == PointerEventType.Press && !change.previousPressed ->
+                                notice.onPress(
+                                    at.x, at.y,
+                                    size.width.toFloat(), size.height.toFloat(), edge,
+                                )
+                            change.pressed -> notice.onMove(at.x, at.y, swipe)
+                            // A release that no MotionEvent carried is Compose's
+                            // synthetic cancel: the system took the gesture.
+                            else -> notice.onRelease(cancelled = event.motionEvent == null)
+                        }
                     }
                 }
             },
@@ -178,10 +193,17 @@ internal fun FullscreenCustomView(
 private const val FULLSCREEN_NOTICE_MS = 4_000L
 
 /**
- * How far from the top or bottom of the screen a touch counts as the
- * start of the swipe that brings the system bars back.
+ * How far from an edge of the screen a touch counts as the start of
+ * the swipe that brings the system bars back.
  */
 private val FULLSCREEN_EDGE = 24.dp
+
+/**
+ * How far a touch that started at an edge must travel inward before
+ * it's the swipe that brings the bars back, not a tap on the page's own
+ * control there (a video scrubber along the bottom).
+ */
+private val FULLSCREEN_SWIPE = 16.dp
 
 @Composable
 private fun FullscreenNoticeCard(site: String?) {
@@ -215,12 +237,12 @@ private fun FullscreenNoticeCard(site: String?) {
  * When [FullscreenCustomView]'s notice shows (#467): [shows] counts the
  * showings, and each new value puts the notice up for a few seconds.
  * Once when the session starts; again each time the user reaches for
- * the system bars, looking for a way out — a touch that starts at the
- * top or bottom edge, where the swipe that brings them back begins
- * ([onPress]), or the bars actually coming back ([onBarsVisible]); and
- * again when the app comes back to the front (from Recents
- * or another app), since whoever looks at it then hasn't seen the
- * first one.
+ * the system bars, looking for a way out — a swipe in from any edge of
+ * the screen, where the bars come back from (the top and bottom, or the
+ * side a landscape 3-button nav bar sits at), see [onPress]; or the
+ * bars actually coming back ([onBarsVisible]); and again when the app
+ * comes back to the front (from Recents or another app), since whoever
+ * looks at it then hasn't seen the first one.
  */
 internal class FullscreenNotice {
     var shows by mutableIntStateOf(1)
@@ -229,18 +251,66 @@ internal class FullscreenNotice {
     private var barsVisible: Boolean? = null
     private var resumedOnce = false
 
+    /** The edge the touch in progress started at, if it did. */
+    private var from: Edge? = null
+    private var startX = 0f
+    private var startY = 0f
+
+    private enum class Edge { Left, Top, Right, Bottom }
+
     fun onBarsVisible(visible: Boolean) {
         if (barsVisible == false && visible) shows++
         barsVisible = visible
     }
 
     /**
-     * A touch went down [y] px from the top of a screen [height] px
-     * tall; within [edge] px of the top or bottom it's the start of an
-     * edge swipe.
+     * A touch went down at ([x], [y]) px on a screen [width] by
+     * [height] px; within [edge] px of a side it may be the start of the
+     * swipe that brings the bars back. Only a press doesn't count: a tap
+     * there is as likely to be on the page's own control ([onMove]).
      */
-    fun onPress(y: Float, height: Float, edge: Float) {
-        if (y <= edge || y >= height - edge) shows++
+    fun onPress(x: Float, y: Float, width: Float, height: Float, edge: Float) {
+        startX = x
+        startY = y
+        // Nearest edge, so a corner press is judged by the edge it hugs.
+        from = listOf(
+            Edge.Left to x,
+            Edge.Top to y,
+            Edge.Right to width - x,
+            Edge.Bottom to height - y,
+        ).filter { it.second <= edge }.minByOrNull { it.second }?.first
+    }
+
+    /**
+     * The touch moved to ([x], [y]). Once one that started at an edge
+     * has travelled [swipe] px inward, mostly away from that edge rather
+     * than along it (a scrubber dragged sideways along the bottom), it's
+     * the edge swipe, and the notice shows again.
+     */
+    fun onMove(x: Float, y: Float, swipe: Float) {
+        val edge = from ?: return
+        val dx = x - startX
+        val dy = y - startY
+        val (inward, along) = when (edge) {
+            Edge.Left -> dx to dy
+            Edge.Right -> -dx to dy
+            Edge.Top -> dy to dx
+            Edge.Bottom -> -dy to dx
+        }
+        if (inward >= swipe && inward > abs(along)) {
+            from = null
+            shows++
+        }
+    }
+
+    /**
+     * The touch ended. If the system took an edge touch away from the
+     * window ([cancelled]) before it travelled far, that was the system's
+     * own edge gesture.
+     */
+    fun onRelease(cancelled: Boolean) {
+        if (cancelled && from != null) shows++
+        from = null
     }
 
     fun onResumed() {
