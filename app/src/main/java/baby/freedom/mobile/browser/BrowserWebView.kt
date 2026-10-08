@@ -4329,6 +4329,10 @@ private fun buildRefreshableWebView(
         }
 
         webChromeClient = object : WebChromeClient() {
+            // A blank box, not WebView's grey play triangle, while a
+            // poster-less <video> has no frame yet ([VideoPoster]).
+            override fun getDefaultVideoPoster(): Bitmap = VideoPoster.blank
+
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 // Home-sentinel loads never show a progress bar — the
                 // overlay is the UI, not a loading page. Also guards
