@@ -2400,7 +2400,17 @@ private fun AddressField(
     // unmask an RLO the resting label just flagged (it read
     // `hte.paypal.com` in the open field) — and the field's own Copy /
     // Cut hand on what it shows ([BidiMarkingClipboard]).
-    val shownAddress = state.addressBarText
+    //
+    // An address past 8 KiB is seeded shortened, with an ellipsis: laid out
+    // whole, a page's 2 MB address is wider than Compose can measure and
+    // crashed the app (#488). Go on the unedited field still submits the
+    // whole address (see [AddressFieldText]).
+    // Read once here, so the effects below seed [seededAddress] with the
+    // very address [shownAddress] was made from.
+    val committedAddress = state.addressBarText
+    val shownAddress = remember(committedAddress) {
+        AddressFieldText.shown(committedAddress)
+    }
     var fieldValue by remember(state.id) {
         mutableStateOf(
             TextFieldValue(
@@ -2409,6 +2419,15 @@ private fun AddressField(
             ),
         )
     }
+    // The whole text the field's (possibly shortened) text stands for: the
+    // address it was last seeded from, or the last paste / suggestion fill
+    // too long to show whole. Go compares the field with *this* text's
+    // shortened form, not the tab's current address: the field isn't
+    // re-seeded during an edit, so a page that rewrites its long address
+    // meanwhile (`replaceState`) would otherwise have Go submit the old
+    // address's shortened text, `…` and all; and a shortened paste or fill
+    // must submit what was pasted or picked, not the cut.
+    var seededAddress by remember(state.id) { mutableStateOf(committedAddress) }
 
     // External → internal sync. Fires when the webview updates the
     // displayed URL, when the user hits × (see below), or when submit()
@@ -2421,6 +2440,7 @@ private fun AddressField(
         // Never clobber an in-progress edit: a page that happens to
         // finish loading while the user is typing updates the committed
         // address, and the buffer picks that up when the edit ends.
+        if (!addressFocused) seededAddress = committedAddress
         if (!addressFocused && fieldValue.text != shownAddress) {
             // Park the cursor at position 0 so long URLs horizontally
             // scroll to their *start* rather than their tail — the
@@ -2454,6 +2474,7 @@ private fun AddressField(
             if (fieldValue.text.isEmpty()) fieldValue
             else fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
         } else {
+            seededAddress = committedAddress
             TextFieldValue(text = shownAddress, selection = TextRange.Zero)
         }
     }
@@ -2465,7 +2486,10 @@ private fun AddressField(
     LaunchedEffect(fill) {
         val f = fill ?: return@LaunchedEffect
         if (addressFocused) {
-            fieldValue = TextFieldValue(text = f.text, selection = TextRange(f.text.length))
+            seededAddress = f.text
+            fieldValue = AddressFieldText.capped(
+                TextFieldValue(text = f.text, selection = TextRange(f.text.length)),
+            )
             onAddressQueryChanged(f.text)
             onAddressEditedChanged(true)
         }
@@ -2561,14 +2585,30 @@ private fun AddressField(
             NoSuggestionsTextInput {
                 BasicTextField(
                     value = fieldValue,
-                    onValueChange = { newValue ->
+                    onValueChange = { edit ->
+                        // A paste is held to the same bound as the seed,
+                        // shortened with an ellipsis; its whole text is
+                        // what Go and the suggestions then stand for. An
+                        // edit inside a shortened field that grows it past
+                        // the bound would only be cut again, losing what
+                        // was typed or the last shown character: the field
+                        // is full, so drop it and keep its whole text.
+                        if (AddressFieldText.swallowed(
+                                fieldValue.text, edit.text, seededAddress, fieldValue.selection,
+                            )) {
+                            return@BasicTextField
+                        }
+                        val newValue = AddressFieldText.capped(edit)
+                        if (newValue !== edit) seededAddress = edit.text
                         val textChanged = newValue.text != fieldValue.text
                         fieldValue = newValue
                         if (textChanged) {
                             // Typing feeds the suggestions query only. The
                             // tab's committed address stays put until the user
                             // actually submits (or the WebView navigates).
-                            onAddressQueryChanged(newValue.text)
+                            onAddressQueryChanged(
+                                AddressFieldText.submitted(newValue.text, seededAddress),
+                            )
                             onAddressEditedChanged(true)
                         }
                     },
@@ -2598,7 +2638,9 @@ private fun AddressField(
                         imeAction = ImeAction.Go,
                     ),
                     keyboardActions = KeyboardActions(
-                        onGo = { onSubmit(fieldValue.text) },
+                        onGo = {
+                            onSubmit(AddressFieldText.submitted(fieldValue.text, seededAddress))
+                        },
                     ),
                     decorationBox = { innerTextField ->
                         // Protocol badge: the pill grows a Swarm hex mark or

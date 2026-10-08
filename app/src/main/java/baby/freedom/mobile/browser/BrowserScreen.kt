@@ -636,7 +636,8 @@ fun BrowserScreen(
     // the tab's committed address (what the WebView loaded, or what was
     // submitted) and everything that describes the current site — the
     // resting domain label, the home overlay, reload — reads it. Typed
-    // text lives here until it is submitted.
+    // text lives here until it is submitted — whole, even when the field
+    // shows it shortened past 8 KiB ([AddressFieldText]).
     var addressQuery by remember { mutableStateOf("") }
     // A suggestion row's arrow: text for the address field to take (#443).
     var addressFill by remember { mutableStateOf<AddressFill?>(null) }
@@ -2391,7 +2392,11 @@ fun BrowserScreen(
                 {
                     SuggestionsPanel(
                         repo = repo,
-                        query = addressQuery,
+                        // The panel gets the field's own (bounded) text;
+                        // its "Go to address" and "Search with …" rows map
+                        // back to the whole text the field stands for
+                        // (#488, #517 R1-F1).
+                        query = AddressFieldText.shown(addressQuery),
                         searchTemplate = searchTemplate,
                         tabs = tabs.tabs.map { t ->
                             TabCandidate(t.id, t.addressBarText.ifBlank { t.url }, t.title, t.private)
@@ -2399,7 +2404,7 @@ fun BrowserScreen(
                         currentTabId = state.id,
                         private = state.private,
                         searchSuggestionsOn = searchSuggestionsOn,
-                        onPick = { submit(state, it) },
+                        onPick = { submit(state, AddressFieldText.picked(it, addressQuery, searchTemplate)) },
                         onSwitchToTab = { id ->
                             // End the edit first, as a submit does, then
                             // bring the tab up.

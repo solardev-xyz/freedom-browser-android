@@ -426,8 +426,11 @@ private fun SuggestionRow(
     onClick: () -> Unit,
     onFill: () -> Unit,
 ) {
-    val displayTitle = suggestion.title.ifBlank { suggestion.url }
-    val address = suggestionAddress(suggestion.url)
+    // Both bounded: a tab's or history entry's address (and a title) can
+    // be up to Chromium's 2 MiB, and laying that out ANRs (#517 R3-F1).
+    // The row's click and fill still act on the whole [suggestion].
+    val displayTitle = AddressFieldText.row(suggestion.title.ifBlank { suggestion.url })
+    val address = AddressFieldText.row(suggestionAddress(suggestion.url))
     val switchToTab = stringResource(R.string.browser_suggestions_switch_to_tab)
     RowLayout(
         icon = when (suggestion.source) {

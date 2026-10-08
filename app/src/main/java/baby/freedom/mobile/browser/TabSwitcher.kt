@@ -702,8 +702,10 @@ private fun TabCard(
                 .padding(start = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val title = tab.title.ifBlank {
-                tab.url.ifBlank {
+            // Bounded: a title-less tab shows its address, which can be
+            // up to Chromium's 2 MiB (#517 R3-F1).
+            val title = AddressFieldText.row(tab.title).ifBlank {
+                AddressFieldText.row(tab.url).ifBlank {
                     if (tab.private) {
                         stringResource(R.string.browser_tabs_private_tab)
                     } else {
