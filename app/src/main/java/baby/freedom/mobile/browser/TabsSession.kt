@@ -221,14 +221,14 @@ class TabsSession(
      *
      * Whichever tab is on screen at the time, not the one that was when
      * the restore ran: a link the app was cold-started from opens a new
-     * tab over the restored ones (R4-M3). The WebView host attaches a
-     * WebView for every tab at once, so every restored tab starts its
-     * load straight away, on screen or not, and each one is waited for:
-     * opening a new (home) tab over a restored dweb page still waiting
-     * on its node doesn't start the window, its load finishing does
-     * (R5-M2). A tab still [BrowserState.pendingRestore] (the instant
-     * before the host composes, or one parked across an Activity
-     * relaunch) counts as done, since its load hasn't started (R6-M1).
+     * tab over the restored ones (R4-M3). A restored tab that has
+     * started its load is waited for: opening a new (home) tab over a
+     * restored dweb page still waiting on its node doesn't start the
+     * window, its load finishing does (R5-M2). A tab still
+     * [BrowserState.pendingRestore] counts as done, since its load
+     * hasn't started (R6-M1): the instant before the host composes, one
+     * parked across an Activity relaunch, and every restored tab in the
+     * background, whose WebView and load wait until it's shown (#460).
      */
     private fun settleWhenLoaded(store: TabsStore, at: Long, restored: Set<Long>) {
         viewModelScope.launch {

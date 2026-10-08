@@ -5,8 +5,10 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ColorFilter
@@ -512,6 +514,8 @@ private fun HttpURLConnection.forwardProxiedHeaders(
 
 // Max width (in px) of a thumbnail bitmap. Anything bigger is wasteful
 // since we only ever render these at half-screen-ish sizes in the grid.
+// Stored as RGB_565 (a page's snapshot has no transparency), half the
+// memory of ARGB: about 1 MB at most for a tall phone screen (#460).
 private const val THUMBNAIL_MAX_WIDTH_PX = 640
 
 /**
@@ -809,7 +813,7 @@ internal fun captureThumbnail(view: WebView, state: BrowserState) {
     val scale = if (w > THUMBNAIL_MAX_WIDTH_PX) THUMBNAIL_MAX_WIDTH_PX.toFloat() / w else 1f
     val bw = (w * scale).toInt().coerceAtLeast(1)
     val bh = (h * scale).toInt().coerceAtLeast(1)
-    val bitmap = createBitmap(bw, bh)
+    val bitmap = createBitmap(bw, bh, Bitmap.Config.RGB_565)
     val canvas = Canvas(bitmap)
     if (scale != 1f) canvas.scale(scale, scale)
     try {
@@ -887,16 +891,19 @@ fun BrowserWebViewHost(
     val refreshLayouts = remember { mutableMapOf<Long, SwipeRefreshLayout>() }
     // The ids of the private tabs (#86) this host has built a WebView
     // for, including one whose WebView went with its renderer (#260)
-    // and hasn't been rebuilt yet: the private session lasts as long as
-    // any of them.
+    // and hasn't been rebuilt yet, or one still waiting to be shown
+    // before its first is built (#460): the private session lasts as
+    // long as any of them.
     val privateIds = remember { mutableSetOf<Long>() }
-    // The ids of the tabs whose WebView went with its renderer (#260)
-    // and hasn't been rebuilt: closing one still owes the per-tab
-    // cleanup a WebView's tab gets.
+    // The ids of the tabs with no WebView yet: one whose WebView went
+    // with its renderer (#260) and hasn't been rebuilt, or a restored
+    // tab whose WebView waits until it's shown ([TabsState.defersWebView],
+    // #460). Closing one still owes the per-tab cleanup a WebView's tab
+    // gets.
     val goneIds = remember { mutableSetOf<Long>() }
-    // Bumped once a WebView has been rebuilt for a tab whose renderer
-    // went away (#260), so a navigation that brought it back is handed
-    // to the new WebView (see the nav observers below).
+    // Bumped once a WebView has been built for a tab in [goneIds], so a
+    // navigation that brought it back is handed to the new WebView (see
+    // the nav observers below).
     val rebuilt = remember { mutableIntStateOf(0) }
 
     // Periodic cookie sweep (defense in depth against cookie tossing
@@ -1096,6 +1103,16 @@ fun BrowserWebViewHost(
             // Waiting to be brought back after its renderer went away
             // (#260) — maybe under an earlier host, across a relaunch.
             if (tab.rendererGone != null) {
+                goneIds += tab.id
+                if (tab.private) privateIds += tab.id
+                continue
+            }
+            // A restored tab (a cold start's, a relaunch's, a reopened
+            // one) in the background: its WebView, and the load of its
+            // page, wait until it's shown, so a cold start with many tabs
+            // doesn't build them all and load every page at once (#460).
+            // It keeps its title and address meanwhile.
+            if (tabs.defersWebView(tab)) {
                 goneIds += tab.id
                 if (tab.private) privateIds += tab.id
                 continue
@@ -1328,6 +1345,16 @@ fun BrowserWebViewHost(
             val wv = webViews[tabs.active.id]
             if (wv != null) captureThumbnail(wv, tabs.active)
         }
+        // Short of memory (#460): the switcher's snapshots go first.
+        // On the application, not the Activity, and taken off again
+        // below so a finished screen's tabs aren't kept reachable.
+        val trimCallbacks = object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) = tabs.trimMemory(level)
+            override fun onConfigurationChanged(newConfig: Configuration) = Unit
+            @Deprecated("Deprecated in Java")
+            override fun onLowMemory() = tabs.trimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+        }
+        context.applicationContext.registerComponentCallbacks(trimCallbacks)
         // Abort whatever the given tab is loading. Chromium answers a
         // stopLoading() with a final onProgressChanged(100), which the
         // chrome client below folds into `progress = -1`; [BrowserScreen]
@@ -1388,9 +1415,10 @@ fun BrowserWebViewHost(
                 if (wv != null) {
                     WebViewCompat.setAudioMuted(wv, muted)
                     tab.audioMuted = WebViewCompat.isAudioMuted(wv)
-                } else if (tab.rendererGone != null) {
-                    // No WebView until it's rebuilt (#260), which
-                    // applies the tab's mute to the new one.
+                } else if (tab.pendingRestore != null) {
+                    // No WebView until it's rebuilt (#260) or first
+                    // shown (#460), which applies the tab's mute to
+                    // the new one.
                     tab.audioMuted = muted
                 }
             }
@@ -1467,11 +1495,12 @@ fun BrowserWebViewHost(
                     runCatching { wv.clearFormData() }
                     runCatching { wv.clearHistory() }
                 }
-                // A tab whose renderer went away (#260) keeps its back/forward
-                // list in the state it's to be rebuilt from: it comes back on
-                // its page alone, as `clearHistory()` leaves every other tab.
+                // A tab whose renderer went away (#260), or one restored and
+                // not shown yet (#460), keeps its back/forward list in the
+                // state it's to be built from: it comes back on its page
+                // alone, as `clearHistory()` leaves every other tab.
                 for (tab in tabs.tabs) {
-                    if (tab.rendererGone != null) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
+                    if (tab.id !in webViews) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
                 }
                 // Remembered zoom levels are keyed by the sites visited (#88).
                 pageZoom.clearAll()
@@ -1501,6 +1530,7 @@ fun BrowserWebViewHost(
             }
         }
         onDispose {
+            context.applicationContext.unregisterComponentCallbacks(trimCallbacks)
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
             tabs.stopLoading = null
