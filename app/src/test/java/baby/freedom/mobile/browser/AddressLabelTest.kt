@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AddressLabelTest {
@@ -149,6 +150,25 @@ class AddressLabelTest {
         val emoji = "\uD83D\uDE00".repeat(20)
         val cut = AddressLabel.keepingAt("$emoji@vitalik.eth", within(16))
         assertEquals("\uD83D\uDE00…@vitalik.eth", cut)
+        // Nor at one character: a leading pair is kept whole, not halved.
+        val tight = AddressLabel.keepingAt("${emoji}@" + "b".repeat(60) + ".eth", within(10))
+        assertEquals("\uD83D\uDE00…@…b.eth", tight)
+        // A trailing pair after the `@` is kept whole too.
+        val tail = AddressLabel.keepingAt("x@" + "b".repeat(60) + "\uD83D\uDE00", within(4))
+        assertEquals("x@…\uD83D\uDE00", tail)
+        // Every result is well-formed UTF-16 at every width.
+        for (n in 1..30) {
+            for (label in listOf("$emoji@vitalik.eth", "$emoji@" + emoji, "a@" + emoji)) {
+                val s = AddressLabel.keepingAt(label, within(n))
+                s.forEachIndexed { i, c ->
+                    if (c.isHighSurrogate()) assertTrue(s, i + 1 < s.length && s[i + 1].isLowSurrogate())
+                    if (c.isLowSurrogate()) assertTrue(s, i > 0 && s[i - 1].isHighSurrogate())
+                }
+            }
+        }
+        // A one-character part that lost nothing gets no ellipsis.
+        assertEquals("x@y", AddressLabel.keepingAt("x@y", within(2)))
+        assertEquals("e@…vvvvvv", AddressLabel.keepingAt("e@" + "v".repeat(50), within(9)))
     }
 
     @Test

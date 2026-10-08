@@ -144,6 +144,7 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.text
 import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.state.ToggleableState
@@ -2034,7 +2035,16 @@ internal fun BottomToolbar(
                     // actually drawn on (seen in the AVD's `uiautomator`
                     // dump as the label's bounds jumping 89 px right of
                     // its ink).
-                    .semantics { traversalIndex = CapsuleOrderLabel },
+                    //
+                    // And it reads the whole [restingLabel], not the
+                    // [shownLabel] drawn: the `…` cuts [AddressLabel.keepingAt]
+                    // makes are for the eye only, the way the middle
+                    // ellipsis was, so TalkBack still says every
+                    // character of an address carrying userinfo.
+                    .clearAndSetSemantics {
+                        text = AnnotatedString(restingLabel)
+                        traversalIndex = CapsuleOrderLabel
+                    },
             )
         }
 

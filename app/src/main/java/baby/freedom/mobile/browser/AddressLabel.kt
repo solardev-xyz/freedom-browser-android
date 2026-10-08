@@ -245,7 +245,10 @@ object AddressLabel {
      * only once that is down to one character does the part after it
      * give up its middle, keeping its tail (`e…@…lik.eth`). The result is
      * the longest such candidate that fits, so the capsule's own
-     * ellipsis never runs on it. A label without an `@`, or one that
+     * ellipsis never runs on it. No cut splits a surrogate pair (a
+     * "character" here is a whole code point when it is a pair), and a
+     * `…` marks only a part that actually lost something (`x@…yyyy`, not
+     * `x…@…yyyy`). A label without an `@`, or one that
      * fits as it is, is returned unchanged. Tapping the pill still shows
      * the whole address.
      *
@@ -259,7 +262,18 @@ object AddressLabel {
         val before = label.substring(0, at)
         val after = label.substring(at + marker.length)
 
-        fun headed(k: Int) = before.take(cutBefore(before, k)) + "…" + marker + after
+        // A head of [before] (or tail of [after]) only gets its `…` when
+        // something was actually cut from it: `x@y` keeps its `x`, it
+        // doesn't become `x…@y`.
+        fun headOf(k: Int): String {
+            val cut = cutBefore(before, k)
+            return before.take(cut) + if (cut < before.length) "…" else ""
+        }
+        fun tailOf(m: Int): String {
+            val start = cutAfter(after, m)
+            return (if (start > 0) "…" else "") + after.substring(start)
+        }
+        fun headed(k: Int) = headOf(k) + marker + after
         // Largest head of [before] at which the whole [after] still fits.
         if (before.isNotEmpty()) {
             var lo = 1
@@ -271,8 +285,8 @@ object AddressLabel {
             }
             if (best > 0) return headed(best)
         }
-        val head = if (before.isEmpty()) "" else before.take(cutBefore(before, 1)) + "…"
-        fun tailed(m: Int) = head + marker + "…" + after.substring(cutAfter(after, m))
+        val head = if (before.isEmpty()) "" else headOf(1)
+        fun tailed(m: Int) = head + marker + tailOf(m)
         var lo = 1
         var hi = after.length - 1
         var best = 1
@@ -280,19 +294,31 @@ object AddressLabel {
             val mid = (lo + hi) / 2
             if (fits(tailed(mid))) { best = mid; lo = mid + 1 } else hi = mid - 1
         }
-        return if (after.length <= 1) head + marker + after else tailed(best)
+        return if (after.isEmpty()) head + marker else tailed(best)
     }
 
-    /** [k] moved back off a surrogate pair's high half, never below 1. */
+    /**
+     * End of a [k]-char head of [s], never splitting a surrogate pair: a
+     * cut that would leave a lone high surrogate moves back off it, or,
+     * when the pair is the very first character (so there is nothing to
+     * move back to), forward over its low half — a head is never empty.
+     */
     private fun cutBefore(s: String, k: Int): Int {
         val n = k.coerceIn(1, s.length)
-        return if (n in 2 until s.length && s[n - 1].isHighSurrogate()) n - 1 else n
+        if (n >= s.length || !s[n - 1].isHighSurrogate() || !s[n].isLowSurrogate()) return n
+        return if (n >= 2) n - 1 else n + 1
     }
 
-    /** Start of a [m]-char tail of [s], moved forward off a low surrogate. */
+    /**
+     * Start of a [m]-char tail of [s], never splitting a surrogate pair:
+     * a start on a pair's low half moves forward off it, or, when the
+     * pair is the very last character, back over its high half — a tail
+     * is never empty.
+     */
     private fun cutAfter(s: String, m: Int): Int {
         val start = s.length - m.coerceIn(1, s.length)
-        return if (start in 1 until s.length - 1 && s[start].isLowSurrogate()) start + 1 else start
+        if (start <= 0 || !s[start].isLowSurrogate() || !s[start - 1].isHighSurrogate()) return start
+        return if (start < s.length - 1) start + 1 else start - 1
     }
 
     /** [authority] carries an `@`, literally or as `%40`. */
