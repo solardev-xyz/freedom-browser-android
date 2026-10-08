@@ -92,7 +92,14 @@ import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.NameSystem
 import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.mobile.l10n.Strings
+import baby.freedom.mobile.wallet.OpenLvSession
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.InputStream
@@ -837,6 +844,7 @@ internal fun captureThumbnail(view: WebView, state: BrowserState) {
  * orphaned WebView so we don't leak native resources.
  */
 @SuppressLint("SetJavaScriptEnabled")
+@OptIn(ExperimentalCoroutinesApi::class)
 @Composable
 fun BrowserWebViewHost(
     tabs: TabsState,
@@ -1237,6 +1245,40 @@ fun BrowserWebViewHost(
     for ((id, layout) in refreshLayouts) {
         val targetVisibility = if (id == activeId) View.VISIBLE else View.GONE
         if (layout.visibility != targetVisibility) layout.visibility = targetVisibility
+    }
+
+    // Pausing (#470): a tab not on screen, or every tab while the app is
+    // in the background, is paused — unless it's playing ([tabWebViewPaused]).
+    // WebView can't say whether it's paused, so what was last set is kept.
+    val pausedViews = remember { java.util.WeakHashMap<WebView, Boolean>() }
+    for (tab in tabs.tabs) {
+        val wv = webViews[tab.id] ?: continue
+        val pause = tabWebViewPaused(tab.id == activeId, appStarted, tab.playingAudio)
+        if ((pausedViews[wv] ?: false) != pause) {
+            pausedViews[wv] = pause
+            if (pause) wv.onPause() else wv.onResume()
+        }
+    }
+    // And every WebView's timers while the app is in the background
+    // ([webViewTimersPaused]). An OpenLV session is read as the app
+    // stops: none can begin while it's away.
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.currentStateFlow
+            .map { it.isAtLeast(Lifecycle.State.STARTED) }
+            .distinctUntilChanged()
+            .flatMapLatest { started ->
+                if (started) {
+                    flowOf(false)
+                } else {
+                    combine(
+                        snapshotFlow { tabs.tabs.any { it.playingAudio } },
+                        OpenLvSession.peek()?.status?.map { it == OpenLvSession.Status.Connecting || it == OpenLvSession.Status.Connected }
+                            ?: flowOf(false),
+                    ) { audio, openLv -> webViewTimersPaused(appStarted = false, anyAudio = audio, openLvLive = openLv) }
+                }
+            }
+            .distinctUntilChanged()
+            .collect { paused -> WebViewTimers.set(paused, webViews.values.firstOrNull(), context) }
     }
 
     // Drive loads for each tab as its navCounter changes. `snapshotFlow`
