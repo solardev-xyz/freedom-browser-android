@@ -91,6 +91,19 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `a bare ens name is not split at a backslash`() {
+        // EnsInput takes the whole `paypal.com\vitalik.eth` as the name
+        // (the resolver refuses it), so it is not `paypal.com`.
+        assertEquals("paypal.com\\vitalik.eth", AddressLabel.resting("paypal.com\\vitalik.eth"))
+        assertEquals("paypal.com\\@vitalik.eth", AddressLabel.resting("paypal.com\\@vitalik.eth"))
+        assertEquals("paypal.com\\vitalik.eth/x", AddressLabel.resting("paypal.com\\vitalik.eth/x"))
+        // keepingAt splits the same way: the `@` after the backslash is
+        // in the name's authority, and stays on screen.
+        val a64 = "a".repeat(64)
+        assertEquals("aa…@vitalik.eth", AddressLabel.keepingAt("$a64\\@vitalik.eth") { it.length <= 15 })
+    }
+
+    @Test
     fun `backslashes are kept inside non-special authorities`() {
         // `bzz:` is not a special scheme, so its authority is not split
         // on `\` — but a backslash means it is not a host either, so it

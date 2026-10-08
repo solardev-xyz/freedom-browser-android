@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.ens.NameSystem
 
@@ -88,9 +89,9 @@ object AddressLabel {
         val sep = raw.indexOf("://")
         if (sep < 0) {
             // Bare-name display form (`swarm.eth`, `swarm.eth/docs`) —
-            // what ENS navigations put in the bar. [UrlParser] loads
-            // these as `https://…`, i.e. as a special scheme.
-            val authority = authorityOf(raw, backslashSeparates = true)
+            // what ENS navigations put in the bar. See
+            // [bareBackslashSeparates] for where its authority ends.
+            val authority = authorityOf(raw, bareBackslashSeparates(raw))
             return if (looksLikeHost(authority)) hostLabel(authority) else raw
         }
 
@@ -181,6 +182,24 @@ object AddressLabel {
         return if (end < 0) rest else rest.substring(0, end)
     }
 
+    /**
+     * Does a `\` end the authority of the bare-name form [raw]?
+     *
+     * That depends on who loads it. Text [EnsInput.parse] takes as a
+     * name (everything up to the first `/`, `?` or `#`, ending in an ENS
+     * suffix) goes to the resolver whole: `paypal.com\vitalik.eth` is
+     * the name `paypal.com\vitalik.eth`, which ENSIP-15 refuses, and the
+     * bar keeps it as given over that error page. Cutting it at the
+     * backslash would rest the capsule on `paypal.com` there (the #478
+     * class). So for a name a backslash is just a character of it, and
+     * [looksLikeHost] refuses it; the label is the text as given.
+     *
+     * Anything else bare is loaded by [UrlParser] as `https://…`, a
+     * special scheme, where Chromium splits at the backslash
+     * (`example.com\@bank.com/x` loads `example.com`) — see [authorityOf].
+     */
+    private fun bareBackslashSeparates(raw: String): Boolean = EnsInput.parse(raw) == null
+
     /** Drop `user:pass@` and a trailing `:port`. */
     private fun hostOnly(authority: String): String {
         val afterUserInfo = authority.substringAfterLast('@')
@@ -245,8 +264,8 @@ object AddressLabel {
      * `ens://aa…@paypal.com`, which drops both the real `@` and the name
      * after it and reads as a visit to `paypal.com`. The authority is
      * split the way [restingUnmarked] splits it (after `scheme://`, up
-     * to the first `/`, `?` or `#`, or `\` for a special scheme or the
-     * bare-name form).
+     * to the first `/`, `?` or `#`, or `\` for a special scheme or a
+     * bare form that is not an ENS name).
      *
      * For such a label that doesn't [fits], the shortening is done here,
      * around that `@`: first the part before it keeps a shorter and
@@ -331,7 +350,8 @@ object AddressLabel {
      * splits a display URL: after a leading `scheme://` (a scheme being
      * a letter then letters, digits, `+`, `-`, `.`), else from the
      * start (the bare-name form); up to the first `/`, `?` or `#`, or
-     * `\` when the scheme is special or there is none.
+     * `\` when the scheme is special, or there is none and the label is
+     * not an ENS name ([bareBackslashSeparates]).
      */
     private fun authorityRange(label: String): Pair<Int, Int> {
         val sep = label.indexOf("://")
@@ -339,7 +359,8 @@ object AddressLabel {
         val validScheme = scheme != null && scheme[0].isLetter() &&
             scheme.all { it.isLetterOrDigit() || it == '+' || it == '-' || it == '.' }
         val start = if (validScheme) sep + 3 else 0
-        val backslashSeparates = !validScheme || scheme!!.lowercase() in SPECIAL_SCHEMES
+        val backslashSeparates =
+            if (validScheme) scheme!!.lowercase() in SPECIAL_SCHEMES else bareBackslashSeparates(label)
         return start to start + authorityOf(label.substring(start), backslashSeparates).length
     }
 
