@@ -155,32 +155,60 @@ internal fun pageConnectionFor(url: String, errorPage: Boolean, protocol: Protoc
 }
 
 /**
- * The external IPFS gateway (#125) the page on screen is fetched
- * through — [externalIpfsBase] as Settings has it (`https://ipfs.io`) —
- * or null where this device's node serves it, or the page isn't
- * IPFS content. Such a gateway is one server whose answers aren't
- * checked against the CID, so Page info must not call the page
- * peer-to-peer, and a name's shield only covers which CID the name
- * points to (#479).
- *
- * The current setting, not the one the document loaded under: a page
- * loaded through a gateway is reloaded when the gateway is switched off
- * ([UnverifiedOrigins]), and one that loaded from this device's node
- * fetches everything after a switch to a gateway from that gateway.
+ * How an external IPFS gateway (#125) figures in the IPFS page on
+ * screen, for Page info (#479). Such a gateway is one server whose
+ * answers aren't checked against the CID.
  */
-internal fun unverifiedIpfsGatewayFor(
+internal sealed interface IpfsGatewayUse {
+    val gateway: String
+
+    /**
+     * The document came through [gateway] (or may have: its source isn't
+     * known and [gateway] is the one set now), so Page info must not
+     * call the page peer-to-peer, and a name's shield only covers which
+     * CID the name points to.
+     */
+    data class Document(override val gateway: String) : IpfsGatewayUse
+
+    /**
+     * The document came from this device's node, which checked it, but
+     * [gateway] has been set since: what the page loads from now on
+     * comes through it unchecked.
+     */
+    data class SinceLoaded(override val gateway: String) : IpfsGatewayUse
+}
+
+/**
+ * [IpfsGatewayUse] for the page on screen, or null where no external
+ * gateway is involved, or the page isn't IPFS content.
+ *
+ * [source] is where the document was fetched from
+ * ([TabDocuments.committedSource]), not the current setting: switching
+ * to a gateway doesn't reload a page this device's node served. Only
+ * where that isn't known (a page a service worker answered) does the
+ * current setting, [externalIpfsBase] (`https://ipfs.io`, or `""`),
+ * stand in for it, on the cautious side.
+ */
+internal fun ipfsGatewayUseFor(
     connection: PageConnection?,
     url: String,
     externalIpfsBase: String,
-): String? {
-    if (externalIpfsBase.isEmpty()) return null
+    source: DocumentSource?,
+): IpfsGatewayUse? {
     val ipfs = when (connection) {
         PageConnection.Ipfs -> true
         // A raw virtual origin: IPFS when its root is a CID or IPNS name.
         PageConnection.Dweb -> servedFromIpfs(VirtualOrigin.parseHostOfUrl(url.trim()))
         else -> false
     }
-    return externalIpfsBase.takeIf { ipfs }
+    if (!ipfs) return null
+    source?.ipfsGateway?.let { return IpfsGatewayUse.Document(it) }
+    if (externalIpfsBase.isEmpty()) return null
+    return if (source == null) {
+        IpfsGatewayUse.Document(externalIpfsBase)
+    } else {
+        IpfsGatewayUse.SinceLoaded(externalIpfsBase)
+    }
 }
 
 /**
@@ -760,11 +788,11 @@ internal fun PageInfoSheet(
      */
     siteDataGateway: String? = null,
     /**
-     * The external IPFS gateway the page came through
-     * ([unverifiedIpfsGatewayFor]), or null: said in place of
-     * "peer-to-peer", and after the name's trust (#479).
+     * How an external IPFS gateway figures in the page ([ipfsGatewayUseFor]),
+     * or null: said in place of "peer-to-peer", and, where the document
+     * itself came through it, after the name's trust (#479).
      */
-    ipfsGateway: String? = null,
+    ipfsGateway: IpfsGatewayUse? = null,
     onDeleteSiteData: () -> Unit,
     onReload: () -> Unit,
     onDismiss: () -> Unit,
@@ -801,9 +829,9 @@ internal fun PageInfoSheet(
                         title = nameTrust.tier.title,
                         // The shield covers name → CID only; through a
                         // gateway, the page itself isn't checked (#479).
-                        body = if (ipfsGateway != null) {
+                        body = if (ipfsGateway is IpfsGatewayUse.Document) {
                             nameTrust.summary + " " +
-                                stringResource(R.string.page_info_name_gateway_note, ipfsGateway)
+                                stringResource(R.string.page_info_name_gateway_note, ipfsGateway.gateway)
                         } else {
                             nameTrust.summary
                         },
@@ -818,6 +846,7 @@ internal fun PageInfoSheet(
                 Section(stringResource(R.string.page_info_section_connection)) {
                     if (ipfsGateway != null) {
                         // One server, not the network, and not checked (#479).
+                        val document = ipfsGateway is IpfsGatewayUse.Document
                         InfoRow(
                             icon = {
                                 Icon(
@@ -826,8 +855,13 @@ internal fun PageInfoSheet(
                                     tint = TrustTier.Unverified.color,
                                 )
                             },
-                            title = stringResource(R.string.page_info_ipfs_gateway_title),
-                            body = stringResource(R.string.page_info_ipfs_gateway_body, ipfsGateway),
+                            title = stringResource(
+                                if (document) R.string.page_info_ipfs_gateway_title else R.string.page_info_dweb_ipfs_title,
+                            ),
+                            body = stringResource(
+                                if (document) R.string.page_info_ipfs_gateway_body else R.string.page_info_ipfs_gateway_since_body,
+                                ipfsGateway.gateway,
+                            ),
                         )
                     } else {
                         InfoRow(
