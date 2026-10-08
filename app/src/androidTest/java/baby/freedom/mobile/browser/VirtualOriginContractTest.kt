@@ -53,7 +53,7 @@ class VirtualOriginContractTest {
         harness.setUp()
         KnownEnsNames.clear()
         Gateways.resetEnsLookupState()
-        Gateways.ensLookup = { name ->
+        Gateways.ensLookup = { name, _ ->
             ensLookups.incrementAndGet()
             val ref = testdappContent
             if (rpcDown) {
@@ -337,9 +337,9 @@ class VirtualOriginContractTest {
         testdappContent = FixtureGateway.REF_B
         val real = Gateways.ensLookup
         val answered = java.util.concurrent.CountDownLatch(1)
-        Gateways.ensLookup = { name ->
+        Gateways.ensLookup = { name, private ->
             Thread.sleep(2_000)
-            real(name).also { answered.countDown() }
+            real(name, private).also { answered.countDown() }
         }
         try {
             harness.js("location.href = 'index.html?next=1'")
@@ -382,7 +382,7 @@ class VirtualOriginContractTest {
         // minute of timeouts before serving the last answer.
         val release = java.util.concurrent.CountDownLatch(1)
         val real = Gateways.ensLookup
-        Gateways.ensLookup = { name -> release.await(); real(name) }
+        Gateways.ensLookup = { name, private -> release.await(); real(name, private) }
         try {
             val t = System.currentTimeMillis()
             harness.goBack(timeoutSeconds = 20)

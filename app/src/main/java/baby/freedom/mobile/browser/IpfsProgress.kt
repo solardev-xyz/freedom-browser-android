@@ -516,8 +516,14 @@ internal class GatewayWork(
  * alone — it runs in the current page, it isn't a navigation.
  *
  * Everything else — Swarm, the web, the error page, home — is not IPFS.
+ * A name is looked up in [names], the tab's session's registry (#464).
  */
-internal fun ipfsLoadFor(url: String, current: Boolean, pins: EnsDocumentPins? = null): Boolean {
+internal fun ipfsLoadFor(
+    url: String,
+    current: Boolean,
+    pins: EnsDocumentPins? = null,
+    names: EnsNameRegistry = KnownEnsNames,
+): Boolean {
     if (url.startsWith("javascript:")) return current
     if (IpfsGateway.isIpfsScheme(url)) return true
     val loadable = Gateways.toLoadable(url)
@@ -526,7 +532,7 @@ internal fun ipfsLoadFor(url: String, current: Boolean, pins: EnsDocumentPins? =
         // A committed document on a name is served from its tab's pin,
         // which a failed re-check can leave behind the registry (R4-F1).
         is ContentRoot.Ens -> return when (
-            pins?.uriFor(root.name)?.substringBefore("://") ?: KnownEnsNames.protocolFor(root.name)
+            pins?.uriFor(root.name)?.substringBefore("://") ?: names.protocolFor(root.name)
         ) {
             "ipfs", "ipns" -> true
             else -> false

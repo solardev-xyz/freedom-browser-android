@@ -388,7 +388,7 @@ internal fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
         // contenthash resolved to — recorded by the submit flow before
         // any ENS navigation reaches the WebView.
         val name = EnsInput.parse(url)?.name ?: return SWARM_BADGE
-        return when (KnownEnsNames.protocolFor(name)) {
+        return when (KnownEnsNames.of(state.private).protocolFor(name)) {
             "ipfs", "ipns" -> IPFS_BADGE
             else -> SWARM_BADGE
         }
@@ -1424,9 +1424,13 @@ fun BrowserScreen(
                 )
             }
 
+            // A private tab's names stay in its own session (#464):
+            // read before the lookup, so a session that ends meanwhile
+            // doesn't get the answer recorded in the next one.
+            val names = KnownEnsNames.of(target.private)
             val ensProbe = scope.launch {
                 try {
-                    val result = ensResolver.resolveContenthash(name)
+                    val result = ensResolver.resolveContenthash(name, target.private)
                     // Everything below this line writes tab state —
                     // `loadUrl` alone cancels whatever probe the tab is
                     // waiting on now, which is how a cancelled probe
@@ -1492,7 +1496,7 @@ fun BrowserScreen(
                             // trust shield (#97). A `.tez` name's http(s)
                             // website is not content the name's origin
                             // serves, so it isn't recorded.
-                            if (!webRecord) KnownEnsNames.record(result.uri, name, result.trust)
+                            if (!webRecord) names.record(result.uri, name, result.trust)
                             if (webRecord) {
                                 // A `.tez` website record on the ordinary
                                 // web: navigate there directly, as desktop

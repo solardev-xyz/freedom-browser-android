@@ -342,6 +342,28 @@ class TezosDomainsResolverTest {
     private val stuckTime = "2026-09-27T17:37:37Z"
 
     @Test
+    fun `a private lookup keeps to the private session's cache`() = runBlocking {
+        val http = rpc(record("web:content_url" to "ipfs://bafyexample"))
+        val resolver = TezosDomainsResolver(threeEndpoints, http) { clock }
+        fun reads() = http.calls.count { it.contains("/big_maps/1264/") }
+
+        assertTrue(resolver.resolve("secret.tez", private = true) is EnsResult.Ok)
+        val first = reads()
+        resolver.resolve("secret.tez", private = true)
+        assertEquals("the private session reuses its answer", first, reads())
+
+        // A normal tab isn't answered from it (#464)…
+        resolver.resolve("secret.tez")
+        val normal = reads()
+        assertTrue("a normal tab asks itself", normal > first)
+
+        // …and the next private session starts empty.
+        resolver.privateSessionEnded()
+        resolver.resolve("secret.tez", private = true)
+        assertTrue("asked again after the session ended", reads() > normal)
+    }
+
+    @Test
     fun `an answer cached while the clock ran ahead is asked again once it's set right`() = runBlocking {
         val http = rpc(record("web:content_url" to "ipfs://bafyexample"))
         var now = clock + 6 * 3_600_000L

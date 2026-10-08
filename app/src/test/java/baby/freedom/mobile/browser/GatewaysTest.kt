@@ -212,7 +212,7 @@ class GatewaysTest {
 
     private fun withLookup(answer: (String) -> EnsResult, block: () -> Unit) {
         val real = Gateways.ensLookup
-        Gateways.ensLookup = answer
+        Gateways.ensLookup = { name, _ -> answer(name) }
         Gateways.resetEnsLookupState()
         try {
             block()
@@ -220,6 +220,85 @@ class GatewaysTest {
             Gateways.ensLookup = real
             Gateways.resetEnsLookupState()
             KnownEnsNames.clear()
+        }
+    }
+
+    @Test
+    fun `a private tab's re-check keeps the name to its own session`() {
+        val asked = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Boolean>>())
+        withLookup({ error("replaced below") }) {
+            Gateways.ensLookup = { name, private ->
+                asked += name to private
+                EnsResult.Ok(name, "bzz", "bzz://$ref64", ref64, EnsTrust.ASSUMED)
+            }
+            try {
+                assertNull(Gateways.reverifyEnsDocument("secret.eth", EnsDocumentPins(), private = true))
+                assertEquals(listOf("secret.eth" to true), asked.toList())
+                assertEquals("bzz://$ref64", KnownEnsNames.of(private = true).uriFor("secret.eth"))
+                // Nothing a normal tab reads: not the name, not its hash.
+                assertNull(KnownEnsNames.uriFor("secret.eth"))
+                assertNull(KnownEnsNames.nameFor(ref64))
+                assertEquals("bzz://$ref64/", DisplayUrl.forActualUrl("bzz://$ref64/", null))
+                assertEquals(
+                    "bzz://secret.eth/",
+                    DisplayUrl.forActualUrl("bzz://$ref64/", null, names = KnownEnsNames.of(private = true)),
+                )
+                assertNull(nameTrustFor("secret.eth"))
+
+                // A normal tab's request for the name looks it up itself.
+                assertEquals(
+                    "http://127.0.0.1:1633/bzz/$ref64/p",
+                    Gateways.gatewayUrlFor(ContentRoot.Ens("secret.eth"), "/p"),
+                )
+                assertEquals("secret.eth" to false, asked.last())
+            } finally {
+                Gateways.privateSessionEnded()
+            }
+            assertNull(KnownEnsNames.of(private = true).uriFor("secret.eth"))
+        }
+    }
+
+    @Test
+    fun `a private request resolves in the private session only`() {
+        val asked = java.util.Collections.synchronizedList(mutableListOf<Boolean>())
+        withLookup({ error("replaced below") }) {
+            Gateways.ensLookup = { name, private ->
+                asked += private
+                EnsResult.Ok(name, "bzz", "bzz://$ref64", ref64, EnsTrust.ASSUMED)
+            }
+            try {
+                assertEquals(
+                    "http://127.0.0.1:1633/bzz/$ref64/p",
+                    Gateways.gatewayUrlFor(ContentRoot.Ens("secret.eth"), "/p", private = true),
+                )
+                assertEquals(listOf(true), asked.toList())
+                assertEquals("bzz://$ref64", KnownEnsNames.of(private = true).uriFor("secret.eth"))
+                assertNull(KnownEnsNames.uriFor("secret.eth"))
+            } finally {
+                Gateways.privateSessionEnded()
+            }
+        }
+    }
+
+    @Test
+    fun `a private re-check still running when the session ends records nothing in the next one`() {
+        val release = java.util.concurrent.CountDownLatch(1)
+        val started = java.util.concurrent.CountDownLatch(1)
+        withLookup({ name ->
+            started.countDown()
+            release.await()
+            EnsResult.Ok(name, "bzz", "bzz://$ref64", ref64, EnsTrust.ASSUMED)
+        }) {
+            var code: String? = "unset"
+            val check = Thread { code = Gateways.reverifyEnsDocument("late.eth", EnsDocumentPins(), private = true) }
+            check.start()
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            Gateways.privateSessionEnded()
+            release.countDown()
+            check.join(5_000)
+            assertNull(code)
+            assertNull(KnownEnsNames.of(private = true).uriFor("late.eth"))
+            assertNull(KnownEnsNames.uriFor("late.eth"))
         }
     }
 
@@ -814,7 +893,7 @@ class GatewaysTest {
 
                 // So the next document for new.eth still skips the wait.
                 val stall = java.util.concurrent.CountDownLatch(1)
-                Gateways.ensLookup = { name ->
+                Gateways.ensLookup = { name, _ ->
                     stall.await()
                     EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true)
                 }

@@ -167,12 +167,14 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
  * the recorded check of the name its address shows ([displayUrl]), or
  * `null` for an [ErrorPage] or a document the interceptor refused
  * ([NameRefusalSlot]) — neither was served from the name's answer.
+ * [names]: the tab's session's registry, a private tab's own (#464).
  */
 internal fun committedNameTrust(
     url: String?,
     displayUrl: String,
     refusal: NameRefusalSlot,
     pins: EnsDocumentPins? = null,
+    names: EnsNameRegistry = KnownEnsNames,
 ): NameTrust? {
     if (url == null || ErrorPage.isErrorPage(url) || refusal.isRefused(url)) return null
     // A document the tab's re-check served is described by the answer
@@ -184,10 +186,10 @@ internal fun committedNameTrust(
         // different root (R4-F1): the fallback is content the name has
         // already been seen leaving, the same as a raw load of a stale
         // hash below, so it gets no shield either.
-        if (!KnownEnsNames.isCurrentRoot(name, answer)) return null
+        if (!names.isCurrentRoot(name, answer)) return null
         return trust?.let { NameTrust(name, it, answer) }
     }
-    val trust = nameTrustFor(displayUrl) ?: return null
+    val trust = nameTrustFor(displayUrl, names) ?: return null
     // A raw `bzz://<hash>` load shown as the name (name preservation)
     // is the name's page only while the name still resolves to that
     // hash (R1-F2): the name's trust says nothing about content it
@@ -196,7 +198,7 @@ internal fun committedNameTrust(
     // current answer, as before.
     val loaded = Gateways.toDisplay(url)
     val raw = CONTENT_ROOT_SCHEMES.any { loaded.startsWith(it) }
-    if (raw && !KnownEnsNames.isCurrentRoot(trust.name, loaded)) return null
+    if (raw && !names.isCurrentRoot(trust.name, loaded)) return null
     return trust
 }
 
@@ -3185,7 +3187,7 @@ private fun buildRefreshableWebView(
                 // …and IPFS or not by what actually committed — a link,
                 // back/forward, or a redirect can land somewhere the
                 // submit that started this load didn't name (#94).
-                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad, ensPins)
+                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad, ensPins, KnownEnsNames.of(state.private))
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
@@ -3269,7 +3271,7 @@ private fun buildRefreshableWebView(
                 // answer, taken now — the interceptor recorded it before
                 // handing the document over. An error page or a name
                 // refusal was served from no answer, so it has none.
-                state.nameTrust = committedNameTrust(url, state.url, nameRefusal, ensPins)
+                state.nameTrust = committedNameTrust(url, state.url, nameRefusal, ensPins, KnownEnsNames.of(state.private))
                 // Refresh navigation flags here (as well as in
                 // onPageFinished) so the system-back hardware button
                 // works the instant a new page starts loading. If we
@@ -6321,7 +6323,7 @@ private fun interceptVirtualRequestFor(
         val asserted = assertedProtocol(root.name)
         var web: EnsResult.Ok? = null
         Gateways.reverifyEnsDocument(
-            root.name, ensPins, page, asserted, onWebRecord = { web = it },
+            root.name, ensPins, page, asserted, private = private, onWebRecord = { web = it },
         )?.let { code ->
             if (req.isForMainFrame) onMainFrameRoot(null)
             web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
@@ -6332,7 +6334,7 @@ private fun interceptVirtualRequestFor(
     // fetch uses: a name's is the answer just pinned for this navigation
     // — which a failed re-check can hold on an older answer than the
     // session registry's (R5-F1).
-    if (req.isForMainFrame) onMainFrameRoot(Gateways.servedRootFor(root, page = page))
+    if (req.isForMainFrame) onMainFrameRoot(Gateways.servedRootFor(root, page = page, private = private))
 
     // At a cold start the external endpoint settings (#125) are still
     // being read: a restored tab must not reach the embedded gateway
@@ -6343,7 +6345,7 @@ private fun interceptVirtualRequestFor(
     // deliberate settings change, so more than one retry is a bound,
     // not a path.
     repeat(GATEWAY_SWITCH_RETRIES) {
-        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
+        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page, private = private)
             ?: return syntheticResponse(
                 502, "Bad Gateway",
                 "No local gateway can serve this content root " +
@@ -6844,16 +6846,23 @@ internal fun displayFor(
     actualUrl: String,
     state: BrowserState,
     pins: EnsDocumentPins? = null,
-): String = DisplayUrl.forActualUrl(actualUrl, state.override, committedProtocolFor(pins))
+): String {
+    val names = KnownEnsNames.of(state.private)
+    return DisplayUrl.forActualUrl(actualUrl, state.override, committedProtocolFor(pins, names), names)
+}
 
 /**
  * The transport a name is shown under on the page on screen: the one
  * its document was served from ([pins], the tab's committed page), which
  * a failed re-check can hold on an older answer than the session's
- * (R3-F1) — else the session's current answer.
+ * (R3-F1) — else the session's current answer, from [names] (a
+ * private tab's own registry, #464).
  */
-internal fun committedProtocolFor(pins: EnsDocumentPins?): (String) -> String? = { name ->
-    pins?.uriFor(name)?.let(KnownEnsNames::protocolOf) ?: KnownEnsNames.protocolFor(name)
+internal fun committedProtocolFor(
+    pins: EnsDocumentPins?,
+    names: EnsNameRegistry = KnownEnsNames,
+): (String) -> String? = { name ->
+    pins?.uriFor(name)?.let(KnownEnsNames::protocolOf) ?: names.protocolFor(name)
 }
 
 /**

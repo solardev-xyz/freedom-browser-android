@@ -572,6 +572,16 @@ class EnsResolver internal constructor(
         val cache = ConcurrentHashMap<String, Cached>()
 
         /**
+         * A private session's answers (#464), kept apart from [cache] so
+         * a name a private tab looked up isn't answered instantly — a
+         * timing tell — in a normal tab, and replaced when the session
+         * ends ([privateSessionEnded]). A private lookup still running
+         * then finishes into the map it started with.
+         */
+        @Volatile
+        var privateCache = ConcurrentHashMap<String, Cached>()
+
+        /**
          * When each endpoint last failed a one-server lookup. One that
          * failed within [FAILED_ENDPOINT_COOLDOWN_MS] is tried after the
          * others, so an outage costs one timeout rather than one per
@@ -588,6 +598,15 @@ class EnsResolver internal constructor(
 
     @Volatile
     private var epoch: Epoch? = null
+
+    /**
+     * The last private tab has closed (#464): forget every answer its
+     * lookups ([resolveContenthash] with `private`) cached.
+     */
+    fun privateSessionEnded() {
+        epoch?.privateCache = ConcurrentHashMap()
+        tezos.privateSessionEnded()
+    }
 
     private fun epochFor(config: Settings): Epoch = synchronized(this) {
         epoch?.takeIf { it.settings == config } ?: Epoch(config).also { epoch = it }
@@ -613,8 +632,8 @@ class EnsResolver internal constructor(
      * on — and a probe the user has already superseded must do none of
      * that (#51).
      */
-    suspend fun resolveContenthash(rawName: String): EnsResult {
-        val result = resolve(rawName, Record.Contenthash, fresh = false)
+    suspend fun resolveContenthash(rawName: String, private: Boolean = false): EnsResult {
+        val result = resolve(rawName, Record.Contenthash, fresh = false, private = private)
         // Not every cancellation arrives as a `CancellationException`:
         // tearing down the RPC in flight can surface as an ordinary
         // `IOException`, which the retry loop maps to a PROVIDER_ERROR
@@ -678,7 +697,13 @@ class EnsResolver internal constructor(
     /** An answer, and whether a quorum of servers stands behind it. */
     private class Verdict(val result: EnsResult, val verified: Boolean)
 
-    private suspend fun resolve(rawName: String, record: Record, fresh: Boolean): EnsResult {
+    /**
+     * [private]: a private tab's lookup (#464) — read from and cached in
+     * the private session's own cache, and a light-client miss isn't
+     * remembered for the name, so nothing it asked about shows in a
+     * normal tab's lookups.
+     */
+    private suspend fun resolve(rawName: String, record: Record, fresh: Boolean, private: Boolean = false): EnsResult {
         val trimmed = rawName.trim()
         if (trimmed.isEmpty()) {
             return EnsResult.Error(name = "", reason = "INVALID_NAME", error = Strings.get(R.string.names_error_empty_name))
@@ -704,14 +729,14 @@ class EnsResolver internal constructor(
             }
         }
         // `.tez` isn't Ethereum: its own resolver, quorum and TTL cache.
-        if (system == NameSystem.TEZOS) return tezos.resolve(normalized)
+        if (system == NameSystem.TEZOS) return tezos.resolve(normalized, private)
 
         val config = settings()
         // Answers from endpoints the user has since dropped (or got
         // with CCIP-Read on) must not outlive the change by the cache
         // TTL: a new configuration starts a new, empty epoch.
         val epoch = epochFor(config)
-        val cache = epoch.cache
+        val cache = if (private) epoch.privateCache else epoch.cache
         // Read afresh per lookup (#101), outside the settings: see the class KDoc.
         val generation = lightClient?.readyGeneration()
         if (config.endpoints.isEmpty() && generation == null) {
@@ -782,6 +807,7 @@ class EnsResolver internal constructor(
             resolveByLightClient(
                 generation!!, normalized, target, callData, contract, record, config.ccipRead,
                 capped = config.endpoints.isNotEmpty(),
+                private = private,
             )
                 ?.let { verdict ->
                     val ttl = ttlFor(verdict)
@@ -939,6 +965,7 @@ class EnsResolver internal constructor(
         record: Record,
         ccipRead: Boolean,
         capped: Boolean,
+        private: Boolean = false,
     ): Verdict? {
         val client = lightClient ?: return null
         val startedAt = System.currentTimeMillis()
@@ -984,7 +1011,9 @@ class EnsResolver internal constructor(
             // always finds it (see [settleLightClientMisses]).
             // Keyed by the record too: a Send lookup's miss of a name's
             // `addr` says nothing of its `contenthash` a page needs (#277).
-            if (!momentary) rememberLightClientMiss(record.cacheKey(name), awaitingProbe = if (suspect) generation else null)
+            // A private lookup's miss isn't kept (#464): it would say in a
+            // normal tab which name a private one asked about.
+            if (!momentary && !private) rememberLightClientMiss(record.cacheKey(name), awaitingProbe = if (suspect) generation else null)
             if (suspect) probeLightClient(client, generation)
             return null
         }

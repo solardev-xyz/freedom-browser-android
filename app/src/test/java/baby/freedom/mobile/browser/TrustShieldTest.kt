@@ -306,7 +306,7 @@ class TrustShieldTest {
         Gateways.resetEnsLookupState()
         try {
             KnownEnsNames.record("bzz://$REF", "name.eth", unverified)
-            Gateways.ensLookup = { EnsResult.Ok(it, "bzz", "bzz://$REF", REF, unverified) }
+            Gateways.ensLookup = { name, _ -> EnsResult.Ok(name, "bzz", "bzz://$REF", REF, unverified) }
             val first = tabA.beginNavigation("$origin/")
             assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, first))
             tabA.documentStarted("$origin/")
@@ -314,7 +314,7 @@ class TrustShieldTest {
             KnownEnsNames.record("ipfs://$CID", "name.eth", verified)
 
             Gateways.resetEnsLookupState()
-            Gateways.ensLookup = { EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }
+            Gateways.ensLookup = { name, _ -> EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true) }
             val next = tabA.beginNavigation("$origin/page2")
             assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, next))
             tabA.documentStarted("$origin/page2")
@@ -347,7 +347,7 @@ class TrustShieldTest {
         Gateways.resetEnsLookupState()
         try {
             KnownEnsNames.record("bzz://$REF", "name.eth", verified)
-            Gateways.ensLookup = { EnsResult.Ok(it, "bzz", "bzz://$REF", REF, verified) }
+            Gateways.ensLookup = { name, _ -> EnsResult.Ok(name, "bzz", "bzz://$REF", REF, verified) }
             val first = tabA.beginNavigation("$origin/")
             assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, first))
             tabA.documentStarted("$origin/")
@@ -360,7 +360,7 @@ class TrustShieldTest {
             KnownEnsNames.record("ipfs://$CID", "name.eth", verified)
 
             Gateways.resetEnsLookupState()
-            Gateways.ensLookup = { EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }
+            Gateways.ensLookup = { name, _ -> EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true) }
             val next = tabA.beginNavigation("$origin/page2")
             assertNull(Gateways.reverifyEnsDocument("name.eth", tabA, next))
             tabA.documentStarted("$origin/page2")
@@ -394,14 +394,14 @@ class TrustShieldTest {
             )) {
                 val tab = EnsDocumentPins()
                 KnownEnsNames.record(pinned, "name.eth", verified)
-                Gateways.ensLookup = { EnsResult.Ok(it, pinned.substringBefore("://"), pinned, REF, verified) }
+                Gateways.ensLookup = { name, _ -> EnsResult.Ok(name, pinned.substringBefore("://"), pinned, REF, verified) }
                 val first = tab.beginNavigation("https://x/")
                 assertNull(Gateways.reverifyEnsDocument("name.eth", tab, first))
                 tab.documentStarted("https://x/")
 
                 KnownEnsNames.record(registry, "name.eth", verified)
                 Gateways.resetEnsLookupState()
-                Gateways.ensLookup = { EnsResult.Error(it, "PROVIDER_ERROR", "down", retryable = true) }
+                Gateways.ensLookup = { name, _ -> EnsResult.Error(name, "PROVIDER_ERROR", "down", retryable = true) }
                 val next = tab.beginNavigation("https://x/page2")
                 assertNull(Gateways.reverifyEnsDocument("name.eth", tab, next))
 
