@@ -2400,7 +2400,14 @@ private fun AddressField(
     // unmask an RLO the resting label just flagged (it read
     // `hte.paypal.com` in the open field) — and the field's own Copy /
     // Cut hand on what it shows ([BidiMarkingClipboard]).
-    val shownAddress = state.addressBarText
+    //
+    // An address past 8 KiB is seeded shortened, with an ellipsis: laid out
+    // whole, a page's 2 MB address is wider than Compose can measure and
+    // crashed the app (#488). Go on the unedited field still submits the
+    // whole address (see [AddressFieldText]).
+    val shownAddress = remember(state.addressBarText) {
+        AddressFieldText.shown(state.addressBarText)
+    }
     var fieldValue by remember(state.id) {
         mutableStateOf(
             TextFieldValue(
@@ -2465,8 +2472,10 @@ private fun AddressField(
     LaunchedEffect(fill) {
         val f = fill ?: return@LaunchedEffect
         if (addressFocused) {
-            fieldValue = TextFieldValue(text = f.text, selection = TextRange(f.text.length))
-            onAddressQueryChanged(f.text)
+            fieldValue = AddressFieldText.capped(
+                TextFieldValue(text = f.text, selection = TextRange(f.text.length)),
+            )
+            onAddressQueryChanged(fieldValue.text)
             onAddressEditedChanged(true)
         }
         onFillHandled()
@@ -2561,7 +2570,9 @@ private fun AddressField(
             NoSuggestionsTextInput {
                 BasicTextField(
                     value = fieldValue,
-                    onValueChange = { newValue ->
+                    onValueChange = { edit ->
+                        // A paste is held to the same bound as the seed.
+                        val newValue = AddressFieldText.capped(edit)
                         val textChanged = newValue.text != fieldValue.text
                         fieldValue = newValue
                         if (textChanged) {
@@ -2598,7 +2609,9 @@ private fun AddressField(
                         imeAction = ImeAction.Go,
                     ),
                     keyboardActions = KeyboardActions(
-                        onGo = { onSubmit(fieldValue.text) },
+                        onGo = {
+                            onSubmit(AddressFieldText.submitted(fieldValue.text, state.addressBarText))
+                        },
                     ),
                     decorationBox = { innerTextField ->
                         // Protocol badge: the pill grows a Swarm hex mark or
