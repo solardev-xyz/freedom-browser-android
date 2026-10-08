@@ -1,0 +1,8 @@
+# The workflows pin every action to a full commit SHA (#469); Dependabot
+# proposes the bumps, with the new SHA and its tag in the comment.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

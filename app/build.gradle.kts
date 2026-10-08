@@ -42,11 +42,13 @@ android {
         buildConfigField("String", "ADBLOCK_SIGNER", addressProperty("freedom.adblockSigner"))
     }
 
-    // Release signing comes from the environment so the same config
-    // serves both CI (.github/workflows/release.yml, secrets-fed) and a
-    // local machine with the keystore checked out. Without the env vars
-    // release builds fall back to the debug key — installable for local
-    // testing, never for publishing.
+    // Release signing comes from the environment, for a local machine
+    // with the keystore checked out. Without the env vars release builds
+    // fall back to the debug key — installable for local testing, never
+    // for publishing. CI sets FREEDOM_UNSIGNED_RELEASE instead and builds
+    // unsigned APKs: release.yml signs them with apksigner in a job of
+    // its own, so the keystore never shares a job with Gradle, its
+    // plugins and dependencies, or a third-party action (#469).
     signingConfigs {
         create("release") {
             val ksFile = System.getenv("FREEDOM_KEYSTORE_FILE")
@@ -83,7 +85,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = if (System.getenv("FREEDOM_KEYSTORE_FILE") != null) {
+            signingConfig = if (System.getenv("FREEDOM_UNSIGNED_RELEASE") != null) {
+                null
+            } else if (System.getenv("FREEDOM_KEYSTORE_FILE") != null) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")

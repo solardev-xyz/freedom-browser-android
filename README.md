@@ -13,7 +13,7 @@ Download the latest APK from [GitHub Releases](https://github.com/solardev-xyz/f
 
 1. Bump `versionCode` + `versionName` in `app/build.gradle.kts` (and the version above).
 2. Tag and push: `git tag v0.x.y && git push origin v0.x.y`.
-3. [`release.yml`](.github/workflows/release.yml) builds `libfreedom_mobile_ffi.so` at the pinned `FFI_REF`, assembles signed per-ABI APKs (signing key lives in repo secrets), and publishes them with `SHA256SUMS`. When upgrading the embedded nodes, bump `FFI_REF` together with the vendored headers. The native libraries (`libfreedom_mobile_ffi.so`, `libc4.so`) come from its cache when nothing that shapes them changed since the last build (#309): about 8 min instead of about 40 (about 25 when they have to be built). The cache is filled from `main` (a push that bumps `FFI_REF`/`COLIBRI_REF` or touches a build script, plus a twice-weekly refresh), so a tag pushed right after such a bump builds them from source, one ABI per job. A dry run (Actions → release → Run workflow) builds everything without publishing.
+3. [`release.yml`](.github/workflows/release.yml) builds `libfreedom_mobile_ffi.so` at the pinned `FFI_REF`, assembles unsigned per-ABI APKs, signs them with `apksigner` in a job of its own (the signing key lives in repo secrets and never shares a job with Gradle or a third-party action, #469), and publishes them with `SHA256SUMS`. When upgrading the embedded nodes, bump `FFI_REF` together with the vendored headers. The native libraries (`libfreedom_mobile_ffi.so`, `libc4.so`) come from its cache when nothing that shapes them changed since the last build (#309): about 8 min instead of about 40 (about 25 when they have to be built). The cache is filled from `main` (a push that bumps `FFI_REF`/`COLIBRI_REF` or touches a build script, plus a twice-weekly refresh), so a tag pushed right after such a bump builds them from source, one ABI per job. A dry run (Actions → release → Run workflow) builds everything without publishing.
 
 ## Requirements
 
@@ -245,6 +245,16 @@ Three Gradle modules:
 ./gradlew clean                        # remove every module's build/
 ./gradlew --stop                       # kill background Gradle daemons
 ```
+
+Gradle checks every dependency against [`gradle/verification-metadata.xml`](gradle/verification-metadata.xml) (#469). After adding or bumping one, regenerate it from an empty Gradle home, since a warm cache skips metadata files a clean CI runner fetches (needs both ABIs' native libraries, see below):
+
+```bash
+GRADLE_USER_HOME="$(mktemp -d)" ./gradlew --write-verification-metadata sha256 \
+  :app:assembleRelease :app:testDebugUnitTest :lint-checks:test :app:lintDebug \
+  :app:assembleDebug :app:assembleDebugAndroidTest help
+```
+
+and review the diff: every new entry is a checksum you're now trusting. Platform-specific artifacts (aapt2's `-osx`/`-windows` jars) are only fetched on that platform, so add their checksums by hand from Google's Maven repository when AGP changes.
 
 Reading the current APK's metadata:
 
