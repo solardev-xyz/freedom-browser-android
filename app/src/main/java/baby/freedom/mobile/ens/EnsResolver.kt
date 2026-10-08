@@ -465,6 +465,27 @@ class EnsResolver internal constructor(
         }
     }
 
+    /**
+     * Bumped by [privateSessionEnded]. A private lookup's light-client
+     * marks ([lightClientHeld], [lightClientSlowSites],
+     * [lightClientAnswered]) are kept under [siteKey]'s session-qualified
+     * key, not the bare site, so a private tab's names never make a
+     * normal tab's registration established or slow — a timing tell a
+     * normal page could read (#464) — and a lookup still running when
+     * the session ends marks a key no later session reads.
+     */
+    private val privateSession = java.util.concurrent.atomic.AtomicLong()
+
+    /** The key [name]'s light-client marks are kept under; see [privateSession]. */
+    private fun siteKey(name: String, private: Boolean): String {
+        val site = siteOf(name)
+        return if (private) "$PRIVATE_SITE_PREFIX${privateSession.get()}:$site" else site
+    }
+
+    /** Every site key with a slow or answered mark now; for tests. */
+    internal fun lightClientMarkedSites(): Set<String> =
+        synchronized(lightClientHeld) { lightClientSlowSites.keys + lightClientAnswered.keys }
+
     /** Whether [site] is a slow site now ([lightClientSlowSites]); for tests. */
     internal fun lightClientSlowSite(site: String): Boolean =
         synchronized(lightClientHeld) { slowSiteLocked(site, System.currentTimeMillis()) }
@@ -605,6 +626,11 @@ class EnsResolver internal constructor(
      */
     fun privateSessionEnded() {
         epoch?.privateCache = ConcurrentHashMap()
+        synchronized(lightClientHeld) {
+            privateSession.incrementAndGet()
+            lightClientSlowSites.keys.removeAll { it.startsWith(PRIVATE_SITE_PREFIX) }
+            lightClientAnswered.keys.removeAll { it.startsWith(PRIVATE_SITE_PREFIX) }
+        }
         tezos.privateSessionEnded()
     }
 
@@ -970,7 +996,7 @@ class EnsResolver internal constructor(
         val client = lightClient ?: return null
         val startedAt = System.currentTimeMillis()
         val budget = LightClientBudget(startedAt + lightClientDeadlineMs)
-        val read = io.async { lightClientRead(client, generation, name, target, callData, contract, record, ccipRead, budget, capped) }
+        val read = io.async { lightClientRead(client, generation, name, target, callData, contract, record, ccipRead, budget, capped, private) }
         var engineOwnsTheTime = true
         var gaveUp = false
         val outcome = try {
@@ -1134,8 +1160,10 @@ class EnsResolver internal constructor(
         ccipRead: Boolean,
         budget: LightClientBudget,
         capped: Boolean,
+        private: Boolean,
     ): Verdict {
-        val site = siteOf(name)
+        // A private lookup's marks stay in its own session (#464).
+        val site = siteKey(name, private)
         // Each call waits only for what's left of the lookup's budget, so
         // a read abandoned at the deadline doesn't hold a thread past it.
         fun call(to: String, data: ByteArray, pin: Long?): Pair<CallOutcome, Long?> {
@@ -1144,7 +1172,7 @@ class EnsResolver internal constructor(
             if (left <= 0) throw LightClientMiss("out of time", backOff = budget.engineOwnsTheTime())
             // The name's own site pays for its slow calls, not the light client.
             val slot = holdLightClientSlot(site, capped)
-                ?: throw LightClientMiss("$site has its share of light-client calls in the engine", momentary = true)
+                ?: throw LightClientMiss("${siteOf(name)} has its share of light-client calls in the engine", momentary = true)
             // A call that outlives the wait for it — still in the engine when
             // its own timeout came, or when the lookup gave up — marks its
             // site slow ([lightClientSlowSites]).
@@ -2629,6 +2657,9 @@ class EnsResolver internal constructor(
 
         /** Most slow sites remembered; the oldest go first. */
         private const val LIGHT_CLIENT_SLOW_SITES_MAX = 256
+
+        /** Starts a private session's site keys; no name holds a NUL. */
+        private const val PRIVATE_SITE_PREFIX = "\u0000private"
 
         /** Tries at a CCIP-Read name whose callback lands on a newer head than its first call. */
         private const val LIGHT_CLIENT_CCIP_ATTEMPTS = 3

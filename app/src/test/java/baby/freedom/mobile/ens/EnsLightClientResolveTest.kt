@@ -1446,6 +1446,46 @@ class EnsLightClientResolveTest {
     }
 
     @Test
+    fun `a private lookup's light-client marks stay in the private session`() {
+        // #464 R1-F1: a private tab's names must not make their
+        // registration established or slow for a normal tab (a timing
+        // tell), nor outlive the session.
+        val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "slow")) 1_000 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200)
+
+        val fast = runBlocking { r.resolveContenthash("secret.eth", private = true) }
+        require(fast is EnsResult.Ok && fast.trust.lightClient) { "got $fast" }
+        val slow = runBlocking { r.resolveContenthash("slow.secret.eth", private = true) }
+        require(slow is EnsResult.Ok) { "got $slow" }
+        // A late answer (the slow call returning) lands after the session ends.
+        r.privateSessionEnded()
+        client.awaitIdle(3_000)
+
+        assertFalse(r.lightClientSlowSite("secret.eth"))
+        assertTrue("marks left: ${r.lightClientMarkedSites()}", r.lightClientMarkedSites().none { "secret.eth" in it && !it.startsWith("\u0000") })
+        assertEquals(0, r.lightClientCallsHeld("secret.eth"))
+
+        // A normal lookup marks the bare site as before.
+        runBlocking { r.resolveContenthash("secret.eth") }
+        assertTrue(r.lightClientMarkedSites().contains("secret.eth"))
+    }
+
+    @Test
+    fun `ending the private session forgets its light-client marks`() {
+        val client = SlotClient(lightClientOk) { data -> if (hasLabel(data, "slow")) 1_000 else 20 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 200)
+        runBlocking { r.resolveContenthash("secret.eth", private = true) }
+        runBlocking { r.resolveContenthash("slow.secret.eth", private = true) }
+        client.awaitIdle(3_000)
+        assertTrue("the private session marked its own key", r.lightClientMarkedSites().isNotEmpty())
+        assertFalse(r.lightClientMarkedSites().contains("secret.eth"))
+        r.privateSessionEnded()
+        assertEquals(emptySet<String>(), r.lightClientMarkedSites())
+    }
+
+    @Test
     fun `slow names from several registrations share a few engine slots once they've outlived a lookup`() {
         // R1-F3: a page loads two slow names from each of four
         // registrations — established ones, each answered in time before
