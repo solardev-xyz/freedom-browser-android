@@ -83,7 +83,10 @@ object EnsNormalize {
      * A `%XX`-escaped name is read as its UTF-8 bytes first: that is how
      * [tezosDisplay] spells a lookalike (`p%D0%B0ypal.tez` is
      * `pаypal.tez`), so the shown form reloads, edits and copies as the
-     * same name. `%` is never part of a registrable label, so this can't
+     * same name. Only escapes of bytes 0x80 and above are read; an ASCII
+     * escape (`%2F`, `%25`) stays as written (#490 R3-M1), so no decoded
+     * name holds a `/`, `%` or control character it didn't already, and
+     * decoding twice gives what decoding once did. `%` is never part of a registrable label, so this can't
      * take a name from anyone. An ASCII `xn--` label is *not* mapped
      * (#490 R2-F1): the registry keys the literal ASCII name
      * (`xn--rh8hs4h.tez`) apart from its Unicode reading (`🌮🥷.tez`),
@@ -105,12 +108,16 @@ object EnsNormalize {
     }
 
     /**
-     * [name] with its `%XX` escapes read as UTF-8, or `null` if it has
-     * none, an escape is malformed, or the bytes aren't valid UTF-8.
+     * [name] with its `%XX` escapes of bytes 0x80 and above read as
+     * UTF-8, or `null` if it has none, an escape is malformed, or the
+     * bytes aren't valid UTF-8. An escape of an ASCII byte (`%2F`, `%25`,
+     * `%0A`) is left as written: [escaped] only ever escapes non-ASCII,
+     * so only those escapes are a shown form being read back.
      */
     private fun percentDecoded(name: String): String? {
         if ('%' !in name) return null
         val bytes = java.io.ByteArrayOutputStream(name.length)
+        var decodedAny = false
         var i = 0
         while (i < name.length) {
             val c = name[i]
@@ -119,7 +126,18 @@ object EnsNormalize {
                 val hi = Character.digit(name[i + 1], 16)
                 val lo = Character.digit(name[i + 2], 16)
                 if (hi < 0 || lo < 0) return null
-                bytes.write(hi * 16 + lo)
+                val b = hi * 16 + lo
+                if (b < 0x80) {
+                    // An ASCII escape stays as written (#490 R3-M1):
+                    // [escaped] never makes one, and decoding it would
+                    // put `/`, `%` or a control character into the name
+                    // (`paypal.com%2F.tez`, or `x%2561.tez` decoded again
+                    // wherever the name was already decoded once).
+                    for (k in 0..2) bytes.write(name[i + k].code)
+                } else {
+                    bytes.write(b)
+                    decodedAny = true
+                }
                 i += 3
             } else {
                 if (c.code >= 0x80) return null
@@ -127,6 +145,7 @@ object EnsNormalize {
                 i++
             }
         }
+        if (!decodedAny) return null
         return try {
             Charsets.UTF_8.newDecoder()
                 .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)

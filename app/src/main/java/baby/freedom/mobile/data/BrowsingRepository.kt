@@ -15,6 +15,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -344,9 +346,14 @@ class BrowsingRepository internal constructor(
      * overwrite a real site's icon with an internal page's blank one.
      */
     fun storeFavicon(pageUrl: String, data: ByteArray) {
-        val origin = FaviconOrigin.from(pageUrl) ?: return
         if (data.isEmpty()) return
         scope.launch {
+            // Keyed on the settled spelling, as history rows are
+            // (#490 R3-M3): a `café.tez` page shown `caf%C3%A9.tez`
+            // before warm-up must still file its icon under the name its
+            // history row carries. settledName may decode the ENSIP-15
+            // tables, so off the main thread.
+            val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl)) ?: return@launch
             db.favicons().upsert(
                 FaviconEntry(
                     origin = origin,
@@ -364,8 +371,13 @@ class BrowsingRepository internal constructor(
      * `HomeScreen.kt` for a Compose-side remember/decode pattern.
      */
     fun favicon(pageUrl: String): Flow<ByteArray?> {
-        val origin = FaviconOrigin.from(pageUrl) ?: return flowOf(null)
-        return db.favicons().get(origin)
+        // Settled like [storeFavicon]'s key (#490 R3-M3), so a page read
+        // by its shown spelling finds its icon either side of warm-up.
+        if (FaviconOrigin.from(pageUrl) == null) return flowOf(null)
+        return flow {
+            val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl))
+            if (origin == null) emit(null) else emitAll(db.favicons().get(origin))
+        }.flowOn(Dispatchers.IO)
     }
 
     fun clearFavicons() {

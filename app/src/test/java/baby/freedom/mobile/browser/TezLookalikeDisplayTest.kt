@@ -75,6 +75,32 @@ class TezLookalikeDisplayTest {
     }
 
     @Test
+    fun `an ascii escape is never decoded into a tez name`() {
+        // #490 R3-M1: only escapes of bytes 0x80+ are a shown form being
+        // read back. `%2F`, `%25`, `%0A` stay as written, so no decoded
+        // name gets a `/`, `%` or control character, and the name rests
+        // whole in the capsule rather than on `paypal.com`.
+        assertEquals("paypal.com%2f.tez", EnsNormalize.tezosForm("paypal.com%2F.tez"))
+        assertEquals("paypal.com%2f.tez", AddressLabel.resting("paypal.com%2F.tez"))
+        assertEquals("x%0a.tez", EnsNormalize.tezosForm("x%0A.tez"))
+        // `%25` is not decoded, so decoding twice gives what decoding
+        // once did: no `x%2561.tez` → `x%61.tez` → `xa.tez`.
+        assertEquals("x%2561.tez", EnsNormalize.tezosForm("x%2561.tez"))
+        assertEquals("x%61.tez", EnsNormalize.tezosForm("x%61.tez"))
+        assertEquals("x%61.tez", EnsInput.parse("x%61.tez")!!.name)
+        assertEquals("x%61.tez", AddressLabel.resting("x%61.tez"))
+        assertEquals("x%61.tez", DisplayUrl.settledName("x%61.tez"))
+        assertEquals(
+            ContentRoot.Ens("x%61.tez"),
+            VirtualOrigin.parseContentUrl("ens://x%2561.tez/")!!.first,
+        )
+        // Mixed with a real escape, the non-ASCII part is still read
+        // back and the ASCII escape kept: the shown form round-trips.
+        assertEquals("p\u0430y%2fpal.tez", EnsNormalize.tezosForm("p%D0%B0y%2Fpal.tez"))
+        assertEquals("p%D0%B0y%2Fpal.tez", EnsNormalize.tezosDisplay("p\u0430y%2Fpal.tez"))
+    }
+
+    @Test
     fun `an ascii xn-- tez name is its own name`() {
         // #490 R2-F1: Tezos Domains keys `xn--rh8hs4h.tez` (registered)
         // apart from `🌮🥷.tez`, and `xn--pypal-4ve.tez` apart from
