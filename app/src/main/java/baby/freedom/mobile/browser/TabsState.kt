@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.content.ComponentCallbacks2
 import android.os.Bundle
 import android.view.View
 import android.webkit.WebChromeClient
@@ -105,9 +106,13 @@ class TabsState(
         val title: String,
         val addressBarText: String,
         val override: BrowserState.Override?,
-        val thumbnail: ImageBitmap?,
+        // Dropped under memory pressure ([trimMemory], #460).
+        var thumbnail: ImageBitmap?,
         val webViewState: Bundle?,
         val loadStopped: Boolean = false,
+        // Closed before its WebView was built (#460): what it was to be
+        // built from, which it comes back with as it was.
+        val pendingRestore: BrowserState.PendingRestore? = null,
     )
 
     /**
@@ -708,6 +713,7 @@ class TabsState(
                 thumbnail = tab.thumbnail,
                 webViewState = saveWebViewState?.invoke(tab),
                 loadStopped = tab.loadAborted,
+                pendingRestore = tab.unbuiltRestore(),
             )
         }
         if (kept.isEmpty()) return null
@@ -807,13 +813,23 @@ class TabsState(
         // the blank entry, so the address goes back — and is
         // submitted again, unless the user had stopped that load
         // (the bar then showed it with Reload).
-        pendingRestore = BrowserState.PendingRestore.of(
+        pendingRestore = closed.pendingRestore ?: BrowserState.PendingRestore.of(
             url = closed.url,
             address = closed.addressBarText,
             loadStopped = closed.loadStopped,
             webViewState = closed.webViewState,
         )
     }
+
+    /**
+     * What [tab] is still to be built from, if it was restored and its
+     * WebView hasn't been built yet ([defersWebView], #460): its
+     * committed URL and Stop latch were never put back on the tab (they
+     * come from the WebView's load), so they're read from here. Not a
+     * tab whose renderer went away (#260), which had them when parked.
+     */
+    private fun BrowserState.unbuiltRestore(): BrowserState.PendingRestore? =
+        pendingRestore?.takeIf { rendererGone == null }
 
     /**
      * Nothing has happened to this tab list yet: the one regular tab it
@@ -942,12 +958,25 @@ class TabsState(
         val at = activeIndex.coerceIn(0, tabs.lastIndex)
         val candidates = tabs.withIndex().filter { !it.value.private }.mapNotNull { (index, tab) ->
             val (url, address) = tab.restorableAddress()
-            val saved = SavedTab(
-                title = tab.title.take(MAX_SAVED_TITLE),
-                address = address.ifBlank { url },
-                committed = url.isNotBlank(),
-                loadStopped = tab.loadAborted,
-            )
+            val unbuilt = tab.unbuiltRestore()
+            val saved = if (unbuilt != null) {
+                // Restored and not shown since (#460): saved as it was
+                // restored ([BrowserState.PendingRestore.of]).
+                SavedTab(
+                    title = tab.title.take(MAX_SAVED_TITLE),
+                    address = unbuilt.fallbackUrl,
+                    committed = unbuilt.fallbackUrl.isNotBlank() &&
+                        (unbuilt.resubmitUrl.isBlank() || unbuilt.overPage),
+                    loadStopped = !unbuilt.submit,
+                )
+            } else {
+                SavedTab(
+                    title = tab.title.take(MAX_SAVED_TITLE),
+                    address = address.ifBlank { url },
+                    committed = url.isNotBlank(),
+                    loadStopped = tab.loadAborted,
+                )
+            }
             if (saved.address.length > MAX_SAVED_ADDRESS) null else index to saved
         }
         var budget = MAX_SAVED_CHARS
@@ -1048,6 +1077,31 @@ class TabsState(
     }
 
     /**
+     * Whether [tab]'s WebView waits to be built (#460): a tab restored
+     * ([BrowserState.pendingRestore]: after the process was killed, an
+     * Activity relaunch, a reopened tab) that isn't on screen. Its page
+     * loads once it's shown, not all of them at once at a cold start.
+     * One handed a navigation in the meantime gets its WebView at once,
+     * so that navigation isn't left waiting with no WebView to take it.
+     */
+    fun defersWebView(tab: BrowserState): Boolean =
+        tab.pendingRestore != null && tab !== active &&
+            !(tab.navCounter > tab.handedNavCounter && tab.pendingUrl.isNotEmpty())
+
+    /**
+     * The system is short of memory ([android.content.ComponentCallbacks2]
+     * [level], #460): drop the tab switcher's snapshots, the open tabs'
+     * and the reopen stack's. The tab on screen is shot again when the
+     * switcher opens; the others show their placeholder until they are
+     * next on screen.
+     */
+    fun trimMemory(level: Int) {
+        if (!dropsThumbnails(level)) return
+        for (tab in tabs) tab.thumbnail = null
+        for (group in closedTabs) for (closed in group.tabs) closed.thumbnail = null
+    }
+
+    /**
      * Move the tab at [from] to [to] (the index it ends up at), keeping
      * the same tab active. Tabs map to their WebViews by id, so nothing
      * on the WebView side changes — only the order the switcher shows.
@@ -1075,6 +1129,20 @@ class TabsState(
         BrowserState(id = idSeq.incrementAndGet(), private = private)
 
     companion object {
+        /**
+         * Whether a [trimMemory] [level] calls for dropping thumbnails:
+         * the app running while memory is low, or in the background where
+         * it's next in line to be killed. Not merely the UI going out of
+         * sight (`TRIM_MEMORY_UI_HIDDEN`), which happens every time the
+         * user switches away, and would leave the switcher blank for
+         * nothing.
+         */
+        @Suppress("DEPRECATION") // The RUNNING_* levels: still sent before API 34.
+        fun dropsThumbnails(level: Int): Boolean =
+            level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+                level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+
         /**
          * How many closed tabs the reopen stack keeps, across all its
          * entries: oldest entries are dropped once it holds more. The
