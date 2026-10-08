@@ -290,8 +290,11 @@ class EthereumProvider(
          */
         suspend fun signMessage(account: WalletAccount, message: ByteArray): String
 
-        /** `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signMessage], on the phone or the Ledger. */
-        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String
+        /**
+         * `eth_signTypedData_v4` of [data], whose EIP-712 digest is [digest]: as [signMessage], on the phone or the Ledger.
+         * [ledgerHashes]: the hashes the approved sheet showed, which a Ledger may sign by instead (#239, #476).
+         */
+        suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray, ledgerHashes: LedgerTypedDataHashes? = null): String
     }
 
     /** The send flow ([baby.freedom.mobile.wallet.WalletSender]). */
@@ -966,7 +969,20 @@ class EthereumProvider(
             permit = withContext(compute) { TxDecode.permit(data, chain.id.takeIf { chainBound }) },
         )
         ask(ask0).let { if (it !is EthAnswer.Approved) return refused(it) }
-        return signed { wallet.signTypedData(account, data, digest) }
+        var hashesOnly: LedgerTypedDataHashes? = null
+        val reply = signed {
+            try {
+                wallet.signTypedData(account, data, digest, ledgerHashes)
+            } catch (e: LedgerException) {
+                // An Ethereum app too old to show it field by field signs only hashes the sheet didn't show (#476).
+                hashesOnly = e.hashesOnly?.takeIf { ledgerHashes == null } ?: throw e
+                ""
+            }
+        }
+        val hashes = hashesOnly ?: return reply
+        // Shown now, and asked again: the Ledger's screen is checked against them (#239).
+        ask(ask0.copy(ledgerHashes = hashes)).let { if (it !is EthAnswer.Approved) return refused(it) }
+        return signed { wallet.signTypedData(account, data, digest, hashes) }
     }
 
     private data class Parsed(val data: Eip712.TypedData, val digest: ByteArray, val shown: String, val ledgerHashes: LedgerTypedDataHashes?)

@@ -470,11 +470,16 @@ internal class LedgerEthApp(private val link: LedgerLink) {
     /**
      * Typed data shown field by field; on an Ethereum app too old for that
      * (INS 0x1A unknown: `0x6D00`), or data it can't be streamed as, the
-     * two hashes instead — as desktop falls back. The second case is known
-     * before signing ([LedgerApdus.blindHashes]), and the sheet says the
-     * Ledger will show only these hashes, and which (#239).
+     * two hashes instead — as desktop falls back — but only when they are
+     * [hashesShown]: the hashes the sheet the user approved showed, so the
+     * Ledger's screen can be checked against the phone's (#239). The
+     * second case is known before signing ([LedgerApdus.blindHashes]); the
+     * first only once the device answers, and then, with no hashes shown,
+     * it throws [LedgerException.Kind.UNSUPPORTED] carrying the hashes
+     * ([LedgerException.hashesOnly]) before anything is shown on the
+     * device, so the caller can show them and ask again (#476).
      */
-    suspend fun signTypedData(path: String, data: Eip712.TypedData): LedgerSignature {
+    suspend fun signTypedData(path: String, data: Eip712.TypedData, hashesShown: LedgerTypedDataHashes? = null): LedgerSignature {
         val full = try {
             LedgerApdus.signEip712Full(path, data)
         } catch (e: LedgerApdus.Unencodable) {
@@ -487,8 +492,9 @@ internal class LedgerEthApp(private val link: LedgerLink) {
                 if ((e.cause as? LedgerException.StatusWord)?.sw != 0x6d00) throw e
             }
         }
-        // The same hashes the sheet showed when the data can't be streamed (LedgerApdus.blindHashes, #239).
         val hashes = LedgerApdus.eip712Hashes(data) ?: throw LedgerException(LedgerException.Kind.UNSUPPORTED)
+        // Never hashes the user wasn't shown on the phone (#239, #476).
+        if (hashes != hashesShown) throw LedgerException(LedgerException.Kind.UNSUPPORTED, cause = LedgerException.HashesOnly(hashes))
         return LedgerApdus.parseSignature(sendAll(listOf(LedgerApdus.signEip712Hashed(path, hashes.domain, hashes.message))))
     }
 

@@ -391,9 +391,13 @@ class Ledger internal constructor(private val context: Context) {
         return "0x" + recover(sig, MessageSigning.personalDigest(message), account.address).rsv().toHex()
     }
 
-    /** `eth_signTypedData_v4` of [data] (whose digest is [digest]) on the Ledger holding [account]. */
-    suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray): String =
-        signTypedData(account) { data to digest }
+    /**
+     * `eth_signTypedData_v4` of [data] (whose digest is [digest]) on the
+     * Ledger holding [account]; [hashesShown]: the hashes the approved
+     * sheet showed ([LedgerEthApp.signTypedData], #476).
+     */
+    suspend fun signTypedData(account: WalletAccount, data: Eip712.TypedData, digest: ByteArray, hashesShown: LedgerTypedDataHashes? = null): String =
+        signTypedData(account, hashesShown) { data to digest }
 
     /**
      * Typed data made by [prepare] (with its digest), signed on the Ledger
@@ -403,14 +407,18 @@ class Ledger internal constructor(private val context: Context) {
      * authorization's `validBefore`) starts its clock there, not before a
      * Bluetooth connect and an unlock that can take most of it (#218 R1-F1).
      */
-    suspend fun signTypedData(account: WalletAccount, prepare: () -> Pair<Eip712.TypedData, ByteArray>): String {
+    suspend fun signTypedData(
+        account: WalletAccount,
+        hashesShown: LedgerTypedDataHashes? = null,
+        prepare: () -> Pair<Eip712.TypedData, ByteArray>,
+    ): String {
         val key = account.ledger ?: error("not a Ledger account")
         var digest = ByteArray(0)
         val sig = session({ routesFor(key) }, Strings.get(R.string.signing_ledger_purpose_sign_data)) { app, turn ->
             verified(app, key, account.address, turn)
             val (data, d) = prepare()
             digest = d
-            app.signTypedData(key.path, data)
+            app.signTypedData(key.path, data, hashesShown)
         }
         return "0x" + recover(sig, digest, account.address).rsv().toHex()
     }
