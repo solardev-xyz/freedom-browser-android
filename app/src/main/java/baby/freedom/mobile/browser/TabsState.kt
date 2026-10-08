@@ -1131,17 +1131,28 @@ class TabsState(
     companion object {
         /**
          * Whether a [trimMemory] [level] calls for dropping thumbnails:
-         * the app running while memory is low, or in the background where
-         * it's next in line to be killed. Not merely the UI going out of
-         * sight (`TRIM_MEMORY_UI_HIDDEN`), which happens every time the
-         * user switches away, and would leave the switcher blank for
-         * nothing.
+         * the app running while memory is low (`RUNNING_LOW`,
+         * `RUNNING_CRITICAL`), or in the background and well along the
+         * list of processes to kill (`MODERATE`, `COMPLETE`).
+         *
+         * Not the levels the system sends on an ordinary app switch with
+         * memory to spare: `UI_HIDDEN` (the UI went out of sight) and
+         * `BACKGROUND` (the process joined the cached list — on API 34+
+         * that's sent every time the process becomes cached, before the
+         * freezer, whatever the free memory). Dropping on either would
+         * leave the switcher's background cards blank after any short
+         * trip to another app, for nothing.
+         *
+         * On API 34+ the system no longer sends the `RUNNING_*`,
+         * `MODERATE` or `COMPLETE` levels (it kills cached processes
+         * instead of asking them to trim), so there the snapshots go with
+         * the process; the RGB_565 capture is what keeps them small.
          */
-        @Suppress("DEPRECATION") // The RUNNING_* levels: still sent before API 34.
+        @Suppress("DEPRECATION") // The levels: still sent before API 34.
         fun dropsThumbnails(level: Int): Boolean =
             level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
                 level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
-                level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+                level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE
 
         /**
          * How many closed tabs the reopen stack keeps, across all its

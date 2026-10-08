@@ -141,7 +141,6 @@ class TabsLazyRestoreTest {
         val drops = listOf(
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
-            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
             ComponentCallbacks2.TRIM_MEMORY_MODERATE,
             ComponentCallbacks2.TRIM_MEMORY_COMPLETE,
         )
@@ -149,6 +148,8 @@ class TabsLazyRestoreTest {
         val keeps = listOf(
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
             ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN,
+            // Sent on every ordinary trip to the background on API 34+.
+            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
         )
         for (level in drops) assertTrue("$level", TabsState.dropsThumbnails(level))
         for (level in keeps) assertFalse("$level", TabsState.dropsThumbnails(level))
@@ -162,9 +163,11 @@ class TabsLazyRestoreTest {
         tabs.newTab().apply { visit("c"); thumbnail = FakeBitmap }
         tabs.closeTab(2)
         tabs.trimMemory(ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN)
+        tabs.trimMemory(ComponentCallbacks2.TRIM_MEMORY_BACKGROUND)
         assertTrue(tabs.tabs.all { it.thumbnail != null })
 
-        tabs.trimMemory(ComponentCallbacks2.TRIM_MEMORY_BACKGROUND)
+        @Suppress("DEPRECATION")
+        tabs.trimMemory(ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
         assertTrue(tabs.tabs.all { it.thumbnail == null })
         val reopened = tabs.reopenClosedTab()
         assertNotNull(reopened)
