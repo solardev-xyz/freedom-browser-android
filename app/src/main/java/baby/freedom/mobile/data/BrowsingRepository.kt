@@ -345,9 +345,21 @@ class BrowsingRepository internal constructor(
                 // Keyed as [favicon] reads a bookmark's icon.
                 val kept = db.bookmarks().allOnce()
                     .mapNotNullTo(HashSet()) { FaviconOrigin.from(DisplayUrl.settledName(it.url)) }
-                val forget = faviconsToForget(db.favicons().stampsSince(since.coerceAtLeast(0L)), since, kept)
+                // The sites a ranged delete leaves older visits of, keyed as
+                // [favicon] reads a history row's icon (#480 R3-M1).
+                val remaining = HashMap<String, Long>()
+                if (since > 0L) {
+                    db.history().latestVisits().forEach { v ->
+                        val origin = FaviconOrigin.from(DisplayUrl.settledName(v.url)) ?: return@forEach
+                        remaining.merge(origin, v.visitedAt, ::maxOf)
+                    }
+                }
+                val forget = faviconsToForget(
+                    db.favicons().stampsSince(since.coerceAtLeast(0L)), since, kept, remaining,
+                )
                 forget.delete.forEach { db.favicons().delete(it) }
                 forget.undate.forEach { db.favicons().undate(it) }
+                forget.restamp.forEach { (origin, at) -> db.favicons().restamp(origin, at) }
             }
         } catch (e: SQLiteException) {
             Log.w(TAG, "deleteHistorySince: ${e.message}")

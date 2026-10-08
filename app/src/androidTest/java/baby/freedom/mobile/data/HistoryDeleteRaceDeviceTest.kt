@@ -68,4 +68,22 @@ class HistoryDeleteRaceDeviceTest {
         assertEquals(listOf("https://fresh.example/"), repo.history.first().map { it.url })
         assertNull(repo.history.first().firstOrNull { it.url == "https://slow.example/" })
     }
+
+    /** #480 R3-M1: a ranged delete leaves a site's older visit, so its icon stays, dated to that visit. */
+    @Test
+    fun aRangedDeleteKeepsTheIconOfASiteWithAnOlderVisitLeft() = runBlocking {
+        val now = System.currentTimeMillis()
+        val older = now - 3 * 60 * 60_000L
+        db.history().insert(HistoryEntry(url = "https://kept.example/a", title = "A", visitedAt = older))
+        db.history().insert(HistoryEntry(url = "https://kept.example/b", title = "B", visitedAt = now - 10 * 60_000L))
+        db.history().insert(HistoryEntry(url = "https://gone.example/", title = "G", visitedAt = now - 5 * 60_000L))
+        db.favicons().upsert(FaviconEntry("https://kept.example", byteArrayOf(1), now - 10 * 60_000L))
+        db.favicons().upsert(FaviconEntry("https://gone.example", byteArrayOf(2), now - 5 * 60_000L))
+        repo.deleteHistorySince(now - 60 * 60_000L)
+        waitFor { origins() == listOf("https://kept.example") }
+        assertEquals(listOf("https://kept.example"), origins())
+        assertEquals(listOf("https://kept.example/a"), repo.history.first().map { it.url })
+        assertEquals(1, repo.favicon("https://kept.example/a").first()?.size)
+        assertEquals(listOf(FaviconStamp("https://kept.example", older)), db.favicons().stampsSince(0L))
+    }
 }

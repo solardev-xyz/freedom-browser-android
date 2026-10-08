@@ -109,7 +109,14 @@ interface HistoryDao {
     /** Delete the visits recorded at or after [since] (epoch ms): Delete browsing data's time range. */
     @Query("DELETE FROM history WHERE visitedAt >= :since")
     suspend fun deleteSince(since: Long)
+
+    /** Each page in history with its latest visit: which sites' icons a ranged delete must keep (#480 R3-M1). */
+    @Query("SELECT url, MAX(visitedAt) AS visitedAt FROM history GROUP BY url")
+    suspend fun latestVisits(): List<HistoryVisit>
 }
+
+/** A page in history and its latest visit (epoch ms), for [HistoryDao.latestVisits]. */
+data class HistoryVisit(val url: String, val visitedAt: Long)
 
 /** A page in history, for [HistoryDao.suggest]. */
 data class HistoryPage(
