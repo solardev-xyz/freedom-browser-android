@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BridgeRequestBudgetTest {
-    private fun budget() = BridgeRequestBudget(maxRequests = 4, smallChars = 1000, largeAbove = 100)
+    private fun budget() = BridgeRequestBudget(maxRequests = 4, smallChars = 1000, largeAbove = 100, largeChars = 1000)
 
     @Test
     fun `a tab gets at most maxRequests in flight, and one back for each answered`() {
@@ -21,7 +21,7 @@ class BridgeRequestBudgetTest {
 
     @Test
     fun `small requests share the tab's characters`() {
-        val b = BridgeRequestBudget(maxRequests = 100, smallChars = 1000, largeAbove = 100)
+        val b = BridgeRequestBudget(maxRequests = 100, smallChars = 1000, largeAbove = 100, largeChars = 1000)
         val held = (1..10).map { b.reserve(1, 100)!! }
         assertNull("1100 characters is over 1000", b.reserve(1, 100))
         assertNull("even one more character is", b.reserve(1, 1))
@@ -30,16 +30,30 @@ class BridgeRequestBudgetTest {
     }
 
     @Test
-    fun `one large request at a time per tab, beside the small ones`() {
+    fun `a lone large request is let in whatever its length, beside the small ones`() {
         val b = budget()
         val small = b.reserve(1, 100)!!
         val large = b.reserve(1, 72_000_000)!!
-        assertNull("a second upload waits for the first", b.reserve(1, 101))
+        assertNull("nothing more fits beside an upload over the large budget: refused, not queued", b.reserve(1, 101))
         assertNotNull("small requests still go", b.reserve(1, 50))
         assertNotNull("another tab may upload", b.reserve(2, 72_000_000))
         large.release()
         assertNotNull(b.reserve(1, 101))
         small.release()
+    }
+
+    @Test
+    fun `parallel uploads share the large budget (R1-F1)`() {
+        // Promise.all([publishData(photoA), publishData(photoB)]) with two ~1 MB images.
+        val b = BridgeRequestBudget(maxRequests = 128, smallChars = 4L * 1024 * 1024, largeAbove = 1024 * 1024, largeChars = 24L * 1024 * 1024)
+        val photo = 1_400_000
+        val both = (1..2).map { b.reserve(1, photo) }
+        assertTrue("both run side by side", both.all { it != null })
+        val dozen = (1..15).count { b.reserve(1, photo) != null }
+        assertEquals("17 fit in 24M characters", 15, dozen)
+        assertNull("the 18th is over the budget", b.reserve(1, photo))
+        both[0]!!.release()
+        assertNotNull("and goes once one is answered", b.reserve(1, photo))
     }
 
     @Test
@@ -64,11 +78,11 @@ class BridgeRequestBudgetTest {
     @Test
     fun `a loop of requests is held to the cap however long it runs`() {
         // #459's scenario: a page that isn't connected loops requests that wait on its prompt.
-        val b = BridgeRequestBudget(maxRequests = 64, smallChars = 1024 * 1024, largeAbove = 64 * 1024)
+        val b = BridgeRequestBudget(maxRequests = 64, smallChars = 1024 * 1024, largeAbove = 64 * 1024, largeChars = 4L * 1024 * 1024)
         val admitted = (1..10_000).count { b.reserve(1, 1024 * 1024) != null }
-        assertEquals("only one megabyte-sized request is ever held", 1, admitted)
+        assertEquals("only four megabyte-sized requests are ever held", 4, admitted)
         val small = (1..10_000).count { b.reserve(1, 100) != null }
-        assertEquals(63, small)
+        assertEquals(60, small)
     }
 
     @Test

@@ -8,10 +8,14 @@ package baby.freedom.mobile.browser
  * tab's prompt; unbounded, a loop of big requests runs the app out of
  * memory and takes every tab with it.
  *
- * Per tab, at most [maxRequests] requests; those up to [largeAbove]
- * characters long share [smallChars] between them, and one longer
- * request (an upload) may be in flight besides. A request over any of
- * these is answered at once ([LIMIT_EXCEEDED]), before it's parsed.
+ * Per tab, at most [maxRequests] requests. Those up to [largeAbove]
+ * characters long share [smallChars] between them; longer ones (an
+ * upload, a big contract call) share [largeChars] besides, so a page's
+ * `Promise.all` of a few uploads runs side by side. A long request is
+ * always let in when the tab has no other long one in flight, however
+ * long it is, so the biggest request the bridge accepts at all still
+ * goes through on its own. A request over what's left is answered at
+ * once ([LIMIT_EXCEEDED]), before it's parsed.
  *
  * One instance per bridge, used from the main thread only.
  */
@@ -19,8 +23,9 @@ internal class BridgeRequestBudget(
     private val maxRequests: Int,
     private val smallChars: Long,
     private val largeAbove: Int,
+    private val largeChars: Long,
 ) {
-    private class Tab(var requests: Int = 0, var chars: Long = 0, var large: Boolean = false)
+    private class Tab(var requests: Int = 0, var chars: Long = 0, var large: Int = 0, var largeChars: Long = 0)
 
     private val tabs = HashMap<Long, Tab>()
 
@@ -34,7 +39,12 @@ internal class BridgeRequestBudget(
             released = true
             val t = tabs[tab] ?: return
             t.requests--
-            if (chars > largeAbove) t.large = false else t.chars -= chars
+            if (chars > largeAbove) {
+                t.large--
+                t.largeChars -= chars
+            } else {
+                t.chars -= chars
+            }
             if (t.requests <= 0) tabs.remove(tab)
         }
     }
@@ -44,8 +54,10 @@ internal class BridgeRequestBudget(
         val t = tabs[tab] ?: Tab()
         if (t.requests >= maxRequests) return null
         if (chars > largeAbove) {
-            if (t.large) return null
-            t.large = true
+            // The first is let in whatever its length; the rest must fit beside it.
+            if (t.large > 0 && t.largeChars + chars > largeChars) return null
+            t.large++
+            t.largeChars += chars
         } else {
             if (t.chars + chars > smallChars) return null
             t.chars += chars

@@ -66,7 +66,12 @@ object RadicleProviders {
     private val scope = MainScope()
 
     /** What each tab may have in flight (#459). */
-    private val budget = BridgeRequestBudget(maxRequests = 64, smallChars = 512 * 1024, largeAbove = 64 * 1024)
+    private val budget = BridgeRequestBudget(
+        maxRequests = 64,
+        smallChars = 512 * 1024,
+        largeAbove = 64 * 1024,
+        largeChars = 2L * 1024 * 1024,
+    )
 
     /** Live bridges, one per WebView; main thread only. */
     private val bridges = WeakHashMap<WebView, Bridge>()
@@ -241,6 +246,11 @@ object RadicleProviders {
         // The prompt's deadline runs from the request's arrival ([PROMPT_WAIT_MS]).
         val deadline = SystemClock.elapsedRealtime() + PROMPT_WAIT_MS
         val data = message.data ?: return
+        // Too long ever to be accepted: refused as such, not as "try again" (which a client retries).
+        if (data.length > MAX_REQUEST_CHARS) {
+            unparsedRequestId(data)?.let { answer(reply, it, RadicleProvider.Reply.Err(RadicleProvider.INVALID_PARAMS, "Request too large")) }
+            return
+        }
         // Counted before it's parsed, and answered at once over the tab's share (#459).
         val ticket = budget.reserve(tab.id, data.length) ?: run {
             unparsedRequestId(data)?.let {

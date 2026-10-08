@@ -126,10 +126,17 @@ object SwarmProviders {
     private val scope = MainScope()
 
     /**
-     * What each tab may have in flight (#459): one upload (a request over
-     * a megabyte) at a time, and the small requests beside it.
+     * What each tab may have in flight (#459): uploads (requests over a
+     * megabyte) share 24M characters, so a page's `Promise.all` of a dozen
+     * photos runs side by side, and one upload of any accepted size goes
+     * through on its own; the small requests go beside them.
      */
-    private val budget = BridgeRequestBudget(maxRequests = 128, smallChars = 4L * 1024 * 1024, largeAbove = 1024 * 1024)
+    private val budget = BridgeRequestBudget(
+        maxRequests = 128,
+        smallChars = 4L * 1024 * 1024,
+        largeAbove = 1024 * 1024,
+        largeChars = 24L * 1024 * 1024,
+    )
 
     /** Live bridges, one per WebView; main thread only. */
     private val bridges = WeakHashMap<WebView, Bridge>()
@@ -404,6 +411,11 @@ object SwarmProviders {
             if (isMainFrame && origin != null) subscriptions?.confirm(origin, id)
             return
         }
+        // Too long ever to be accepted: refused as such, not as "try again".
+        if (data.length > MAX_SWARM_REQUEST_CHARS) {
+            unparsedRequestId(data)?.let { answer(reply, it, unparsedSwarmRequestError(data)) }
+            return
+        }
         // Counted before it's parsed, and answered at once over the tab's share (#459).
         val ticket = budget.reserve(tab.id, data.length) ?: run {
             unparsedRequestId(data)?.let {
@@ -426,7 +438,10 @@ object SwarmProviders {
                 val text = raw!!
                 raw = null
                 // Scanned and parsed off the main thread (#459): a big
-                // upload's message would hold it up for seconds.
+                // upload's message would hold it up for seconds. So a
+                // request reaches the provider once it's parsed, not in
+                // the order it arrived: a small one sent after a big
+                // upload can be handled (and take the prompt) first.
                 val (request, refusal) = withContext(Dispatchers.Default) {
                     val parsed = parseSwarmRequest(text)
                     parsed to if (parsed == null) unparsedRequestId(text)?.let { it to unparsedSwarmRequestError(text) } else null

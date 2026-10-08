@@ -96,8 +96,16 @@ object EthereumProviders {
 
     private val scope = MainScope()
 
-    /** What each tab may have in flight (#459): plenty for a dApp's parallel reads, not a heap's worth. */
-    private val budget = BridgeRequestBudget(maxRequests = 256, smallChars = 2L * 1024 * 1024, largeAbove = 128 * 1024)
+    /**
+     * What each tab may have in flight (#459): plenty for a dApp's
+     * parallel reads and a few big calls side by side, not a heap's worth.
+     */
+    private val budget = BridgeRequestBudget(
+        maxRequests = 256,
+        smallChars = 2L * 1024 * 1024,
+        largeAbove = 128 * 1024,
+        largeChars = 8L * 1024 * 1024,
+    )
 
     /** Live bridges, one per WebView; main thread only. */
     private val bridges = WeakHashMap<WebView, Bridge>()
@@ -462,6 +470,11 @@ object EthereumProviders {
         val tab = bridge.tab
         if (message.type != WebMessageCompat.TYPE_STRING) return
         val data = message.data ?: return
+        // Too long ever to be accepted: refused as such, not as "try again" (which a client retries).
+        if (data.length > MAX_ETH_REQUEST_CHARS) {
+            unparsedRequestId(data)?.let { answer(reply, it, EthereumProvider.Reply.Err(EthereumProvider.INVALID_PARAMS, "Request too large")) }
+            return
+        }
         // Counted before it's parsed, and answered at once over the tab's share (#459).
         val ticket = budget.reserve(tab.id, data.length) ?: run {
             unparsedRequestId(data)?.let {
