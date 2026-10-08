@@ -20,8 +20,8 @@ import androidx.compose.ui.text.input.TextFieldValue
  * address, not on the field. A paste or suggestion fill past the bound is
  * shortened the same way, ellipsis and all ([capped]), and Go — or the
  * suggestions' "Go to address" row ([picked]) — still submits the whole
- * text. Only an edit works on the shortened text, because that is the
- * text the user is editing.
+ * text, and their "Search with …" row searches for it. Only an edit works
+ * on the shortened text, because that is the text the user is editing.
  *
  * 8 KiB, the same bound saved tabs keep ([TabsState.MAX_SAVED_ADDRESS]),
  * is about 200,000 px of ordinary URL text: far inside the limit even for
@@ -107,11 +107,22 @@ internal object AddressFieldText {
 
     /**
      * What a suggestion row's [pick] submits while the field stands for
-     * [fullText]: the whole text when the pick is the "Go to address" row
-     * for the field's shortened form (which the row trims), else the pick.
+     * [fullText]. The panel is built from the field's shortened form, so
+     * its two address rows name that cut text: the "Go to address" row
+     * (the shortened text, trimmed) submits the whole text instead, and
+     * the "Search with …" row (the shortened text's search URL under
+     * [searchTemplate]) searches for the whole text, as Go on the
+     * keyboard does (#517 R1-F1). Any other row is submitted as it is.
      */
-    fun picked(pick: String, fullText: String): String =
-        if (fullText.length > MAX_CHARS && pick == shown(fullText).trim()) fullText.trim() else pick
+    fun picked(pick: String, fullText: String, searchTemplate: String): String {
+        if (fullText.length <= MAX_CHARS) return pick
+        val cut = shown(fullText).trim()
+        return when (pick) {
+            cut -> fullText.trim()
+            UrlParser.searchUrl(cut, searchTemplate) -> UrlParser.searchUrl(fullText, searchTemplate)
+            else -> pick
+        }
+    }
 
     /**
      * The most a one- or two-line row (a suggestion's title and address,

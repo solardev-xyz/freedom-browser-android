@@ -2393,8 +2393,9 @@ fun BrowserScreen(
                     SuggestionsPanel(
                         repo = repo,
                         // The panel gets the field's own (bounded) text;
-                        // its "Go to address" row maps back to the whole
-                        // text the field stands for (#488).
+                        // its "Go to address" and "Search with …" rows map
+                        // back to the whole text the field stands for
+                        // (#488, #517 R1-F1).
                         query = AddressFieldText.shown(addressQuery),
                         searchTemplate = searchTemplate,
                         tabs = tabs.tabs.map { t ->
@@ -2403,7 +2404,7 @@ fun BrowserScreen(
                         currentTabId = state.id,
                         private = state.private,
                         searchSuggestionsOn = searchSuggestionsOn,
-                        onPick = { submit(state, AddressFieldText.picked(it, addressQuery)) },
+                        onPick = { submit(state, AddressFieldText.picked(it, addressQuery, searchTemplate)) },
                         onSwitchToTab = { id ->
                             // End the edit first, as a submit does, then
                             // bring the tab up.

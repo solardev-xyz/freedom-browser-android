@@ -177,15 +177,40 @@ class AddressFieldTextTest {
 
     @Test
     fun `the Go to address row for a shortened field submits the whole text`() {
-        val goRow = addressActions(AddressFieldText.shown(huge), "https://s.example/?q=%s")
+        val template = "https://s.example/?q=%s"
+        val goRow = addressActions(AddressFieldText.shown(huge), template)
             .filterIsInstance<AddressAction.Go>().single().submitText
-        assertEquals(huge, AddressFieldText.picked(goRow, huge))
+        assertEquals(huge, AddressFieldText.picked(goRow, huge, template))
         // Leading spaces the row trims are trimmed from the whole text too.
-        assertEquals(huge, AddressFieldText.picked(AddressFieldText.shown("  $huge").trim(), "  $huge"))
+        assertEquals(huge, AddressFieldText.picked(AddressFieldText.shown("  $huge").trim(), "  $huge", template))
         // Any other row is submitted as it is.
-        assertEquals("https://h.example/", AddressFieldText.picked("https://h.example/", huge))
+        assertEquals("https://h.example/", AddressFieldText.picked("https://h.example/", huge, template))
         // A short query is never swapped.
-        assertEquals("example.com", AddressFieldText.picked("example.com", "example.com "))
+        assertEquals("example.com", AddressFieldText.picked("example.com", "example.com ", template))
+    }
+
+    @Test
+    fun `the Search row for a shortened field searches for the whole text`() {
+        val template = "https://s.example/?q=%s"
+        // A pasted plain-text passage: the panel offers only a Search row,
+        // built from the field's head and ellipsis (#517 R1-F1).
+        val passage = "  " + "lorem ipsum ".repeat(1_000)
+        val rows = addressActions(AddressFieldText.shown(passage), template)
+        val searchRow = rows.single() as AddressAction.Search
+        val whole = UrlParser.searchUrl(passage, template)
+        assertEquals(whole, AddressFieldText.picked(searchRow.submitText, passage, template))
+        assertEquals(UrlParser.toUrl(passage, template), whole)
+        assertTrue(!whole.contains(SearchEngines.encodeQueryComponent("…")))
+        // The address's own Search row, too.
+        val urlSearch = addressActions(AddressFieldText.shown(huge), template)
+            .filterIsInstance<AddressAction.Search>().single().submitText
+        assertEquals(UrlParser.searchUrl(huge, template), AddressFieldText.picked(urlSearch, huge, template))
+        // A short query's Search row is never swapped.
+        val short = UrlParser.searchUrl("swarm storage", template)
+        assertEquals(short, AddressFieldText.picked(short, "swarm storage", template))
+        // An engine suggestion's search is submitted as it is.
+        val suggested = UrlParser.searchUrl("lorem ipsum dolor", template)
+        assertEquals(suggested, AddressFieldText.picked(suggested, passage, template))
     }
 
     @Test
