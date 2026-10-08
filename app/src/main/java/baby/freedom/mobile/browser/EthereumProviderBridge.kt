@@ -327,7 +327,10 @@ object EthereumProviders {
      * chain), or why not.
      */
     private suspend fun submitAndWait(app: Context, sender: WalletSender, vault: Vault, quote: SendQuote): EthereumProvider.Submitted {
-        when (sender.submit(quote, WalletSender.signerFor(app, vault, quote.request.from) { !sender.isStale(quote) })) {
+        // Not wallet activity in itself (#474): a send an auto-approve rule covers goes out with
+        // no sheet, so the site alone could keep the wallet from locking; a confirmed sheet has
+        // already counted (EthereumProvider's ask → noteActivity).
+        when (sender.submit(quote, WalletSender.signerFor(app, vault, quote.request.from, activity = false) { !sender.isStale(quote) })) {
             WalletSender.Submit.BUSY -> return EthereumProvider.Submitted.Busy
             WalletSender.Submit.STALE -> return EthereumProvider.Submitted.Stale
             WalletSender.Submit.STARTED -> Unit
