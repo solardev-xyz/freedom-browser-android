@@ -60,6 +60,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -465,7 +466,14 @@ private suspend fun awaitIpfsRunning(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun BrowserScreen(
+    /** The Swarm node's state, its [NodeInfo.connectedPeers] left at 0: see [swarmPeers]. */
     nodeInfo: NodeInfo,
+    /**
+     * The Swarm node's peer count, apart from [nodeInfo] so a new count
+     * (every few seconds while it churns) recomposes only the pages that
+     * show it, through [WithSwarmPeers], not this whole screen (#471).
+     */
+    swarmPeers: State<Long>,
     ipfsInfo: IpfsInfo,
     runNodeEnabled: Boolean,
     onToggleRunNode: (Boolean) -> Unit,
@@ -2380,19 +2388,21 @@ fun BrowserScreen(
                 }
             } else if (isHomeTab) {
                 val appUpdate by AppUpdates.state.collectAsState()
-                HomeScreen(
-                    repo = repo,
-                    onOpen = { submit(state, it) },
-                    onOpenInNewTab = { url, private -> openInNewTab(url, background = true, private = private) },
-                    nodeInfo = nodeInfo,
-                    runNodeEnabled = runNodeEnabled,
-                    // The warm-up row is about the Swarm node: its page, straight.
-                    onOpenNode = { nodeDetail = NodeDestination.Swarm },
-                    bottomContentPadding = capsuleOverlap,
-                    modifier = Modifier.fillMaxSize(),
-                    update = appUpdate.notice,
-                    onDismissUpdate = AppUpdates::dismiss,
-                )
+                WithSwarmPeers(nodeInfo, swarmPeers) { info ->
+                    HomeScreen(
+                        repo = repo,
+                        onOpen = { submit(state, it) },
+                        onOpenInNewTab = { url, private -> openInNewTab(url, background = true, private = private) },
+                        nodeInfo = info,
+                        runNodeEnabled = runNodeEnabled,
+                        // The warm-up row is about the Swarm node: its page, straight.
+                        onOpenNode = { nodeDetail = NodeDestination.Swarm },
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                        update = appUpdate.notice,
+                        onDismissUpdate = AppUpdates::dismiss,
+                    )
+                }
             }
             // The tab's renderer went away (#260) while it was on
             // screen: why, and Reload. (One on the home surface is
@@ -2913,60 +2923,64 @@ fun BrowserScreen(
     // status opens it over Settings, and before the node pages, which
     // open over it; Back from each returns to the one below.
     if (showNodes) {
-        NodesOverviewScreen(
-            input = NodeOverviewInput(
-                nodeInfo = nodeInfo,
-                externalSwarm = externalSwarmBase,
-                ipfsInfo = ipfsInfo,
-                externalIpfs = externalIpfsBase,
-                radicleInfo = radicle.info,
-                radicleEnabled = radicle.enabled,
-                tor = tor,
-                myotisInfo = myotisInfo,
-                myotisRunning = myotisRunning,
-            ),
-            onOpen = { destination ->
-                when (destination) {
-                    NodeDestination.Rpc -> openSettingsAt(SettingsSection.Rpc)
-                    NodeDestination.Gateways -> openSettingsAt(SettingsSection.Nodes)
-                    else -> nodeDetail = destination
-                }
-            },
-            onDismiss = { showNodes = false },
-        )
+        WithSwarmPeers(nodeInfo, swarmPeers) { info ->
+            NodesOverviewScreen(
+                input = NodeOverviewInput(
+                    nodeInfo = info,
+                    externalSwarm = externalSwarmBase,
+                    ipfsInfo = ipfsInfo,
+                    externalIpfs = externalIpfsBase,
+                    radicleInfo = radicle.info,
+                    radicleEnabled = radicle.enabled,
+                    tor = tor,
+                    myotisInfo = myotisInfo,
+                    myotisRunning = myotisRunning,
+                ),
+                onOpen = { destination ->
+                    when (destination) {
+                        NodeDestination.Rpc -> openSettingsAt(SettingsSection.Rpc)
+                        NodeDestination.Gateways -> openSettingsAt(SettingsSection.Nodes)
+                        else -> nodeDetail = destination
+                    }
+                },
+                onDismiss = { showNodes = false },
+            )
+        }
     }
 
     // A node's page, over the overview (or Settings, for Radicle); Back /
     // ← dismisses only the node page.
     val detail = nodeDetail
     if (detail == NodeDestination.Swarm || detail == NodeDestination.Tor || detail == NodeDestination.LightClient) {
-        NodeScreen(
-            page = detail,
-            nodeInfo = nodeInfo,
-            runNodeEnabled = runNodeEnabled,
-            onToggleRunNode = onToggleRunNode,
-            myotisInfo = myotisInfo,
-            myotisRunning = myotisRunning,
-            onRunMyotisChain = onRunMyotisChain,
-            tor = tor,
-            onMyotisRecovery = onMyotisRecovery,
-            // Publish setup's identity step (#114): the wallet page opens
-            // over the node page (it's composed after it).
-            onOpenWallet = { showWallet = true },
-            // A published page (#118), or the fund-and-buy transaction's
-            // explorer page (#115): a new tab in front, never a private one,
-            // with the pages the node page was opened over closed too.
-            onOpenUrl = { url ->
-                nodeDetail = null
-                showNodes = false
-                showSettings = false
-                tabs.requestOpenInNewTab?.invoke(url, false, false)
-            },
-            onDismiss = { nodeDetail = null },
-            onOpenLogs = { showLogs = it },
-            // At the Tor card, its switch in view.
-            onOpenTorSettings = { openSettingsAt(SettingsSection.Tor) },
-        )
+        WithSwarmPeers(nodeInfo, swarmPeers) { info ->
+            NodeScreen(
+                page = detail,
+                nodeInfo = info,
+                runNodeEnabled = runNodeEnabled,
+                onToggleRunNode = onToggleRunNode,
+                myotisInfo = myotisInfo,
+                myotisRunning = myotisRunning,
+                onRunMyotisChain = onRunMyotisChain,
+                tor = tor,
+                onMyotisRecovery = onMyotisRecovery,
+                // Publish setup's identity step (#114): the wallet page opens
+                // over the node page (it's composed after it).
+                onOpenWallet = { showWallet = true },
+                // A published page (#118), or the fund-and-buy transaction's
+                // explorer page (#115): a new tab in front, never a private one,
+                // with the pages the node page was opened over closed too.
+                onOpenUrl = { url ->
+                    nodeDetail = null
+                    showNodes = false
+                    showSettings = false
+                    tabs.requestOpenInNewTab?.invoke(url, false, false)
+                },
+                onDismiss = { nodeDetail = null },
+                onOpenLogs = { showLogs = it },
+                // At the Tor card, its switch in view.
+                onOpenTorSettings = { openSettingsAt(SettingsSection.Tor) },
+            )
+        }
     }
 
     if (detail == NodeDestination.Ipfs) {
@@ -3714,4 +3728,14 @@ private class ChainSwitchNoticeUi(val notice: EthereumProviders.SwitchNotice) {
 private class ChainSwitchVisuals(override val message: String, override val actionLabel: String) : SnackbarVisuals {
     override val withDismissAction = true
     override val duration = SnackbarDuration.Long
+}
+
+/**
+ * [content] with [info] carrying the Swarm peer count from [peers]. The
+ * count is read here, in a scope of its own, so a new one recomposes only
+ * [content], never the [BrowserScreen] around it (#471).
+ */
+@Composable
+private fun WithSwarmPeers(info: NodeInfo, peers: State<Long>, content: @Composable (NodeInfo) -> Unit) {
+    content(info.copy(connectedPeers = peers.value))
 }

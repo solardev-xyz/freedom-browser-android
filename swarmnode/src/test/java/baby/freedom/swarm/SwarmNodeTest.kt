@@ -272,6 +272,37 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun peerPollingSlowsInTheBackground() {
+        assertEquals(1_000L, SwarmNode.peerPollDelayMs(30, backgrounded = false))
+        assertEquals(5_000L, SwarmNode.peerPollDelayMs(150, backgrounded = false))
+        assertEquals(SwarmNode.BACKGROUND_PEER_POLL_MS, SwarmNode.peerPollDelayMs(30, backgrounded = true))
+        assertEquals(SwarmNode.BACKGROUND_PEER_POLL_MS, SwarmNode.peerPollDelayMs(150, backgrounded = true))
+    }
+
+    @Test
+    fun aSuspendedNodeStopsCountingPeersEverySecondUntilItResumes() {
+        val counts = java.util.concurrent.atomic.AtomicInteger()
+        val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
+        ops.onPeerCount = { counts.incrementAndGet() }
+        val node = SwarmNode(config, ops)
+        node.start()
+        awaitStatus(node, NodeStatus.Running)
+        Thread.sleep(2_200)
+        assertTrue("counted ${counts.get()} times in the foreground", counts.get() >= 2)
+        node.suspend()
+        Thread.sleep(300)
+        val atSuspend = counts.get()
+        Thread.sleep(2_500)
+        assertEquals("no count every second in the background", atSuspend, counts.get())
+        // Back in front: counted again at once, not when the 30 s wait ends.
+        node.resume()
+        val until = System.currentTimeMillis() + 1_000
+        while (counts.get() == atSuspend && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertTrue("counted again after resume", counts.get() > atSuspend)
+        node.dispose()
+    }
+
+    @Test
     fun aLifecycleCallAfterStopNeverReachesAnt() {
         val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
         val node = SwarmNode(config, ops)
