@@ -129,6 +129,29 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `a label too long for the capsule is shortened around its at sign`() {
+        // Width stand-in: a label fits in [n] characters.
+        fun within(n: Int): (String) -> Boolean = { it.length <= n }
+        val a64 = "a".repeat(64)
+        // Fits: unchanged, and a label with no `@` is never touched here.
+        assertEquals("evil@vitalik.eth", AddressLabel.keepingAt("evil@vitalik.eth", within(18)))
+        assertEquals("x".repeat(40), AddressLabel.keepingAt("x".repeat(40), within(18)))
+        // The userinfo gives way first, keeping the name after the `@`.
+        assertEquals("aaaaaa…@vitalik.eth", AddressLabel.keepingAt("$a64@vitalik.eth", within(19)))
+        assertEquals("ens://a…@vitalik.eth", AddressLabel.keepingAt("ens://$a64@vitalik.eth", within(20)))
+        // Then the name keeps its tail — the `@` is never dropped.
+        assertEquals("e…@…lik.eth", AddressLabel.keepingAt("ens://$a64@vitalik.eth", within(11)))
+        // A `%40` is kept whole the same way.
+        assertEquals("ens://aa…%40vitalik.eth", AddressLabel.keepingAt("ens://$a64%40vitalik.eth", within(23)))
+        // The last `@` is the one kept — where a userinfo strip would cut.
+        assertEquals("a@b…@vitalik.eth", AddressLabel.keepingAt("a@b$a64@vitalik.eth", within(16)))
+        // A surrogate pair is never split by the cut.
+        val emoji = "\uD83D\uDE00".repeat(20)
+        val cut = AddressLabel.keepingAt("$emoji@vitalik.eth", within(16))
+        assertEquals("\uD83D\uDE00…@vitalik.eth", cut)
+    }
+
+    @Test
     fun `ens subnames are never collapsed into their parent`() {
         // Each ENS label is its own name with its own owner and
         // resolver, so `pay.vitalik.eth` must not rest on the name

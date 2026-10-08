@@ -228,6 +228,73 @@ object AddressLabel {
         }
     }
 
+    /**
+     * [label] shortened, if it has to be, so that its `@` stays on screen.
+     *
+     * A label shown as typed because it carries userinfo
+     * (`aaaa…aaaa@vitalik.eth`, from `ens://<64 a's>@vitalik.eth`) is only
+     * honest while the `@` is visible. Left to the capsule's middle
+     * ellipsis, a long userinfo is exactly the part that gets cut, and
+     * the capsule rests on `aaaaaaa…italik.eth`, with the `@` gone and
+     * the name after it reading like the name being visited.
+     *
+     * So for a label that carries an `@` (literal or `%40`, the last one,
+     * which is where a userinfo strip would cut) and doesn't [fit], the
+     * shortening is done here, around that `@`: first the part before it
+     * keeps a shorter and shorter head (`ens://aaaa…@vitalik.eth`), and
+     * only once that is down to one character does the part after it
+     * give up its middle, keeping its tail (`e…@…lik.eth`). The result is
+     * the longest such candidate that fits, so the capsule's own
+     * ellipsis never runs on it. A label without an `@`, or one that
+     * fits as it is, is returned unchanged. Tapping the pill still shows
+     * the whole address.
+     *
+     * [fits] must be monotone in length (a shorter candidate never fits
+     * worse), which a width measurement is.
+     */
+    fun keepingAt(label: String, fits: (String) -> Boolean): String {
+        val at = maxOf(label.lastIndexOf('@'), label.lastIndexOf("%40", ignoreCase = true))
+        if (at < 0 || fits(label)) return label
+        val marker = if (label[at] == '@') "@" else label.substring(at, at + 3)
+        val before = label.substring(0, at)
+        val after = label.substring(at + marker.length)
+
+        fun headed(k: Int) = before.take(cutBefore(before, k)) + "…" + marker + after
+        // Largest head of [before] at which the whole [after] still fits.
+        if (before.isNotEmpty()) {
+            var lo = 1
+            var hi = before.length - 1
+            var best = -1
+            while (lo <= hi) {
+                val mid = (lo + hi) / 2
+                if (fits(headed(mid))) { best = mid; lo = mid + 1 } else hi = mid - 1
+            }
+            if (best > 0) return headed(best)
+        }
+        val head = if (before.isEmpty()) "" else before.take(cutBefore(before, 1)) + "…"
+        fun tailed(m: Int) = head + marker + "…" + after.substring(cutAfter(after, m))
+        var lo = 1
+        var hi = after.length - 1
+        var best = 1
+        while (lo <= hi) {
+            val mid = (lo + hi) / 2
+            if (fits(tailed(mid))) { best = mid; lo = mid + 1 } else hi = mid - 1
+        }
+        return if (after.length <= 1) head + marker + after else tailed(best)
+    }
+
+    /** [k] moved back off a surrogate pair's high half, never below 1. */
+    private fun cutBefore(s: String, k: Int): Int {
+        val n = k.coerceIn(1, s.length)
+        return if (n in 2 until s.length && s[n - 1].isHighSurrogate()) n - 1 else n
+    }
+
+    /** Start of a [m]-char tail of [s], moved forward off a low surrogate. */
+    private fun cutAfter(s: String, m: Int): Int {
+        val start = s.length - m.coerceIn(1, s.length)
+        return if (start in 1 until s.length - 1 && s[start].isLowSurrogate()) start + 1 else start
+    }
+
     /** [authority] carries an `@`, literally or as `%40`. */
     private fun hasAt(authority: String): Boolean =
         authority.contains('@') || authority.contains("%40")

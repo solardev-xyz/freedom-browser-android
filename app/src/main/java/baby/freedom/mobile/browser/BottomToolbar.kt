@@ -1674,13 +1674,30 @@ internal fun BottomToolbar(
         // does, so a name with only a little too much to it is shown
         // whole rather than middle-ellipsised (#417). Decided here, off
         // the one fixed width, for the same reason the ellipsis is.
-        val labelFontSize = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
-            if (restingLabel.isEmpty()) AddressLabelRestingFontSize
+        // The label as drawn: [restingLabel], unless it carries an `@` and
+        // wouldn't fit even at the smallest fitted size, in which case it
+        // is shortened around the `@` ([AddressLabel.keepingAt]) so the
+        // middle ellipsis below never cuts the `@` out of a label shown
+        // as typed (`ens://<64 a's>@vitalik.eth` resting on
+        // `aaaaaaa…italik.eth`).
+        val shownLabel = remember(restingLabel, restingLabelStyle, labelMaxWidth, density) {
+            val maxPx = with(density) { labelMaxWidth.roundToPx() }
+            AddressLabel.keepingAt(restingLabel) { candidate ->
+                textMeasurer.measure(
+                    text = candidate,
+                    style = restingLabelStyle.copy(fontSize = AddressLabelMinFitFontSize),
+                    maxLines = 1,
+                    softWrap = false,
+                ).size.width <= maxPx
+            }
+        }
+        val labelFontSize = remember(shownLabel, restingLabelStyle, labelMaxWidth, density) {
+            if (shownLabel.isEmpty()) AddressLabelRestingFontSize
             else {
                 val maxPx = with(density) { labelMaxWidth.roundToPx() }
                 fitAddressLabelFontSize { size ->
                     textMeasurer.measure(
-                        text = restingLabel,
+                        text = shownLabel,
                         style = restingLabelStyle.copy(fontSize = size),
                         maxLines = 1,
                         softWrap = false,
@@ -1695,11 +1712,11 @@ internal fun BottomToolbar(
         // settled resting one, read off this density rather than assumed
         // to be 14/16 (see [Density.addressLabelCompactScale]).
         val labelCompactScale = with(density) { addressLabelCompactScale(labelFontSize) }
-        val labelWidth = remember(restingLabel, labelLayoutStyle, labelMaxWidth, density) {
-            if (restingLabel.isEmpty()) 0.dp
+        val labelWidth = remember(shownLabel, labelLayoutStyle, labelMaxWidth, density) {
+            if (shownLabel.isEmpty()) 0.dp
             else with(density) {
                 textMeasurer.measure(
-                    text = restingLabel,
+                    text = shownLabel,
                     style = labelLayoutStyle,
                     maxLines = 1,
                     softWrap = false,
@@ -1968,7 +1985,7 @@ internal fun BottomToolbar(
                 )
             }
             Text(
-                text = restingLabel,
+                text = shownLabel,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.Medium,
                 // One layout, at the resting type size, at every
