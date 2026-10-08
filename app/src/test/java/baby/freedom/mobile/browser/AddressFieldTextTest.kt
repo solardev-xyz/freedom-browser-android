@@ -94,12 +94,12 @@ class AddressFieldTextTest {
     fun `a keystroke at or after a shortened field's ellipsis is dropped, not submitted`() {
         val field = AddressFieldText.shown(huge)
         // Typed at the end, after the ellipsis: cut straight back, so dropped.
-        assertTrue(AddressFieldText.swallowed(field, field + "x", huge))
+        assertTrue(AddressFieldText.swallowed(field, field + "x", huge, TextRange(field.length)))
         // Typed just before the ellipsis: cut back the same way.
         val beforeEllipsis = field.dropLast(1) + "x…"
-        assertTrue(AddressFieldText.swallowed(field, beforeEllipsis, huge))
+        assertTrue(AddressFieldText.swallowed(field, beforeEllipsis, huge, TextRange(field.length - 1)))
         // A paste after the ellipsis too.
-        assertTrue(AddressFieldText.swallowed(field, field + "https://other.example/", huge))
+        assertTrue(AddressFieldText.swallowed(field, field + "https://other.example/", huge, TextRange(field.length)))
         // Dropped, the field still stands for the whole address, so Go still
         // submits it rather than the cut, a literal ellipsis and the "x".
         assertEquals(huge, AddressFieldText.submitted(field, huge))
@@ -113,10 +113,10 @@ class AddressFieldTextTest {
         val mid = field.substring(0, 10) + "x" + field.substring(10)
         val capped = AddressFieldText.capped(TextFieldValue(mid, TextRange(11)))
         assertTrue(capped.text != mid)
-        assertTrue(AddressFieldText.swallowed(field, mid, huge))
+        assertTrue(AddressFieldText.swallowed(field, mid, huge, TextRange(10)))
         // So is a paste over a selection that leaves the ellipsis.
         val replaced = field.substring(0, 10) + "yy" + field.substring(11)
-        assertTrue(AddressFieldText.swallowed(field, replaced, huge))
+        assertTrue(AddressFieldText.swallowed(field, replaced, huge, TextRange(10, 11)))
     }
 
     @Test
@@ -127,12 +127,12 @@ class AddressFieldTextTest {
         assertEquals(max - 1, field.length)
         // One more character fits: shown whole, and what Go then submits.
         val one = field + "x"
-        assertTrue(!AddressFieldText.swallowed(field, one, astral))
+        assertTrue(!AddressFieldText.swallowed(field, one, astral, TextRange(field.length)))
         assertEquals(one, AddressFieldText.capped(TextFieldValue(one, TextRange(one.length))).text)
         assertEquals(one, AddressFieldText.submitted(one, astral))
         // The next one would be cut, so it is dropped.
-        assertTrue(AddressFieldText.swallowed(one, one + "y", astral))
-        assertTrue(AddressFieldText.swallowed(one, one.substring(0, 5) + "y" + one.substring(5), astral))
+        assertTrue(AddressFieldText.swallowed(one, one + "y", astral, TextRange(one.length)))
+        assertTrue(AddressFieldText.swallowed(one, one.substring(0, 5) + "y" + one.substring(5), astral, TextRange(5)))
     }
 
     @Test
@@ -140,23 +140,39 @@ class AddressFieldTextTest {
         val field = AddressFieldText.shown(huge)
         // Typing earlier in the field once it has room stays on screen.
         val shorter = field.substring(0, 10) + field.substring(12)
-        assertTrue(!AddressFieldText.swallowed(shorter, shorter.substring(0, 5) + "x" + shorter.substring(5), huge))
+        assertTrue(!AddressFieldText.swallowed(shorter, shorter.substring(0, 5) + "x" + shorter.substring(5), huge, TextRange(5)))
         // Deleting the ellipsis, or any shrink, stays within the bound.
-        assertTrue(!AddressFieldText.swallowed(field, field.dropLast(1), huge))
+        assertTrue(!AddressFieldText.swallowed(field, field.dropLast(1), huge, TextRange(field.length)))
         // A whole-field paste with the same head but no ellipsis of its own
         // stands for itself, even though the field looks the same.
         val samehead = field.dropLast(1) + "b".repeat(100)
         assertEquals(field, AddressFieldText.shown(samehead))
-        assertTrue(!AddressFieldText.swallowed(field, samehead, huge))
+        assertTrue(!AddressFieldText.swallowed(field, samehead, huge, TextRange(0, field.length)))
         // Nor a long paste over the whole field.
-        assertTrue(!AddressFieldText.swallowed(field, huge + "z", huge))
+        assertTrue(!AddressFieldText.swallowed(field, huge + "z", huge, TextRange(0, field.length)))
         // A field that isn't shortened never drops an edit: typing at the
         // bound of a full-length, unshortened field is cut like a paste.
         val full = "a".repeat(max)
-        assertTrue(!AddressFieldText.swallowed(full, full + "…x", full))
-        assertTrue(!AddressFieldText.swallowed("ab…cd", "ab…" + "x".repeat(max) + "cd", "ab…cd"))
+        assertTrue(!AddressFieldText.swallowed(full, full + "…x", full, TextRange(full.length)))
+        assertTrue(!AddressFieldText.swallowed("ab…cd", "ab…" + "x".repeat(max) + "cd", "ab…cd", TextRange(3)))
         // Nor does an ordinary field.
-        assertTrue(!AddressFieldText.swallowed("example.com", "example.com…", "example.com"))
+        assertTrue(!AddressFieldText.swallowed("example.com", "example.com…", "example.com", TextRange(11)))
+    }
+
+    @Test
+    fun `a paste over the whole shortened field is not dropped for ending in an ellipsis`() {
+        // Select-all, then paste a long text that ends in an ellipsis of its
+        // own: its last char matches the field's, but the paste replaced the
+        // field's ellipsis along with everything else (#517 R6-F1).
+        val field = AddressFieldText.shown(huge)
+        val pasted = "https://other.example/#" + "c".repeat(10_000) + "…"
+        assertTrue(!AddressFieldText.swallowed(field, pasted, huge, TextRange(0, field.length)))
+        // Shortened as a paste, so Go submits the pasted text.
+        val capped = AddressFieldText.capped(TextFieldValue(pasted, TextRange(pasted.length)))
+        assertEquals(pasted, AddressFieldText.submitted(capped.text, pasted))
+        // A selection that leaves the ellipsis out still keeps it.
+        val keep = field.substring(0, 10) + "yy" + field.substring(11)
+        assertTrue(AddressFieldText.swallowed(field, keep, huge, TextRange(10, 11)))
     }
 
     @Test

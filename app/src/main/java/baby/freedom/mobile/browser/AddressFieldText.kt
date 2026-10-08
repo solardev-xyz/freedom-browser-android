@@ -79,18 +79,27 @@ internal object AddressFieldText {
      * stays on screen and is what Go then submits, and the next one is
      * dropped like any other (#517 R5-F1). A paste over the whole field
      * replaces the ellipsis too and is shortened as a paste, not dropped.
+     *
+     * [selection] is the field's selection before the edit. A keystroke or
+     * paste replaces at least that span, so the common head and tail are
+     * held outside it: a paste over a selection that holds the ellipsis
+     * replaces it, even when the pasted text happens to end in an ellipsis
+     * of its own that the scan would otherwise match against the field's
+     * (#517 R6-F1).
      */
-    fun swallowed(current: String, edit: String, standsFor: String): Boolean {
+    fun swallowed(current: String, edit: String, standsFor: String, selection: TextRange): Boolean {
         if (edit.length <= MAX_CHARS || standsFor.length <= MAX_CHARS) return false
         val ellipsis = current.lastIndexOf(ELLIPSIS)
         if (ellipsis < 0) return false
         // What the edit left of [current]: a common head, then a common tail
         // that doesn't overlap it.
         val room = minOf(current.length, edit.length)
+        val replacedFrom = selection.min.coerceIn(0, current.length)
+        val replacedTo = selection.max.coerceIn(replacedFrom, current.length)
         var head = 0
-        while (head < room && current[head] == edit[head]) head++
+        while (head < minOf(room, replacedFrom) && current[head] == edit[head]) head++
         var tail = 0
-        while (tail < room - head &&
+        while (tail < minOf(room - head, current.length - replacedTo) &&
             current[current.length - 1 - tail] == edit[edit.length - 1 - tail]
         ) tail++
         return ellipsis < head || ellipsis >= current.length - tail

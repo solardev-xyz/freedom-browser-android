@@ -2593,7 +2593,9 @@ private fun AddressField(
                         // the bound would only be cut again, losing what
                         // was typed or the last shown character: the field
                         // is full, so drop it and keep its whole text.
-                        if (AddressFieldText.swallowed(fieldValue.text, edit.text, seededAddress)) {
+                        if (AddressFieldText.swallowed(
+                                fieldValue.text, edit.text, seededAddress, fieldValue.selection,
+                            )) {
                             return@BasicTextField
                         }
                         val newValue = AddressFieldText.capped(edit)
