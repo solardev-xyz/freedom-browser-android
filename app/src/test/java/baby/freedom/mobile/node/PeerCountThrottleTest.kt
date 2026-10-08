@@ -136,4 +136,53 @@ class PeerCountThrottleTest {
         runCurrent()
         assertEquals(3, out.size)
     }
+
+    @Test
+    fun aCountFlappingAcrossZeroDoesNotGoOutEverySecond() = runTest {
+        val source = MutableStateFlow(running)
+        val out = collect(source, 30_000)
+        val times = mutableListOf<Long>()
+        backgroundScope.launch {
+            source.throttlePeerCount(30_000) { testScheduler.currentTime }.collect { times += testScheduler.currentTime }
+        }
+        runCurrent()
+        // A poor link: 0, 1, 0, 1, … every second for two minutes.
+        for (s in 1..120) {
+            advanceTimeBy(1_000)
+            source.value = running.copy(connectedPeers = s % 2L)
+            runCurrent()
+            // The first gain and the first loss still go out at once.
+            if (s == 1) assertEquals(listOf(0L, 1L), out.map { it.connectedPeers })
+            if (s == 2) assertEquals(listOf(0L, 1L, 0L), out.map { it.connectedPeers })
+        }
+        advanceTimeBy(30_000)
+        runCurrent()
+        // Not 121: a handful per 30 s window.
+        assertTrue("sent ${out.size}", out.size <= 1 + 3 * 5)
+        // Never more than ZERO_CROSSINGS_PER_WINDOW + 1 values inside any one window.
+        assertTrue(times.toString(), times.windowed(ZERO_CROSSINGS_PER_WINDOW + 2).all { it.last() - it.first() >= 30_000 })
+        // The latest count isn't lost.
+        assertEquals(source.value, out.last())
+    }
+
+    @Test
+    fun aZeroCrossingAfterAQuietSpellGoesOutAtOnceAgain() = runTest {
+        val source = MutableStateFlow(running)
+        val out = collect(source, 30_000)
+        for ((t, peers) in listOf(1_000L to 1L, 2_000L to 0L, 3_000L to 1L)) {
+            advanceTimeBy(t - testScheduler.currentTime)
+            source.value = running.copy(connectedPeers = peers)
+            runCurrent()
+        }
+        // The third crossing in one window is held back.
+        assertEquals(listOf(0L, 1L, 0L), out.map { it.connectedPeers })
+        advanceTimeBy(29_000)
+        runCurrent()
+        assertEquals(listOf(0L, 1L, 0L, 1L), out.map { it.connectedPeers })
+        // A minute later the link has settled: losing every peer shows at once.
+        advanceTimeBy(60_000)
+        source.value = running
+        runCurrent()
+        assertEquals(listOf(0L, 1L, 0L, 1L, 0L), out.map { it.connectedPeers })
+    }
 }
