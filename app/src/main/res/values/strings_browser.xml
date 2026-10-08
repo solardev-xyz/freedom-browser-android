@@ -81,6 +81,7 @@
     <string name="browser_js_leave_page_message">Changes you made may not be saved.</string>
     <string name="browser_js_leave">Leave</string>
     <string name="browser_js_stay">Stay</string>
+    <string name="browser_js_block_more">Don\'t let this page show more dialogs</string>
 
     <!-- TapProtection.kt -->
     <string name="browser_obscured_tap">Another app is drawing over the screen, so that tap was ignored. Close it (a chat bubble or a screen filter) and try again.</string>
@@ -112,6 +113,7 @@
     <string name="browser_opened_switch">Switch</string>
     <string name="browser_bookmark_added">Bookmark added</string>
     <string name="browser_bookmark_already">Already bookmarked</string>
+    <string name="browser_bookmark_failed">Couldn\'t add bookmark</string>
     <string name="browser_image_loading">Loading image…</string>
     <string name="browser_image_copy_failed">Couldn\'t copy image</string>
     <string name="browser_image_saved">Image saved</string>
@@ -257,4 +259,8 @@
         <item quantity="one">Tabs, %d open</item>
         <item quantity="other">Tabs, %d open</item>
     </plurals>
+    <!-- HTML5 fullscreen notice (#467): names the page that covered the screen. -->
+    <string name="browser_fullscreen_site">%1$s is full screen</string>
+    <string name="browser_fullscreen_page">This page is full screen</string>
+    <string name="browser_fullscreen_exit">Swipe from the edge or press Back to exit</string>
 </resources>

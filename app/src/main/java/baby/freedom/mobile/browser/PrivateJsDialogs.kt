@@ -12,8 +12,9 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
+import android.widget.CheckBox
 import android.widget.EditText
-import android.widget.FrameLayout
+import android.widget.LinearLayout
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import java.net.URI
@@ -38,6 +39,102 @@ internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
     }
     return if (origin != null) Strings.get(R.string.browser_js_page_at_says, origin) else Strings.get(R.string.browser_js_page_says)
 }
+
+/**
+ * A tab's guard against a page that won't stop opening JavaScript
+ * dialogs (#466). Every dialog is app-modal, so a page looping
+ * `alert()` would otherwise keep the user out of the menu and the tab
+ * switcher for good — and a restored tab starts the loop again after a
+ * relaunch. As in Chrome:
+ *
+ * - A dialog that comes within [REPEAT_WINDOW_MS] of the tab's last
+ *   one being answered offers "Don't let this page show more dialogs"
+ *   ([Admit.Show.offerBlock]); ticking it [block]s the tab.
+ * - A flood — [FLOOD_COUNT] dialogs asked for within [FLOOD_WINDOW_MS],
+ *   which no user answering them could keep up with (each one's buttons
+ *   wait [PromptTapGuard.PROTECTION_MS]) — blocks it without asking: a
+ *   page out of view whose dialogs are answered for it, say.
+ *
+ * Blocked, every dialog the tab's pages ask for is answered at once,
+ * unseen ([Admit.Refuse]), until a navigation the user started
+ * themselves commits ([committed] `byUser`): their address, Reload or
+ * Back / Forward, or a link they tapped on a page — as Chrome lifts it
+ * on any navigation with a user gesture, so the site a tapped link leads
+ * to gets its `confirm()` asked (R1-F1). At the commit, not the tap:
+ * until then the page that looped is still the one on screen, and
+ * lifting the block at the tap would hand it its loop back. Which commit
+ * is the user's is the tab's WebView's to say, per navigation
+ * ([PageWebView.commitIsUsersOwn]): one that never commits leaves
+ * nothing armed for the page's own next one (R1-M1). A navigation the
+ * page starts without a tap doesn't lift it. Main thread only.
+ */
+internal class JsDialogGate(private val clock: () -> Long = SystemClock::uptimeMillis) {
+    sealed interface Admit {
+        /** Answered unseen: `alert` returns, `confirm` false, `prompt` null, `beforeunload` leaves. */
+        data object Refuse : Admit
+
+        /** Queued for the user, with the option to block the page's further dialogs when [offerBlock]. */
+        data class Show(val offerBlock: Boolean) : Admit
+    }
+
+    var blocked = false
+        private set
+    private var lastSettledAt: Long? = null
+    private val asked = ArrayDeque<Long>()
+
+    /** The page asks for a dialog. */
+    fun admit(): Admit {
+        if (blocked) return Admit.Refuse
+        val now = clock()
+        asked.addLast(now)
+        while (asked.isNotEmpty() && now - asked.first() >= FLOOD_WINDOW_MS) asked.removeFirst()
+        if (asked.size >= FLOOD_COUNT) {
+            block()
+            return Admit.Refuse
+        }
+        val last = lastSettledAt
+        return Admit.Show(offerBlock = last != null && now - last in 0 until REPEAT_WINDOW_MS)
+    }
+
+    /** A dialog the gate let through was answered (by the user or not). */
+    fun settled() {
+        lastSettledAt = clock()
+    }
+
+    /** No more dialogs from this tab's pages until [allow]. */
+    fun block() {
+        blocked = true
+        asked.clear()
+    }
+
+    /**
+     * A main-frame document committed in the tab, [byUser]: from a
+     * navigation the user started themselves. Theirs lifts the block, and
+     * the page they reach starts afresh.
+     */
+    fun committed(byUser: Boolean) {
+        if (!byUser) return
+        blocked = false
+        lastSettledAt = null
+        asked.clear()
+    }
+
+    companion object {
+        const val REPEAT_WINDOW_MS = 5_000L
+        const val FLOOD_COUNT = 10
+        const val FLOOD_WINDOW_MS = 2_000L
+    }
+}
+
+/**
+ * Whether a main-frame document committing at [url] is the navigation
+ * [chain] follows, hop by hop, when that one is the user's own
+ * ([usersOwn]): what lifts a [JsDialogGate] block (#466). A navigation
+ * that ended without a commit has ended its [chain] too, so it leaves
+ * nothing for a later commit to take (R1-M1).
+ */
+internal fun usersOwnCommit(usersOwn: Boolean, chain: UserNamedChain, url: String?): Boolean =
+    usersOwn && url != null && chain.asker()?.let { sameRequestUrl(it, url) } == true
 
 /**
  * A JavaScript dialog a tab's page has opened and is blocked on (#246).
@@ -71,7 +168,18 @@ internal class JsDialogRequest(
     val secure: Boolean,
     private val answer: (confirmed: Boolean, text: String?) -> Unit,
     private val onSettled: (JsDialogRequest) -> Unit = {},
+    /** Offer "Don't let this page show more dialogs" ([JsDialogGate], #466). */
+    val offerBlock: Boolean = false,
+    private val onBlock: () -> Unit = {},
 ) {
+    /**
+     * The user ticked "Don't let this page show more dialogs": called
+     * before their answer, so the page's next dialog is already refused.
+     */
+    fun blockMore() {
+        if (!answered && offerBlock) onBlock()
+    }
+
     var answered = false
         private set
 
@@ -163,21 +271,36 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
             imeOptions = tabImeOptions(EditorInfo.IME_ACTION_DONE, private = request.secure)
         }
     } else null
+    // The page's way out of an endless loop of dialogs (#466).
+    val blockBox = if (request.offerBlock) {
+        CheckBox(activity).apply {
+            setText(R.string.browser_js_block_more)
+            minHeight = (48 * activity.resources.displayMetrics.density).toInt()
+        }
+    } else null
+    fun answerBlock() {
+        if (blockBox?.isChecked == true) request.blockMore()
+    }
     val builder = AlertDialog.Builder(activity)
         .setTitle(jsDialogTitle(kind, request.url))
         // Back / outside tap only: dismiss() taking the window down when
         // the dialog loses its turn doesn't answer the page.
-        .setOnCancelListener { request.cancel() }
+        .setOnCancelListener {
+            answerBlock()
+            request.cancel()
+        }
     if (kind == JsDialogKind.BEFORE_UNLOAD) {
         builder.setMessage(activity.getString(R.string.browser_js_leave_page_message))
     } else if (!request.message.isNullOrEmpty()) {
         builder.setMessage(request.message)
     }
-    if (input != null) {
+    if (input != null || blockBox != null) {
         val pad = (20 * activity.resources.displayMetrics.density).toInt()
-        builder.setView(FrameLayout(activity).apply {
+        builder.setView(LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(pad, 0, pad, 0)
-            addView(input)
+            input?.let(::addView)
+            blockBox?.let(::addView)
         })
     }
     val guard = PromptTapGuard(SystemClock::uptimeMillis)
@@ -201,6 +324,7 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
         dialog.getButton(DialogInterface.BUTTON_POSITIVE)?.apply {
             setOnClickListener {
                 if (!guard.accepts()) return@setOnClickListener
+                answerBlock()
                 request.confirm(input?.text?.toString())
                 dialog.dismiss()
             }
@@ -208,16 +332,20 @@ internal fun showJsDialog(context: Context, request: JsDialogRequest): AlertDial
         dialog.getButton(DialogInterface.BUTTON_NEGATIVE)?.takeIf { kind != JsDialogKind.ALERT }?.apply {
             setOnClickListener {
                 if (!guard.accepts()) return@setOnClickListener
+                answerBlock()
                 request.cancel()
                 dialog.dismiss()
             }
         },
     )
-    buttons.forEach { it.isEnabled = false }
+    // The box waits too: a double tap meant for the prompt before
+    // shouldn't tick it.
+    val guarded = buttons + listOfNotNull(blockBox)
+    guarded.forEach { it.isEnabled = false }
     dialog.window?.decorView?.let { decor ->
         val arm = Runnable {
             if (!dialog.isShowing) return@Runnable
-            buttons.forEach { it.isEnabled = true }
+            guarded.forEach { it.isEnabled = true }
             dialog.setCanceledOnTouchOutside(true)
         }
         // Count from the first frame the dialog is actually drawn in.

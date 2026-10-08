@@ -7,6 +7,8 @@ import androidx.room.withTransaction
 import baby.freedom.mobile.browser.BookmarkUrls
 import baby.freedom.mobile.browser.DisplayUrl
 import baby.freedom.mobile.browser.typedForm
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -34,7 +36,7 @@ import kotlinx.coroutines.launch
 class BrowsingRepository internal constructor(
     private val db: AppDatabase,
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val scope = writeScope()
 
     init {
         // One-time cleanup for installs that predate [isRecordable]
@@ -90,11 +92,14 @@ class BrowsingRepository internal constructor(
     fun recordVisit(url: String, title: String) {
         if (!isRecordable(url)) return
         scope.launch {
+            val settled = DisplayUrl.settledName(url)
+            // Settling can respell it longer (`%XX`); keep the table's cap.
+            if (!isRecordable(settled)) return@launch
             db.history().insert(
                 HistoryEntry(
                     // Not the startup-only `%XX` spelling of a `.tez` name (#490 R1-M2).
-                    url = DisplayUrl.settledName(url),
-                    title = title,
+                    url = settled,
+                    title = storedTitle(title),
                     visitedAt = System.currentTimeMillis(),
                 ),
             )
@@ -175,8 +180,10 @@ class BrowsingRepository internal constructor(
      */
     fun bookmark(address: String, title: String): Deferred<Bookmarked?> = scope.async {
         // `page#` is saved as `page` (#418): the `#` names no place.
+        if (!isBookmarkable(address)) return@async null
         // Spelled the same whenever it is saved, also right after startup (#490 R1-M2).
         val url = DisplayUrl.settledName(PageVisits.withoutEmptyFragment(address))
+        // Settling can respell it longer (`%XX`); keep the table's cap (#461).
         if (!isRecordable(url)) return@async null
         try {
             db.withTransaction {
@@ -185,7 +192,7 @@ class BrowsingRepository internal constructor(
                         db.bookmarks().upsert(
                             BookmarkEntry(
                                 url = url,
-                                title = title,
+                                title = storedTitle(title),
                                 createdAt = System.currentTimeMillis(),
                                 position = db.bookmarks().minPosition() - 1,
                             ),
@@ -218,6 +225,9 @@ class BrowsingRepository internal constructor(
         // Spelled the same whenever it is saved (#490 R1-M2).
         @Suppress("NAME_SHADOWING")
         val url = DisplayUrl.settledName(url)
+        // `bookmarkAddress` already refuses an address this long; this
+        // keeps the table safe whoever calls (#461).
+        if (url.length > MAX_URL_CHARS) return@async BookmarkEditResult.Failed
         try {
             db.withTransaction {
                 val current = db.bookmarks().byId(id) ?: return@withTransaction BookmarkEditResult.Gone
@@ -226,7 +236,7 @@ class BrowsingRepository internal constructor(
                 when {
                     other != null ->
                         BookmarkEditResult.Duplicate(other.title, other.url)
-                    db.bookmarks().update(id, url, title) == 0 -> BookmarkEditResult.Gone
+                    db.bookmarks().update(id, url, storedTitle(title)) == 0 -> BookmarkEditResult.Gone
                     else -> BookmarkEditResult.Saved
                 }
             }
@@ -388,17 +398,76 @@ class BrowsingRepository internal constructor(
         private const val TAG = "BrowsingRepository"
 
         /**
+         * The scope the repository's fire-and-forget writes run in (#462).
+         * Nobody waits on them, so whatever one throws — a
+         * `SQLiteFullException` on a phone whose storage is full, from
+         * every finished page load ([recordVisit]) or favicon — is logged
+         * and dropped here instead of reaching the thread's uncaught
+         * handler and killing the app with every open tab. The write is
+         * lost, as it would be anyway; the browser keeps going.
+         */
+        internal fun writeScope(dispatcher: CoroutineDispatcher = Dispatchers.IO): CoroutineScope =
+            CoroutineScope(
+                SupervisorJob() + dispatcher +
+                    CoroutineExceptionHandler { _, e -> Log.w(TAG, "write failed: ${e.message}", e) },
+            )
+
+        /**
+         * The longest address history and bookmarks keep (#461), the same
+         * 8 KiB the saved tabs allow (`TabsState.MAX_SAVED_ADDRESS`).
+         * Chromium loads addresses up to 2 MiB, and a row that big no
+         * longer fits the 2 MB window Android reads query results
+         * through: every read of the table that reaches it — the Home
+         * page's Recent list, History, the bookmark star — throws
+         * `SQLiteBlobTooBigException`. A shortened address would be a
+         * different page, so a longer one isn't kept at all.
+         */
+        const val MAX_URL_CHARS = 8 * 1024
+
+        /**
+         * The longest title history and bookmarks keep (#461); a longer
+         * one is cut ([storedTitle]). Chromium already caps a page's
+         * title well below the read limit; this is for whatever else
+         * reaches the table (a bookmark's typed name).
+         */
+        const val MAX_TITLE_CHARS = 1024
+
+        /**
          * Whether [url] is a page history and bookmarks keep: not blank,
          * `about:*`, `data:*`, `javascript:*` or `blob:*` — internal
-         * bookkeeping, script, or bytes that only live in one page.
+         * bookkeeping, script, or bytes that only live in one page — and
+         * no longer than [MAX_URL_CHARS].
          */
         fun isRecordable(url: String): Boolean {
-            if (url.isBlank()) return false
+            if (url.isBlank() || url.length > MAX_URL_CHARS) return false
             val lower = url.trim().lowercase()
             return !lower.startsWith("about:") &&
                 !lower.startsWith("data:") &&
                 !lower.startsWith("javascript:") &&
                 !lower.startsWith("blob:")
+        }
+
+        /**
+         * Whether [bookmark] saves [address] (null from it otherwise): the
+         * address it stores ([PageVisits.withoutEmptyFragment]) is
+         * [isRecordable]. The star asks this to say why nothing was added.
+         */
+        fun isBookmarkable(address: String): Boolean =
+            isRecordable(PageVisits.withoutEmptyFragment(address))
+
+        /**
+         * [title] as history and bookmarks store it: at most
+         * [MAX_TITLE_CHARS], cut between characters, never inside a
+         * surrogate pair.
+         */
+        fun storedTitle(title: String): String {
+            if (title.length <= MAX_TITLE_CHARS) return title
+            val end = if (Character.isHighSurrogate(title[MAX_TITLE_CHARS - 1])) {
+                MAX_TITLE_CHARS - 1
+            } else {
+                MAX_TITLE_CHARS
+            }
+            return title.substring(0, end)
         }
 
 

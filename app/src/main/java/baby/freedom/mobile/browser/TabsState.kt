@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.content.ComponentCallbacks2
 import android.os.Bundle
 import android.view.View
 import android.webkit.WebChromeClient
@@ -105,9 +106,13 @@ class TabsState(
         val title: String,
         val addressBarText: String,
         val override: BrowserState.Override?,
-        val thumbnail: ImageBitmap?,
+        // Dropped under memory pressure ([trimMemory], #460).
+        var thumbnail: ImageBitmap?,
         val webViewState: Bundle?,
         val loadStopped: Boolean = false,
+        // Closed before its WebView was built (#460): what it was to be
+        // built from, which it comes back with as it was.
+        val pendingRestore: BrowserState.PendingRestore? = null,
     )
 
     /**
@@ -368,6 +373,20 @@ class TabsState(
         val tabId: Long,
         val view: View,
         val callback: WebChromeClient.CustomViewCallback?,
+        /**
+         * The site whose page went fullscreen, as the user reads it
+         * ([fullscreenSiteName]), taken when the session starts, so the
+         * notice names the site even if the tab's state moves on (#467).
+         * Null for a page with no site to name (a `data:` page, say).
+         *
+         * This is the tab's top-level site, not necessarily the frame
+         * that asked: `onShowCustomView` doesn't say which frame called
+         * `requestFullscreen()`, so a cross-origin iframe the page let go
+         * fullscreen (`allow="fullscreen"`, a video or ad embed) is
+         * credited to the page that embedded it. That's the site that
+         * granted it the screen, and the one the address bar showed.
+         */
+        val site: String? = null,
     )
 
     var fullscreen: Fullscreen? by mutableStateOf(null)
@@ -387,7 +406,7 @@ class TabsState(
             callback?.onCustomViewHidden()
             return
         }
-        fullscreen = Fullscreen(tab.id, view, callback)
+        fullscreen = Fullscreen(tab.id, view, callback, fullscreenSiteName(tab))
     }
 
     /**
@@ -708,6 +727,7 @@ class TabsState(
                 thumbnail = tab.thumbnail,
                 webViewState = saveWebViewState?.invoke(tab),
                 loadStopped = tab.loadAborted,
+                pendingRestore = tab.unbuiltRestore(),
             )
         }
         if (kept.isEmpty()) return null
@@ -807,13 +827,23 @@ class TabsState(
         // the blank entry, so the address goes back — and is
         // submitted again, unless the user had stopped that load
         // (the bar then showed it with Reload).
-        pendingRestore = BrowserState.PendingRestore.of(
+        pendingRestore = closed.pendingRestore ?: BrowserState.PendingRestore.of(
             url = closed.url,
             address = closed.addressBarText,
             loadStopped = closed.loadStopped,
             webViewState = closed.webViewState,
         )
     }
+
+    /**
+     * What [tab] is still to be built from, if it was restored and its
+     * WebView hasn't been built yet ([defersWebView], #460): its
+     * committed URL and Stop latch were never put back on the tab (they
+     * come from the WebView's load), so they're read from here. Not a
+     * tab whose renderer went away (#260), which had them when parked.
+     */
+    private fun BrowserState.unbuiltRestore(): BrowserState.PendingRestore? =
+        pendingRestore?.takeIf { rendererGone == null }
 
     /**
      * Nothing has happened to this tab list yet: the one regular tab it
@@ -942,12 +972,25 @@ class TabsState(
         val at = activeIndex.coerceIn(0, tabs.lastIndex)
         val candidates = tabs.withIndex().filter { !it.value.private }.mapNotNull { (index, tab) ->
             val (url, address) = tab.restorableAddress()
-            val saved = SavedTab(
-                title = tab.title.take(MAX_SAVED_TITLE),
-                address = address.ifBlank { url },
-                committed = url.isNotBlank(),
-                loadStopped = tab.loadAborted,
-            )
+            val unbuilt = tab.unbuiltRestore()
+            val saved = if (unbuilt != null) {
+                // Restored and not shown since (#460): saved as it was
+                // restored ([BrowserState.PendingRestore.of]).
+                SavedTab(
+                    title = tab.title.take(MAX_SAVED_TITLE),
+                    address = unbuilt.fallbackUrl,
+                    committed = unbuilt.fallbackUrl.isNotBlank() &&
+                        (unbuilt.resubmitUrl.isBlank() || unbuilt.overPage),
+                    loadStopped = !unbuilt.submit,
+                )
+            } else {
+                SavedTab(
+                    title = tab.title.take(MAX_SAVED_TITLE),
+                    address = address.ifBlank { url },
+                    committed = url.isNotBlank(),
+                    loadStopped = tab.loadAborted,
+                )
+            }
             if (saved.address.length > MAX_SAVED_ADDRESS) null else index to saved
         }
         var budget = MAX_SAVED_CHARS
@@ -1048,6 +1091,31 @@ class TabsState(
     }
 
     /**
+     * Whether [tab]'s WebView waits to be built (#460): a tab restored
+     * ([BrowserState.pendingRestore]: after the process was killed, an
+     * Activity relaunch, a reopened tab) that isn't on screen. Its page
+     * loads once it's shown, not all of them at once at a cold start.
+     * One handed a navigation in the meantime gets its WebView at once,
+     * so that navigation isn't left waiting with no WebView to take it.
+     */
+    fun defersWebView(tab: BrowserState): Boolean =
+        tab.pendingRestore != null && tab !== active &&
+            !(tab.navCounter > tab.handedNavCounter && tab.pendingUrl.isNotEmpty())
+
+    /**
+     * The system is short of memory ([android.content.ComponentCallbacks2]
+     * [level], #460): drop the tab switcher's snapshots, the open tabs'
+     * and the reopen stack's. The tab on screen is shot again when the
+     * switcher opens; the others show their placeholder until they are
+     * next on screen.
+     */
+    fun trimMemory(level: Int) {
+        if (!dropsThumbnails(level)) return
+        for (tab in tabs) tab.thumbnail = null
+        for (group in closedTabs) for (closed in group.tabs) closed.thumbnail = null
+    }
+
+    /**
      * Move the tab at [from] to [to] (the index it ends up at), keeping
      * the same tab active. Tabs map to their WebViews by id, so nothing
      * on the WebView side changes — only the order the switcher shows.
@@ -1076,6 +1144,31 @@ class TabsState(
 
     companion object {
         /**
+         * Whether a [trimMemory] [level] calls for dropping thumbnails:
+         * the app running while memory is low (`RUNNING_LOW`,
+         * `RUNNING_CRITICAL`), or in the background and well along the
+         * list of processes to kill (`MODERATE`, `COMPLETE`).
+         *
+         * Not the levels the system sends on an ordinary app switch with
+         * memory to spare: `UI_HIDDEN` (the UI went out of sight) and
+         * `BACKGROUND` (the process joined the cached list — on API 34+
+         * that's sent every time the process becomes cached, before the
+         * freezer, whatever the free memory). Dropping on either would
+         * leave the switcher's background cards blank after any short
+         * trip to another app, for nothing.
+         *
+         * On API 34+ the system no longer sends the `RUNNING_*`,
+         * `MODERATE` or `COMPLETE` levels (it kills cached processes
+         * instead of asking them to trim), so there the snapshots go with
+         * the process; the RGB_565 capture is what keeps them small.
+         */
+        @Suppress("DEPRECATION") // The levels: still sent before API 34.
+        fun dropsThumbnails(level: Int): Boolean =
+            level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+                level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE
+
+        /**
          * How many closed tabs the reopen stack keeps, across all its
          * entries: oldest entries are dropped once it holds more. The
          * newest entry is kept whole even past this, so a bulk close
@@ -1102,3 +1195,48 @@ class TabsState(
         private val idSeq = AtomicLong(0L)
     }
 }
+
+/**
+ * How the fullscreen notice names [tab]'s page (#467): its top-level
+ * site ([BrowserState.permissionTop]) the way a permission prompt does.
+ * A page on a content gateway's own origin (`http://127.0.0.1:1633/bzz/<ref>/`)
+ * has no permission site by design (#457) but still has a document
+ * origin ([BrowserState.siteOrigin]); that origin is shared by every
+ * root the gateway serves, so it's named by the root the address bar
+ * shows (`bzz://<ref>`, or the ENS name it's known by) rather than
+ * left anonymous. That name is not a site boundary there: a page from
+ * any other root on the same gateway origin can script this one (a
+ * `window.open` popup of another root's path, say), so the notice
+ * claims no more than the address bar already does for the same
+ * document. A document whose address names no root of its own (a
+ * top-level `blob:` URL, which [addressRoot] refuses) is named by
+ * that shared origin instead. Null only for a page with no origin at
+ * all.
+ */
+internal fun fullscreenSiteName(tab: BrowserState): String? {
+    tab.permissionTop?.let { return permissionOriginDisplay(it) }
+    val origin = tab.siteOrigin ?: return null
+    return addressRoot(tab.url) ?: permissionOriginDisplay(origin)
+}
+
+/**
+ * `scheme://authority` of a display address, or null if it has no
+ * plain scheme. A nested-origin URL (`blob:http://host/<uuid>`,
+ * `filesystem:…`) is refused rather than read as scheme `blob:http`:
+ * its inner origin is the document's origin, which the caller names
+ * anyway.
+ */
+internal fun addressRoot(address: String): String? {
+    val schemeEnd = address.indexOf("://")
+    if (schemeEnd <= 0) return null
+    val scheme = address.substring(0, schemeEnd)
+    if (!scheme[0].isAsciiLetter() || !scheme.all { it.isAsciiLetter() || it in '0'..'9' || it in "+-." }) {
+        return null
+    }
+    val rest = address.substring(schemeEnd + 3)
+    val authority = rest.substringBefore('/').substringBefore('?').substringBefore('#')
+    if (authority.isEmpty()) return null
+    return address.substring(0, schemeEnd + 3) + authority
+}
+
+private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'

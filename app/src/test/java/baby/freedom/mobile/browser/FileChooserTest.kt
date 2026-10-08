@@ -149,6 +149,55 @@ class FileChooserTest {
         assertEquals(0, deleteCaptures(File(tmp.root, "never-created"), keep = null))
     }
 
+    @Test fun `a private tab's capture goes in uploads-private, others in uploads`() {
+        val cache = tmp.newFolder("cache")
+        assertEquals(File(cache, "uploads"), captureDirFor(cache, private = false))
+        assertEquals(File(File(cache, "uploads"), "private"), captureDirFor(cache, private = true))
+    }
+
+    @Test fun `ending the private session deletes private captures only`() {
+        val cache = tmp.newFolder("cache")
+        val normal = File(captureDirFor(cache, false).apply { mkdirs() }, "IMG_a.jpg").apply { writeText("x") }
+        val private = File(captureDirFor(cache, true).apply { mkdirs() }, "IMG_b.jpg").apply { writeText("id card") }
+        assertTrue(deletePrivateCaptures(cache))
+        assertFalse(private.exists())
+        assertFalse(privateCaptureDir(cache).exists())
+        assertTrue(normal.exists())
+        // Nothing to delete is fine too (no private capture yet).
+        assertTrue(deletePrivateCaptures(cache))
+    }
+
+    @Test fun `deleteCaptures clears the private dir too but keeps a private in-flight target`() {
+        val dir = tmp.newFolder("uploads")
+        val privateDir = File(dir, "private").apply { mkdirs() }
+        val old = File(privateDir, "IMG_old.jpg").apply { writeText("x") }
+        val inFlight = File(privateDir, "IMG_new.jpg").apply { createNewFile() }
+        assertEquals(0, deleteCaptures(dir, keep = File(privateDir.path, "IMG_new.jpg")))
+        assertFalse(old.exists())
+        assertTrue(inFlight.exists())
+        // With nothing in flight the private dir goes as a whole.
+        assertEquals(0, deleteCaptures(dir, keep = null))
+        assertEquals(0, dir.listFiles()!!.size)
+    }
+
+    @Test fun `deleteCaptures counts a stuck private file once, not again for its dir`() {
+        val dir = tmp.newFolder("uploads")
+        val privateDir = File(dir, "private").apply { mkdirs() }
+        val stuck = File(privateDir, "IMG_old.jpg").apply { writeText("x") }
+        File(dir, "IMG_a.jpg").writeText("x")
+        // A read-only dir: its file can't be unlinked, so the dir stays non-empty.
+        privateDir.setWritable(false)
+        try {
+            if (stuck.delete()) return // running as root: permissions not enforced
+            assertEquals(1, deleteCaptures(dir, keep = null))
+            assertTrue(stuck.exists())
+        } finally {
+            privateDir.setWritable(true)
+        }
+        assertEquals(0, deleteCaptures(dir, keep = null))
+        assertEquals(0, dir.listFiles()!!.size)
+    }
+
     private val captureUri = "content://baby.freedom.mobile.files/uploads/IMG.jpg"
     private val cameraUri = "content://com.camera/1"
 

@@ -41,8 +41,14 @@ internal fun bookmarkAddress(input: String): BookmarkAddress {
         // template.
         AddressInput.Kind.Url -> UrlParser.toUrl(trimmed, searchTemplate = "")
     }
-    return if (BrowsingRepository.isRecordable(url)) {
-        BookmarkAddress.Ok(BookmarkUrls.canonical(url))
+    // Judged on the spelling saved, too (#461 R1-M2): canonicalising can
+    // lengthen an address (an IDN host as punycode, a CIDv0 as base36),
+    // and [BrowsingRepository.editBookmark] refuses what is over the
+    // limit only as a generic failure. The raw check first, so a huge
+    // paste isn't canonicalised at all.
+    val saved = if (BrowsingRepository.isRecordable(url)) BookmarkUrls.canonical(url) else null
+    return if (saved != null && BrowsingRepository.isRecordable(saved)) {
+        BookmarkAddress.Ok(saved)
     } else {
         BookmarkAddress.Invalid(Strings.get(R.string.library_bookmark_cannot_bookmark))
     }

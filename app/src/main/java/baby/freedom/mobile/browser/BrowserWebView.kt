@@ -5,8 +5,10 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ColorFilter
@@ -167,12 +169,14 @@ internal fun nameResolutionErrorIn(headers: Map<String, String>?): String? =
  * the recorded check of the name its address shows ([displayUrl]), or
  * `null` for an [ErrorPage] or a document the interceptor refused
  * ([NameRefusalSlot]) — neither was served from the name's answer.
+ * [names]: the tab's session's registry, a private tab's own (#464).
  */
 internal fun committedNameTrust(
     url: String?,
     displayUrl: String,
     refusal: NameRefusalSlot,
     pins: EnsDocumentPins? = null,
+    names: EnsNameRegistry = KnownEnsNames,
 ): NameTrust? {
     if (url == null || ErrorPage.isErrorPage(url) || refusal.isRefused(url)) return null
     // A document the tab's re-check served is described by the answer
@@ -184,10 +188,10 @@ internal fun committedNameTrust(
         // different root (R4-F1): the fallback is content the name has
         // already been seen leaving, the same as a raw load of a stale
         // hash below, so it gets no shield either.
-        if (!KnownEnsNames.isCurrentRoot(name, answer)) return null
+        if (!names.isCurrentRoot(name, answer)) return null
         return trust?.let { NameTrust(name, it, answer) }
     }
-    val trust = nameTrustFor(displayUrl) ?: return null
+    val trust = nameTrustFor(displayUrl, names) ?: return null
     // A raw `bzz://<hash>` load shown as the name (name preservation)
     // is the name's page only while the name still resolves to that
     // hash (R1-F2): the name's trust says nothing about content it
@@ -196,7 +200,7 @@ internal fun committedNameTrust(
     // current answer, as before.
     val loaded = Gateways.toDisplay(url)
     val raw = CONTENT_ROOT_SCHEMES.any { loaded.startsWith(it) }
-    if (raw && !KnownEnsNames.isCurrentRoot(trust.name, loaded)) return null
+    if (raw && !names.isCurrentRoot(trust.name, loaded)) return null
     return trust
 }
 
@@ -512,6 +516,8 @@ private fun HttpURLConnection.forwardProxiedHeaders(
 
 // Max width (in px) of a thumbnail bitmap. Anything bigger is wasteful
 // since we only ever render these at half-screen-ish sizes in the grid.
+// Stored as RGB_565 (a page's snapshot has no transparency), half the
+// memory of ARGB: about 1 MB at most for a tall phone screen (#460).
 private const val THUMBNAIL_MAX_WIDTH_PX = 640
 
 /**
@@ -809,7 +815,7 @@ internal fun captureThumbnail(view: WebView, state: BrowserState) {
     val scale = if (w > THUMBNAIL_MAX_WIDTH_PX) THUMBNAIL_MAX_WIDTH_PX.toFloat() / w else 1f
     val bw = (w * scale).toInt().coerceAtLeast(1)
     val bh = (h * scale).toInt().coerceAtLeast(1)
-    val bitmap = createBitmap(bw, bh)
+    val bitmap = createBitmap(bw, bh, Bitmap.Config.RGB_565)
     val canvas = Canvas(bitmap)
     if (scale != 1f) canvas.scale(scale, scale)
     try {
@@ -865,8 +871,12 @@ fun BrowserWebViewHost(
         // A private session a dead process left behind (#86) goes
         // before any page — private or not — can load.
         PrivateProfile.discardLeftovers()
-        // …and so do the images its tabs copied or shared.
-        if (!PrivateProfile.isLive()) discardPrivateImageShares(context)
+        // …and so do the images its tabs copied or shared, and the
+        // photos they took for an upload (#468).
+        if (!PrivateProfile.isLive()) {
+            discardPrivateImageShares(context)
+            fileChooser.discardPrivateCaptures()
+        }
         Unit
     }
 
@@ -887,16 +897,19 @@ fun BrowserWebViewHost(
     val refreshLayouts = remember { mutableMapOf<Long, SwipeRefreshLayout>() }
     // The ids of the private tabs (#86) this host has built a WebView
     // for, including one whose WebView went with its renderer (#260)
-    // and hasn't been rebuilt yet: the private session lasts as long as
-    // any of them.
+    // and hasn't been rebuilt yet, or one still waiting to be shown
+    // before its first is built (#460): the private session lasts as
+    // long as any of them.
     val privateIds = remember { mutableSetOf<Long>() }
-    // The ids of the tabs whose WebView went with its renderer (#260)
-    // and hasn't been rebuilt: closing one still owes the per-tab
-    // cleanup a WebView's tab gets.
+    // The ids of the tabs with no WebView yet: one whose WebView went
+    // with its renderer (#260) and hasn't been rebuilt, or a restored
+    // tab whose WebView waits until it's shown ([TabsState.defersWebView],
+    // #460). Closing one still owes the per-tab cleanup a WebView's tab
+    // gets.
     val goneIds = remember { mutableSetOf<Long>() }
-    // Bumped once a WebView has been rebuilt for a tab whose renderer
-    // went away (#260), so a navigation that brought it back is handed
-    // to the new WebView (see the nav observers below).
+    // Bumped once a WebView has been built for a tab in [goneIds], so a
+    // navigation that brought it back is handed to the new WebView (see
+    // the nav observers below).
     val rebuilt = remember { mutableIntStateOf(0) }
 
     // Periodic cookie sweep (defense in depth against cookie tossing
@@ -925,7 +938,9 @@ fun BrowserWebViewHost(
     /**
      * No private tab is left (#86): wipe the private profile's cookies
      * and site storage (its HTTP cache was cleared through the last
-     * private WebView) and retire it for deletion, and drop
+     * private WebView) and retire it for deletion, delete the images
+     * its tabs copied or shared and the photos they took for an upload
+     * (#468), and drop
      * what the app itself kept for the session in memory: its
      * site-permission answers, zoom levels, downloads list (a private
      * download still running is cancelled, as in Chrome) and the
@@ -941,6 +956,7 @@ fun BrowserWebViewHost(
     fun endPrivateSession() {
         PrivateProfile.discard()
         discardPrivateImageShares(context)
+        fileChooser.discardPrivateCaptures()
         sitePermissions.onPrivateSessionEnded()
         Adblock.onPrivateSessionEnded()
         pageZoom.clearPrivate()
@@ -1099,6 +1115,16 @@ fun BrowserWebViewHost(
             // Waiting to be brought back after its renderer went away
             // (#260) — maybe under an earlier host, across a relaunch.
             if (tab.rendererGone != null) {
+                goneIds += tab.id
+                if (tab.private) privateIds += tab.id
+                continue
+            }
+            // A restored tab (a cold start's, a relaunch's, a reopened
+            // one) in the background: its WebView, and the load of its
+            // page, wait until it's shown, so a cold start with many tabs
+            // doesn't build them all and load every page at once (#460).
+            // It keeps its title and address meanwhile.
+            if (tabs.defersWebView(tab)) {
                 goneIds += tab.id
                 if (tab.private) privateIds += tab.id
                 continue
@@ -1331,6 +1357,16 @@ fun BrowserWebViewHost(
             val wv = webViews[tabs.active.id]
             if (wv != null) captureThumbnail(wv, tabs.active)
         }
+        // Short of memory (#460): the switcher's snapshots go first.
+        // On the application, not the Activity, and taken off again
+        // below so a finished screen's tabs aren't kept reachable.
+        val trimCallbacks = object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) = tabs.trimMemory(level)
+            override fun onConfigurationChanged(newConfig: Configuration) = Unit
+            @Deprecated("Deprecated in Java")
+            override fun onLowMemory() = tabs.trimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+        }
+        context.applicationContext.registerComponentCallbacks(trimCallbacks)
         // Abort whatever the given tab is loading. Chromium answers a
         // stopLoading() with a final onProgressChanged(100), which the
         // chrome client below folds into `progress = -1`; [BrowserScreen]
@@ -1391,9 +1427,10 @@ fun BrowserWebViewHost(
                 if (wv != null) {
                     WebViewCompat.setAudioMuted(wv, muted)
                     tab.audioMuted = WebViewCompat.isAudioMuted(wv)
-                } else if (tab.rendererGone != null) {
-                    // No WebView until it's rebuilt (#260), which
-                    // applies the tab's mute to the new one.
+                } else if (tab.pendingRestore != null) {
+                    // No WebView until it's rebuilt (#260) or first
+                    // shown (#460), which applies the tab's mute to
+                    // the new one.
                     tab.audioMuted = muted
                 }
             }
@@ -1470,11 +1507,12 @@ fun BrowserWebViewHost(
                     runCatching { wv.clearFormData() }
                     runCatching { wv.clearHistory() }
                 }
-                // A tab whose renderer went away (#260) keeps its back/forward
-                // list in the state it's to be rebuilt from: it comes back on
-                // its page alone, as `clearHistory()` leaves every other tab.
+                // A tab whose renderer went away (#260), or one restored and
+                // not shown yet (#460), keeps its back/forward list in the
+                // state it's to be built from: it comes back on its page
+                // alone, as `clearHistory()` leaves every other tab.
                 for (tab in tabs.tabs) {
-                    if (tab.rendererGone != null) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
+                    if (tab.id !in webViews) tab.pendingRestore = tab.pendingRestore?.withoutHistory()
                 }
                 // Remembered zoom levels are keyed by the sites visited (#88).
                 pageZoom.clearAll()
@@ -1504,6 +1542,7 @@ fun BrowserWebViewHost(
             }
         }
         onDispose {
+            context.applicationContext.unregisterComponentCallbacks(trimCallbacks)
             tabs.captureActiveThumbnail = null
             tabs.clearWebViewData = null
             tabs.stopLoading = null
@@ -3038,6 +3077,11 @@ private fun buildRefreshableWebView(
                 certRefusal.committed(url)
                 // Page info's cleanup mark (#442) lasts this one load.
                 SiteData.committed(state.id, url)
+                // The user's own navigation landing — their address,
+                // Reload, Back / Forward, or a link they tapped — lifts a
+                // JavaScript dialog block (#466, R1-F1); any other commit
+                // keeps it.
+                state.jsDialogGate.committed(byUser = (view as? PageWebView)?.commitIsUsersOwn(url) == true)
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -3189,7 +3233,7 @@ private fun buildRefreshableWebView(
                 // …and IPFS or not by what actually committed — a link,
                 // back/forward, or a redirect can land somewhere the
                 // submit that started this load didn't name (#94).
-                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad, ensPins)
+                if (url != null) state.ipfsLoad = ipfsLoadFor(url, state.ipfsLoad, ensPins, KnownEnsNames.of(state.private))
                 if (url == ABOUT_BLANK) {
                     // `about:blank` is our home sentinel — either the
                     // WebView's forced initial paint, a user-initiated
@@ -3273,7 +3317,7 @@ private fun buildRefreshableWebView(
                 // answer, taken now — the interceptor recorded it before
                 // handing the document over. An error page or a name
                 // refusal was served from no answer, so it has none.
-                state.nameTrust = committedNameTrust(url, state.url, nameRefusal, ensPins)
+                state.nameTrust = committedNameTrust(url, state.url, nameRefusal, ensPins, KnownEnsNames.of(state.private))
                 // Refresh navigation flags here (as well as in
                 // onPageFinished) so the system-back hardware button
                 // works the instant a new page starts loading. If we
@@ -4253,7 +4297,10 @@ private fun buildRefreshableWebView(
              * Holds a dialog on the tab for [BrowserScreen] to show in
              * its turn. A page blocks on one dialog at a time, so one
              * already waiting means a second can't be answered by the
-             * user in any sensible order: it's cancelled.
+             * user in any sensible order: it's cancelled. A tab whose
+             * pages showed too many ([JsDialogGate], #466) has the
+             * rest answered unseen: Cancel, or Leave for a
+             * `beforeunload`, as Chrome does.
              */
             private fun queueJsDialog(
                 kind: JsDialogKind,
@@ -4268,6 +4315,14 @@ private fun buildRefreshableWebView(
                     onAnswered(false)
                     return true
                 }
+                val gate = state.jsDialogGate
+                val admit = gate.admit()
+                if (admit !is JsDialogGate.Admit.Show) {
+                    val leave = kind == JsDialogKind.BEFORE_UNLOAD
+                    if (leave) result.confirm() else result.cancel()
+                    onAnswered(leave)
+                    return true
+                }
                 state.jsDialog = JsDialogRequest(
                     kind = kind,
                     url = url,
@@ -4278,7 +4333,12 @@ private fun buildRefreshableWebView(
                         answerJsResult(result, confirmed, text)
                         onAnswered(confirmed)
                     },
-                    onSettled = { if (state.jsDialog === it) state.jsDialog = null },
+                    onSettled = {
+                        gate.settled()
+                        if (state.jsDialog === it) state.jsDialog = null
+                    },
+                    offerBlock = admit.offerBlock && kind != JsDialogKind.BEFORE_UNLOAD,
+                    onBlock = gate::block,
                 )
                 return true
             }
@@ -4371,7 +4431,7 @@ private fun buildRefreshableWebView(
                 fileChooserParams: FileChooserParams?,
             ): Boolean {
                 if (filePathCallback == null || fileChooserParams == null) return false
-                return fileChooser?.show(state.id, filePathCallback, fileChooserParams) ?: false
+                return fileChooser?.show(state.id, state.private, filePathCallback, fileChooserParams) ?: false
             }
 
             // A new window the page asked for (`target=_blank`,
@@ -4776,6 +4836,25 @@ internal class PageWebView(context: Context) : WebView(context) {
     // can't: a load would add an entry, and cut off Forward (#149).
     private var usersNavigationIsLoad = false
 
+    // Whether [usersNavigation] is one the user started themselves —
+    // their address, Reload or the bar's Back / Forward, or a link they
+    // tapped — not a load the app makes for its own reasons (a restore, a
+    // retry, a detour of the page's own navigation): what lifts a
+    // JavaScript dialog block once it commits ([commitIsUsersOwn], #466).
+    private var usersNavigationIsUsersOwn = false
+
+    /**
+     * Whether a document committing at [url] is the one the user's own
+     * navigation was awaited at ([usersNavigationIsUsersOwn]): the same
+     * navigation, hop by hop, not just any commit after it. One that
+     * never commits (Stop, a download, a `204`, a same-document step)
+     * has ended [usersNavigation], so a later commit of the page's own —
+     * its `location.reload()` — is never taken for it (R1-M1). Read
+     * before [documentStarted] ends it.
+     */
+    fun commitIsUsersOwn(url: String?): Boolean =
+        usersOwnCommit(usersNavigationIsUsersOwn, usersNavigation, url)
+
     /**
      * The document on screen's channel for re-issuing its own navigation
      * ([PageReissueChannel]); set by the tab. Null: never re-issued.
@@ -4831,6 +4910,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         val reissue = redirectCorrection.isReissue(url)
         redirectCorrection.navigationStarted(url)
         usersNavigationIsLoad = false
+        usersNavigationIsUsersOwn = gesture
         if (gesture) {
             usersNavigation.started(url)
             usersNavigationIsApps = false
@@ -5235,6 +5315,10 @@ internal class PageWebView(context: Context) : WebView(context) {
         // A server this run answered "send none" asks again (#316).
         if (!loadsNothing) ClientCertificates.onBrowserLoad(tabId)
         val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
+        // A redirect correction's load is a hop of the navigation in
+        // flight: whoever started it still does.
+        val redirectHop = url != null && loadingRedirectCorrection
+        if (!loadsNothing && !redirectHop) usersNavigationIsUsersOwn = (url != null && loadingNamedByUser) || usersStep
         onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
     }
 
@@ -6326,7 +6410,7 @@ private fun interceptVirtualRequestFor(
         val asserted = assertedProtocol(root.name)
         var web: EnsResult.Ok? = null
         Gateways.reverifyEnsDocument(
-            root.name, ensPins, page, asserted, onWebRecord = { web = it },
+            root.name, ensPins, page, asserted, private = private, onWebRecord = { web = it },
         )?.let { code ->
             if (req.isForMainFrame) onMainFrameRoot(null)
             web?.let { return nameWebRecordNavigation(it, pathAndQuery) }
@@ -6337,7 +6421,7 @@ private fun interceptVirtualRequestFor(
     // fetch uses: a name's is the answer just pinned for this navigation
     // — which a failed re-check can hold on an older answer than the
     // session registry's (R5-F1).
-    if (req.isForMainFrame) onMainFrameRoot(Gateways.servedRootFor(root, page = page))
+    if (req.isForMainFrame) onMainFrameRoot(Gateways.servedRootFor(root, page = page, private = private))
 
     // At a cold start the external endpoint settings (#125) are still
     // being read: a restored tab must not reach the embedded gateway
@@ -6348,7 +6432,7 @@ private fun interceptVirtualRequestFor(
     // deliberate settings change, so more than one retry is a bound,
     // not a path.
     repeat(GATEWAY_SWITCH_RETRIES) {
-        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page)
+        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page, private = private)
             ?: return syntheticResponse(
                 502, "Bad Gateway",
                 "No local gateway can serve this content root " +
@@ -6849,16 +6933,23 @@ internal fun displayFor(
     actualUrl: String,
     state: BrowserState,
     pins: EnsDocumentPins? = null,
-): String = DisplayUrl.forActualUrl(actualUrl, state.override, committedProtocolFor(pins))
+): String {
+    val names = KnownEnsNames.of(state.private)
+    return DisplayUrl.forActualUrl(actualUrl, state.override, committedProtocolFor(pins, names), names)
+}
 
 /**
  * The transport a name is shown under on the page on screen: the one
  * its document was served from ([pins], the tab's committed page), which
  * a failed re-check can hold on an older answer than the session's
- * (R3-F1) — else the session's current answer.
+ * (R3-F1) — else the session's current answer, from [names] (a
+ * private tab's own registry, #464).
  */
-internal fun committedProtocolFor(pins: EnsDocumentPins?): (String) -> String? = { name ->
-    pins?.uriFor(name)?.let(KnownEnsNames::protocolOf) ?: KnownEnsNames.protocolFor(name)
+internal fun committedProtocolFor(
+    pins: EnsDocumentPins?,
+    names: EnsNameRegistry = KnownEnsNames,
+): (String) -> String? = { name ->
+    pins?.uriFor(name)?.let(KnownEnsNames::protocolOf) ?: names.protocolFor(name)
 }
 
 /**

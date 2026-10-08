@@ -94,7 +94,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     data class Override(val baseUrl: String, val prefix: String) {
         /** The prefix as the address bar shows it; see [DisplayUrl.withTransport]. */
-        val shown: String get() = DisplayUrl.withTransport(prefix)
+        val shown: String get() = shownIn(KnownEnsNames)
+
+        /** [shown], the name's transport read from [names] — a private tab's own registry (#464). */
+        fun shownIn(names: EnsNameRegistry): String = DisplayUrl.withTransport(prefix, names::protocolFor)
 
         /**
          * Is [url] on [baseUrl] — the base itself, or it followed by a
@@ -508,6 +511,9 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * (Stay). A dialog already up keeps its turn over a panel.
      */
     internal var jsDialog: JsDialogRequest? by mutableStateOf<JsDialogRequest?>(null)
+
+    /** Whether this tab's pages may still show dialogs ([JsDialogGate], #466). */
+    internal val jsDialogGate = JsDialogGate()
 
     var canGoBack by mutableStateOf(false)
         internal set
@@ -1102,7 +1108,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         // starts, sets the flag from the answer it actually serves —
         // which a failed re-check can hold on this tab's older one
         // (see `noteMainFrameContentLoad`, #179 R5-F1).
-        ipfsLoad = ipfsLoadFor(url, ipfsLoad)
+        ipfsLoad = ipfsLoadFor(url, ipfsLoad, names = KnownEnsNames.of(private))
         val loadable = Gateways.toLoadable(url)
         pendingUrl = loadable
         // Named by the user only when their submit's own load says so
@@ -1265,7 +1271,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     private fun shownPrefixOf(o: Override): String? {
         if (o.prefix.contains("://")) return o.prefix
-        if (url.isBlank()) return o.shown
+        if (url.isBlank()) return o.shownIn(KnownEnsNames.of(private))
         val scheme = url.substringBefore("://", "")
         if (scheme !in ASSERTING_SCHEMES) return null
         val p = "$scheme://${o.prefix}"

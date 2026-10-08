@@ -29,7 +29,8 @@ import java.util.UUID
  * the rest of the process. So a private session ends in two steps:
  *
  *  1. When the last private tab closes, [discard] wipes the profile in
- *     place — cookies, site storage, geolocation grants; the caller has
+ *     place — cookies, site storage, geolocation grants, and the names
+ *     its tabs resolved ([Gateways.privateSessionEnded]); the caller has
  *     already cleared its HTTP cache through the last private WebView,
  *     which is the only handle on it — and retires its name.
  *  2. At the next start, before anything can load it, [discardLeftovers]
@@ -149,6 +150,8 @@ object PrivateProfile {
         cookies = null
         wipe(profile)
         UnverifiedOrigins.privateSessionEnded()
+        // Names its tabs resolved, and the resolver's answers for them (#464).
+        Gateways.privateSessionEnded()
         Log.i(TAG, "private session ended")
     }
 

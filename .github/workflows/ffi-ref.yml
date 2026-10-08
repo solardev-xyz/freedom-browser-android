@@ -24,7 +24,7 @@ jobs:
   ffi-ref:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: check-ffi-ref.sh rules (offline tests)
         run: scripts/test-check-ffi-ref.sh
       - name: FFI_REF is a tagged freedom-mobile-ffi release
@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Read the pins
         id: pins
@@ -49,7 +49,7 @@ jobs:
           echo "colibri=$(sed -n 's/^  COLIBRI_REF: *//p' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout freedom-mobile-ffi
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: solardev-xyz/freedom-mobile-ffi
           ref: ${{ steps.pins.outputs.ffi }}
@@ -57,7 +57,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout colibri-stateless
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: corpus-core/colibri-stateless
           ref: ${{ steps.pins.outputs.colibri }}

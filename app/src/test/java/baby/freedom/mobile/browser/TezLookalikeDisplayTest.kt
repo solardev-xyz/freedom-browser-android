@@ -163,7 +163,7 @@ class TezLookalikeDisplayTest {
 
         val virtual = VirtualOrigin.originFor(ContentRoot.Ens(spoof))!! + "/docs?q=1"
         assertEquals("$spoofShown/docs?q=1", VirtualOrigin.displayUrlFor(virtual))
-        assertEquals("$spoofShown/docs?q=1", DisplayUrl.forActualUrl(virtual, null) { null })
+        assertEquals("$spoofShown/docs?q=1", DisplayUrl.forActualUrl(virtual, null, protocolFor = { null }))
 
         // Under its transport, and through a manifest override.
         KnownEnsNames.record("ipfs://$CID", spoof, EnsTrust(verified = true, agreed = listOf("a", "b")))

@@ -389,7 +389,7 @@ internal fun protocolBadgeFor(state: BrowserState): ProtocolBadge? {
         // contenthash resolved to — recorded by the submit flow before
         // any ENS navigation reaches the WebView.
         val name = EnsInput.parse(url)?.name ?: return SWARM_BADGE
-        return when (KnownEnsNames.protocolFor(name)) {
+        return when (KnownEnsNames.of(state.private).protocolFor(name)) {
             "ipfs", "ipns" -> IPFS_BADGE
             else -> SWARM_BADGE
         }
@@ -1429,9 +1429,13 @@ fun BrowserScreen(
                 )
             }
 
+            // A private tab's names stay in its own session (#464):
+            // read before the lookup, so a session that ends meanwhile
+            // doesn't get the answer recorded in the next one.
+            val names = KnownEnsNames.of(target.private)
             val ensProbe = scope.launch {
                 try {
-                    val result = ensResolver.resolveContenthash(name)
+                    val result = ensResolver.resolveContenthash(name, target.private)
                     // Everything below this line writes tab state —
                     // `loadUrl` alone cancels whatever probe the tab is
                     // waiting on now, which is how a cancelled probe
@@ -1498,7 +1502,7 @@ fun BrowserScreen(
                             // trust shield (#97). A `.tez` name's http(s)
                             // website is not content the name's origin
                             // serves, so it isn't recorded.
-                            if (!webRecord) KnownEnsNames.record(result.uri, name, result.trust)
+                            if (!webRecord) names.record(result.uri, name, result.trust)
                             if (webRecord) {
                                 // A `.tez` website record on the ordinary
                                 // web: navigate there directly, as desktop
@@ -2536,7 +2540,21 @@ fun BrowserScreen(
                             val added = repo.bookmark(url, state.title)
                             val private = state.private
                             scope.launch {
-                                val saved = added.await() ?: return@launch
+                                val saved = added.await() ?: run {
+                                    // Say why nothing happened: an address
+                                    // history and bookmarks never keep (over
+                                    // 8 KiB, `about:`, `data:`…, #461), or a
+                                    // failed write.
+                                    snackbarHostState.showSnackbar(
+                                        if (BrowsingRepository.isBookmarkable(url)) {
+                                            Strings.get(R.string.browser_bookmark_failed)
+                                        } else {
+                                            Strings.get(R.string.library_bookmark_cannot_bookmark)
+                                        },
+                                        duration = SnackbarDuration.Short,
+                                    )
+                                    return@launch
+                                }
                                 val id = saved.id
                                 // The star can still show the last page's
                                 // state for a moment; a page that turns out

@@ -189,11 +189,12 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
  * doesn't follow another tab's later re-check of the same name. A
  * document the tab's own re-check served takes its trust from the
  * answer it was served from ([EnsDocumentPins.answerFor]) instead —
- * after a failed lookup, an older one than this.
+ * after a failed lookup, an older one than this. [names]: the tab's
+ * session's registry, a private tab's own (#464).
  */
-internal fun nameTrustFor(displayUrl: String): NameTrust? {
+internal fun nameTrustFor(displayUrl: String, names: EnsNameRegistry = KnownEnsNames): NameTrust? {
     val name = nameIn(displayUrl) ?: return null
-    val (answer, trust) = KnownEnsNames.answerFor(name) ?: return null
+    val (answer, trust) = names.answerFor(name) ?: return null
     return NameTrust(name, trust, answer)
 }
 
