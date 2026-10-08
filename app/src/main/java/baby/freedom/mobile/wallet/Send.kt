@@ -1691,17 +1691,19 @@ class WalletSender internal constructor(
          * false (the quote aged while it was unlocked) ends it with
          * [QuoteStaleException], so nothing is reviewed that would be dropped;
          * it may throw [SigningHeldException] to end it for a reason of its own.
+         * [activity] as in [vaultSigner].
          */
         fun signerFor(
             context: android.content.Context,
             vault: Vault,
             account: WalletAccount,
+            activity: Boolean = true,
             fresh: () -> Boolean = { true },
         ): suspend (EthTransaction) -> EthTransaction.Signed = if (account.ledger != null) {
             val ledger = Ledger.get(context);
             { tx -> ledger.signTransaction(account, tx, fresh) }
         } else {
-            vaultSigner(vault, account)
+            vaultSigner(vault, account, activity)
         }
 
         private const val TAG = "WalletSend"
@@ -1986,10 +1988,13 @@ class WalletSender internal constructor(
         /**
          * Signs with [account]'s key from [vault]'s seed: derived for this
          * one signature and zeroed after. Throws [VaultLockedException] if
-         * the wallet isn't open.
+         * the wallet isn't open. [activity] false for a site's send, which
+         * may go out with no sheet under an auto-approve rule (#112): it
+         * mustn't hold the idle lock off (#474, as #236); a sheet the user
+         * confirmed has already counted ([Vault.noteActivity]).
          */
-        fun vaultSigner(vault: Vault, account: WalletAccount): suspend (EthTransaction) -> EthTransaction.Signed = { tx ->
-            val key = vault.withSeed { seed -> HdKeys.secp256k1(seed, account.path) }
+        fun vaultSigner(vault: Vault, account: WalletAccount, activity: Boolean = true): suspend (EthTransaction) -> EthTransaction.Signed = { tx ->
+            val key = vault.withSeed(activity) { seed -> HdKeys.secp256k1(seed, account.path) }
             try {
                 tx.sign(key, account.address)
             } finally {

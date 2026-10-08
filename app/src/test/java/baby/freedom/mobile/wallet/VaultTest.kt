@@ -1,5 +1,6 @@
 package baby.freedom.mobile.wallet
 
+import java.math.BigInteger
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -236,6 +237,45 @@ class VaultTest {
         now += 10_000L
         v.lockIfExpired()
         assertTrue(v.state.value is Vault.State.Locked)
+    }
+
+    @Test
+    fun `a site's send covered by an auto-approve rule doesn't hold the idle lock off (#474)`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val account = WalletAccount(0, "Account 1", v.withSeed(activity = false) { EthAccounts.address(it, 0) })
+        // What EthereumProviderBridge signs a site's send with: no sheet confirmed it.
+        val sign = WalletSender.vaultSigner(v, account, activity = false)
+        val tx = EthTransaction(
+            chainId = 100, nonce = BigInteger.ZERO, gasLimit = BigInteger.valueOf(65_000), to = account.address,
+            value = BigInteger.ZERO, data = ByteArray(0),
+            fees = EthTransaction.Fees.Eip1559(BigInteger.ONE, BigInteger.ONE),
+        )
+        now += 14 * 60_000L
+        sign(tx) // a covered transfer at 14 min
+        now += 60_000L - 1
+        v.lockIfExpired()
+        assertTrue(v.state.value is Vault.State.Unlocked)
+        now += 1
+        v.lockIfExpired()
+        assertTrue("locks 15 min after unlock, covered send or not", v.state.value is Vault.State.Locked)
+    }
+
+    @Test
+    fun `a send the user started in the wallet still counts as activity`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val account = WalletAccount(0, "Account 1", v.withSeed(activity = false) { EthAccounts.address(it, 0) })
+        val tx = EthTransaction(
+            chainId = 100, nonce = BigInteger.ZERO, gasLimit = BigInteger.valueOf(21_000), to = account.address,
+            value = BigInteger.ZERO, data = ByteArray(0),
+            fees = EthTransaction.Fees.Eip1559(BigInteger.ONE, BigInteger.ONE),
+        )
+        now += 14 * 60_000L
+        WalletSender.vaultSigner(v, account)(tx)
+        now += 14 * 60_000L
+        v.lockIfExpired()
+        assertTrue(v.state.value is Vault.State.Unlocked)
     }
 
     @Test
