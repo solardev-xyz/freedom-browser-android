@@ -99,11 +99,26 @@ class SitePermissionScopeTest {
             assertEquals("http://localhost:8730", documentPermissionOrigin("http://localhost:8730/"))
             assertEquals(PermissionScope("http://localhost:8730"), permissionScopeFor("http://localhost:8730/", "http://localhost:8730"))
             assertEquals(meet, sitePermissionOriginKey("https://meet.example/room"))
-            // What an earlier release left under such an origin is what the sweep takes.
+            // The sweep takes only the embedded Swarm gateway's fixed port (R2-M1/M2): the
+            // IPFS gateway's ephemeral port and a user-set endpoint's may be a dev server's
+            // grant (connected while it ran there), which it mustn't take away for good.
             assertEquals(
-                listOf(gateway, "https://localhost:8443"),
-                GatewayOriginSweep.gatewayOrigins(listOf(gateway, meet, "http://localhost:8730", gateway, "https://localhost:8443")),
+                listOf(gateway, "http://localhost:1633", "https://[::1]:1633"),
+                GatewayOriginSweep.gatewayOrigins(
+                    listOf(
+                        gateway, meet, "http://localhost:8730", gateway, "https://localhost:8443",
+                        "http://127.0.0.1:58312", "http://localhost:1633", "https://[::1]:1633",
+                    ),
+                ),
             )
+            // …and they stay refused while a gateway holds their port, and the same
+            // stored grant reads again once it doesn't.
+            assertNull(sitePermissionOriginKey("http://127.0.0.1:58312/"))
+            Gateways.setIpfsBase("http://127.0.0.1:41234")
+            assertEquals("http://127.0.0.1:58312", sitePermissionOriginKey("http://127.0.0.1:58312/"))
+            assertNull(sitePermissionOriginKey("http://127.0.0.1:41234/"))
+            assertFalse(GatewayOriginSweep.isSweptOrigin("http://127.0.0.1:41234"))
+            assertFalse(GatewayOriginSweep.isSweptOrigin("https://example.com:1633"))
         } finally {
             Gateways.setIpfsBase("")
             Gateways.setExternalEndpoints("", "")

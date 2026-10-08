@@ -160,4 +160,23 @@ class EthereumLinksTest {
         // Closed while the wallet was still loading: nothing was turned down (R1-M3).
         assertEquals(EthAnswer.Unseen, linkSendAnswer(started = false, shown = false))
     }
+
+    @Test
+    fun `R2-M3 - a payment link on a content gateway's own origin names nobody as asking`() {
+        try {
+            Gateways.setIpfsBase("http://127.0.0.1:58312")
+            // Every root loaded through the raw gateway shares this origin: not the asker.
+            assertNull(paymentLinkAsker("http://127.0.0.1:1633/bzz/aaaa/"))
+            assertNull(paymentLinkAsker("http://localhost:1633/bzz/aaaa/"))
+            assertNull(paymentLinkAsker("http://127.0.0.1:58312/ipfs/bafy/"))
+            // No web origin, as before.
+            assertNull(paymentLinkAsker("data:text/html,hi"))
+            assertNull(paymentLinkAsker(null))
+            // A site, and a dev server on another loopback port, still ask in their own name.
+            assertEquals("https://shop.example", paymentLinkAsker("https://shop.example/checkout"))
+            assertEquals("http://localhost:8730", paymentLinkAsker("http://localhost:8730/"))
+        } finally {
+            Gateways.setIpfsBase("")
+        }
+    }
 }

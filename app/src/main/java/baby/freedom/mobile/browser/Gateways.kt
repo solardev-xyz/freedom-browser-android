@@ -15,12 +15,9 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -475,10 +472,6 @@ object Gateways {
     private fun loopbackGatewayPorts(embeddedIpfs: String, externalSwarm: String, externalIpfs: String): Set<Int> =
         listOf(EMBEDDED_SWARM_BASE, embeddedIpfs, externalSwarm, externalIpfs)
             .mapNotNullTo(mutableSetOf()) { base -> permissionOriginKey(base)?.let(::loopbackPort) }
-
-    /** [loopbackGatewayPorts] as a flow, for the sweep of grants left on them ([GatewayOriginSweep]). */
-    val loopbackGatewayPortsFlow: Flow<Set<Int>> =
-        combine(embeddedIpfs, externalSwarm, externalIpfs, ::loopbackGatewayPorts).distinctUntilChanged()
 
     /**
      * The external IPFS gateway [gatewayUrl] (a [gatewayUrlFor] answer)

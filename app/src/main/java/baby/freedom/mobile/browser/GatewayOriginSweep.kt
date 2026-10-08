@@ -21,27 +21,46 @@ import kotlinx.coroutines.flow.first
  * hear `accountsChanged []` / `disconnect`), and forgets its remembered
  * site permissions.
  *
- * Runs once the external endpoints are known, and again whenever the set
- * of gateway ports changes ([Gateways.loopbackGatewayPortsFlow]): the
- * embedded IPFS gateway's port is only known once the node reports it, and
- * the user can point an external endpoint at this device. Like the
- * Disconnect it stands in for, it leaves a site's feed records and
- * publisher identities: those are keys and data, not a connection, and
- * are used again only by a site connected again.
+ * Only the embedded Swarm gateway's port ([Gateways.EMBEDDED_SWARM_BASE],
+ * 1633 in every release) is swept, on every loopback name. That port has
+ * been a gateway's in every release, so a grant under it can only have
+ * been given to the gateway's shared origin. The other gateway ports
+ * aren't: the embedded IPFS gateway draws an ephemeral port on each start,
+ * and an external endpoint is wherever the user points it. A grant under
+ * one of those ports may as well be a dev server's (`http://localhost:N`
+ * connected while it ran, when nothing else held N), and nothing stored
+ * tells the two apart, so taking it away for good would disconnect an
+ * unrelated site. Such a grant is refused while a gateway holds its port
+ * ([providerOriginKey], [sitePermissionOriginKey] read the live ports) and
+ * stays listed in Connected sites, where the user can disconnect it; a
+ * grant an earlier release left under an earlier run's IPFS port is, from
+ * then on, a loopback site's grant like any other.
+ *
+ * Like the Disconnect it stands in for, it leaves a site's feed records
+ * and publisher identities: those are keys and data, not a connection,
+ * and are used again only by a site connected again.
  */
 object GatewayOriginSweep {
     private const val TAG = "GatewayOriginSweep"
 
-    /** Follow the gateway ports for this process; main thread. */
-    suspend fun run(context: Context) {
-        val app = context.applicationContext
-        Gateways.awaitExternalEndpoints()
-        Gateways.loopbackGatewayPortsFlow.collect { sweep(app) }
-    }
+    /** Once per process; main thread. */
+    suspend fun run(context: Context) = sweep(context.applicationContext)
 
-    /** The [origins] that are a gateway's own origin ([isLoopbackGatewayOrigin]), each once. */
+    /** The embedded Swarm gateway's port, the one port swept. */
+    private val SWEPT_PORT: Int? = permissionOriginKey(Gateways.EMBEDDED_SWARM_BASE)?.let(::loopbackPort)
+
+    /**
+     * Whether [origin] (a [permissionOriginKey]) is the embedded Swarm
+     * gateway's own origin on some loopback name, `http` or `https`:
+     * what the sweep takes. Not the live [isLoopbackGatewayOrigin], whose
+     * ephemeral and user-set ports may belong to another site's grant.
+     */
+    internal fun isSweptOrigin(origin: String): Boolean =
+        SWEPT_PORT != null && loopbackPort(origin) == SWEPT_PORT
+
+    /** The [origins] the sweep takes ([isSweptOrigin]), each once. */
     internal fun gatewayOrigins(origins: Iterable<String>): List<String> =
-        origins.filter(::isLoopbackGatewayOrigin).distinct()
+        origins.filter(::isSweptOrigin).distinct()
 
     private suspend fun sweep(app: Context) {
         step("wallet connections") {
@@ -66,14 +85,14 @@ object GatewayOriginSweep {
         }
         step("x402 allowances") {
             val store = X402Store.get(app)
-            for (a in store.allowances.first().filter { isLoopbackGatewayOrigin(it.origin) }) {
+            for (a in store.allowances.first().filter { isSweptOrigin(it.origin) }) {
                 if (!store.revoke(a.origin, a.chainId, a.asset, a.account)) Log.w(TAG, "couldn't take a gateway origin's x402 allowance")
             }
         }
         step("site permissions") {
             val broker = SitePermissionBroker.get(app)
             for (entry in broker.entries.first()) {
-                if (isLoopbackGatewayOrigin(entry.origin) || isLoopbackGatewayOrigin(entry.top)) broker.revoke(entry)
+                if (isSweptOrigin(entry.origin) || isSweptOrigin(entry.top)) broker.revoke(entry)
             }
         }
     }
