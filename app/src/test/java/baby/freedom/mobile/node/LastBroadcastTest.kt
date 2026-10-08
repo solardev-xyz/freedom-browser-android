@@ -59,6 +59,39 @@ class LastBroadcastTest {
         assertEquals(source.value, last.current())
     }
 
+    /**
+     * R4-M1: the notification while demoted. Its throttle still moves on
+     * (nothing is posted), and re-promotion posts what the throttle last
+     * sent, so a count going back to that value leaves it right.
+     */
+    @Test
+    fun aRepromotionShowsTheThrottlesLastValueNotTheLiveCount() = runTest {
+        val source = MutableStateFlow(running.copy(connectedPeers = 29))
+        val notified = LastBroadcast { source.value }
+        var demoted = true
+        var shown: NodeInfo? = null
+        fun update(info: NodeInfo) { if (!demoted) shown = info }
+        backgroundScope.launch {
+            source.throttlePeerCount(30_000) { testScheduler.currentTime }.collect { notified.publish(it, ::update) }
+        }
+        runCurrent()
+        advanceTimeBy(31_000)
+        source.value = running.copy(connectedPeers = 30) // sent, not posted
+        runCurrent()
+        advanceTimeBy(1_000)
+        source.value = running.copy(connectedPeers = 31) // held back
+        runCurrent()
+        // Re-promotion.
+        notified.withCurrent { info -> demoted = false; shown = info }
+        assertEquals(30L, shown?.connectedPeers)
+        advanceTimeBy(1_000)
+        source.value = running.copy(connectedPeers = 30) // dropped as unchanged
+        runCurrent()
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(source.value, shown)
+    }
+
     /** A join racing a broadcast never ends on the older value. */
     @Test
     fun aJoinRacingAPublishEndsOnTheNewerValue() {

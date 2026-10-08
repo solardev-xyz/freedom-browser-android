@@ -196,6 +196,12 @@ class NodeService : Service() {
     /** The Swarm state as last broadcast, which [binder] hands out too. */
     private val swarmBroadcast = LastBroadcast { reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value) }
 
+    /**
+     * The Swarm state the notification's throttle last sent, posted or not
+     * (a demoted service posts nothing): what a re-promotion shows (R4-M1).
+     */
+    private val swarmNotified = LastBroadcast { reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value) }
+
     private val binder = object : INodeService.Stub() {
         // What the throttled broadcast last sent, not the live count (#471).
         override fun getState(): NodeInfo = swarmBroadcast.current()
@@ -735,8 +741,13 @@ class NodeService : Service() {
 
     private fun repromoteForegroundIfDemoted() {
         if (!foreground.demoted) return
-        val refusal = foreground.promote {
-            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
+        // The notification throttle's last value, not the live count: a
+        // held-back count posted here would stick once the count went back
+        // to what the throttle last sent, which it drops as unchanged.
+        val refusal = swarmNotified.withCurrent { info ->
+            foreground.promote {
+                startForeground(NOTIFICATION_ID, buildNotification(info), foregroundTypeCompat())
+            }
         }
         Log.i(TAG, if (refusal == null) "re-promoted to foreground service" else "foreground re-promotion refused: ${refusal.message}")
     }
@@ -863,7 +874,7 @@ class NodeService : Service() {
                 }
                 .launchIn(this)
             swarmReported.throttlePeerCount(PEER_NOTIFICATION_MS)
-                .onEach(::updateNotification)
+                .onEach { info -> swarmNotified.publish(info, ::updateNotification) }
                 .launchIn(this)
         }
 
