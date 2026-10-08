@@ -197,8 +197,15 @@ object AddressLabel {
      * Anything else bare is loaded by [UrlParser] as `https://…`, a
      * special scheme, where Chromium splits at the backslash
      * (`example.com\@bank.com/x` loads `example.com`) — see [authorityOf].
+     *
+     * Text without a `\` never depends on the answer, so it skips
+     * [EnsInput.parse]: this runs in composition, and a non-ASCII name
+     * would otherwise trigger ENSIP-15's one-time spec decode on Main
+     * (a backslashed one doesn't — [EnsInput.parse] knows ENSIP-15
+     * refuses it without asking the library).
      */
-    private fun bareBackslashSeparates(raw: String): Boolean = EnsInput.parse(raw) == null
+    private fun bareBackslashSeparates(raw: String): Boolean =
+        '\\' in raw && EnsInput.parse(raw) == null
 
     /** Drop `user:pass@` and a trailing `:port`. */
     private fun hostOnly(authority: String): String {
