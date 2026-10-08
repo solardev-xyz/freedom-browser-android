@@ -268,4 +268,49 @@ class AddressLabelTest {
         // Joiners aren't bidi controls: an emoji name keeps them.
         assertEquals("\uD83D\uDC68\u200D\uD83D\uDCBB.eth", AddressLabel.resting("\uD83D\uDC68\u200D\uD83D\uDCBB.eth"))
     }
+
+    // #488: a label shown as given can be a page's whole 2 MB address.
+
+    @Test
+    fun `a huge blob address rests on a bounded label keeping both ends`() {
+        val url = "blob:http://127.0.0.1:8700/0b1d-uuid#" + "a".repeat(1_000_000) + "END"
+        val label = AddressLabel.resting(url)
+        assertTrue(label.length <= AddressLabel.MAX_LABEL_CHARS)
+        assertTrue(label.startsWith("blob:http://127.0.0.1:8700/0b1d-uuid#"))
+        assertTrue(label.endsWith("aEND"))
+        assertTrue("…" in label)
+    }
+
+    @Test
+    fun `huge file and about addresses are bounded too`() {
+        for (url in listOf("file:///sdcard/x.html#" + "b".repeat(2_000_000), "about:blank#" + "c".repeat(500_000))) {
+            assertTrue(AddressLabel.resting(url).length <= AddressLabel.MAX_LABEL_CHARS)
+        }
+    }
+
+    @Test
+    fun `a label within the bound is untouched`() {
+        val url = "about:blank#" + "c".repeat(AddressLabel.MAX_LABEL_CHARS - 12)
+        assertEquals(AddressLabel.MAX_LABEL_CHARS, url.length)
+        assertEquals(url, AddressLabel.resting(url))
+    }
+
+    @Test
+    fun `bounding a huge label keeps its userinfo at sign`() {
+        val url = "ens://" + "a".repeat(600_000) + "@vitalik.eth/" + "p".repeat(600_000)
+        val label = AddressLabel.resting(url)
+        assertTrue(label.length <= AddressLabel.MAX_LABEL_CHARS)
+        assertTrue(label, "@vitalik.eth" in label)
+    }
+
+    @Test
+    fun `bounding never splits a surrogate pair`() {
+        val url = "about:blank#" + "😀".repeat(400_000)
+        val label = AddressLabel.resting(url)
+        assertTrue(label.length <= AddressLabel.MAX_LABEL_CHARS)
+        label.forEachIndexed { i, ch ->
+            if (ch.isHighSurrogate()) assertTrue(label[i + 1].isLowSurrogate())
+            if (ch.isLowSurrogate()) assertTrue(label[i - 1].isHighSurrogate())
+        }
+    }
 }

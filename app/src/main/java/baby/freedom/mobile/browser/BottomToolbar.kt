@@ -2405,8 +2405,11 @@ private fun AddressField(
     // whole, a page's 2 MB address is wider than Compose can measure and
     // crashed the app (#488). Go on the unedited field still submits the
     // whole address (see [AddressFieldText]).
-    val shownAddress = remember(state.addressBarText) {
-        AddressFieldText.shown(state.addressBarText)
+    // Read once here, so the effects below seed [seededAddress] with the
+    // very address [shownAddress] was made from.
+    val committedAddress = state.addressBarText
+    val shownAddress = remember(committedAddress) {
+        AddressFieldText.shown(committedAddress)
     }
     var fieldValue by remember(state.id) {
         mutableStateOf(
@@ -2416,6 +2419,12 @@ private fun AddressField(
             ),
         )
     }
+    // The address the field's text was last seeded from. Go compares the
+    // field with *this* address's shortened form, not the tab's current
+    // one: the field isn't re-seeded during an edit, so a page that
+    // rewrites its long address meanwhile (`replaceState`) would otherwise
+    // have Go submit the old address's shortened text, `…` and all.
+    var seededAddress by remember(state.id) { mutableStateOf(committedAddress) }
 
     // External → internal sync. Fires when the webview updates the
     // displayed URL, when the user hits × (see below), or when submit()
@@ -2428,6 +2437,7 @@ private fun AddressField(
         // Never clobber an in-progress edit: a page that happens to
         // finish loading while the user is typing updates the committed
         // address, and the buffer picks that up when the edit ends.
+        if (!addressFocused) seededAddress = committedAddress
         if (!addressFocused && fieldValue.text != shownAddress) {
             // Park the cursor at position 0 so long URLs horizontally
             // scroll to their *start* rather than their tail — the
@@ -2461,6 +2471,7 @@ private fun AddressField(
             if (fieldValue.text.isEmpty()) fieldValue
             else fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
         } else {
+            seededAddress = committedAddress
             TextFieldValue(text = shownAddress, selection = TextRange.Zero)
         }
     }
@@ -2610,7 +2621,7 @@ private fun AddressField(
                     ),
                     keyboardActions = KeyboardActions(
                         onGo = {
-                            onSubmit(AddressFieldText.submitted(fieldValue.text, state.addressBarText))
+                            onSubmit(AddressFieldText.submitted(fieldValue.text, seededAddress))
                         },
                     ),
                     decorationBox = { innerTextField ->

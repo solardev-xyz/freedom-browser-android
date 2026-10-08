@@ -71,7 +71,33 @@ object AddressLabel {
      * `""` for a blank URL (the home tab), which lets the caller fall
      * back to the "Search or type URL" placeholder.
      */
-    fun resting(displayUrl: String): String = BidiControls.marked(restingUnmarked(displayUrl))
+    fun resting(displayUrl: String): String = BidiControls.marked(bounded(restingUnmarked(displayUrl)))
+
+    /**
+     * Longest label [resting] hands the capsule. Far more than a pill can
+     * show at any font scale (its middle ellipsis keeps a few dozen
+     * characters), and short enough to lay out at once.
+     */
+    const val MAX_LABEL_CHARS = 2048
+
+    /**
+     * [label] held to [MAX_LABEL_CHARS] (#488). A label shown as given
+     * (`blob:`, `file:`, `about:`, `data:`, a refused name) can be a
+     * page's whole address, up to Chromium's 2 MiB, and laying that out
+     * in the capsule's middle-ellipsised `Text` blocked the main thread
+     * for minutes. It is shortened the way the capsule would have
+     * shortened it anyway: around a userinfo `@` in its authority by
+     * [keepingAt], so the `@` stays in it; otherwise in the middle,
+     * keeping its head and its tail, the two ends a middle ellipsis
+     * shows. A label within the bound is returned as it is.
+     */
+    internal fun bounded(label: String): String {
+        if (label.length <= MAX_LABEL_CHARS) return label
+        val kept = keepingAt(label) { it.length <= MAX_LABEL_CHARS }
+        if (kept.length <= MAX_LABEL_CHARS) return kept
+        val half = (MAX_LABEL_CHARS - 1) / 2
+        return label.take(cutBefore(label, half)) + "…" + label.substring(cutAfter(label, half))
+    }
 
     // Every bidi control is shown as U+FFFD ([BidiControls.marked]). A
     // name ENSIP-15 refuses is still put in the bar as given, for its
