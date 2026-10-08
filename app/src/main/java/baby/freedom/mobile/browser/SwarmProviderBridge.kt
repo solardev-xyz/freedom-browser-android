@@ -24,15 +24,19 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.WeakHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -124,6 +128,19 @@ object SwarmProviders {
     private var provider: SwarmProvider? = null
 
     private val scope = MainScope()
+
+    /**
+     * What each tab may have in flight (#459): uploads (requests over a
+     * megabyte) share 24M characters, so a page's `Promise.all` of a dozen
+     * photos runs side by side, and one upload of any accepted size goes
+     * through on its own; the small requests go beside them.
+     */
+    private val budget = BridgeRequestBudget(
+        maxRequests = 128,
+        smallChars = 4L * 1024 * 1024,
+        largeAbove = 1024 * 1024,
+        largeChars = 24L * 1024 * 1024,
+    )
 
     /** Live bridges, one per WebView; main thread only. */
     private val bridges = WeakHashMap<WebView, Bridge>()
@@ -391,50 +408,85 @@ object SwarmProviders {
         val tab = bridge.tab
         val deadline = SystemClock.elapsedRealtime() + SHEET_WAIT_MS
         if (message.type != WebMessageCompat.TYPE_STRING) return
+        val data = message.data ?: return
         val origin = providerOriginKey(sourceOrigin)
-        parseSwarmConfirm(message.data)?.let { id ->
+        parseSwarmConfirm(data)?.let { id ->
             // The page script got a subscription's id (see [confirmLater]).
             if (isMainFrame && origin != null) subscriptions?.confirm(origin, id)
             return
         }
-        val request = parseSwarmRequest(message.data) ?: run {
-            // Readable enough to answer: the page learns now, not after five minutes.
-            unparsedRequestId(message.data)?.let { answer(reply, it, unparsedSwarmRequestError(message.data)) }
+        // Too long ever to be accepted: refused as such, not as "try again".
+        if (data.length > MAX_SWARM_REQUEST_CHARS) {
+            unparsedRequestId(data)?.let { answer(reply, it, unparsedSwarmRequestError(data)) }
             return
         }
-        if (!isMainFrame || origin == null) {
-            val why = if (!isMainFrame) "window.swarm is only available to the top-level page" else "Origin not permitted"
-            answer(reply, request.id, SwarmProvider.Reply.Err(SwarmProvider.UNAUTHORIZED, why))
-            return
-        }
-        // Which of the tab's documents this is: a message from the
-        // outgoing document can arrive after the tab started the next
-        // (see radicleDocumentFor).
-        val doc = radicleDocumentFor(
-            current = documents[tab.id] ?: 0,
-            origin = origin,
-            committedOrigin = committedOrigins[tab.id],
-        )
-        if (doc != STALE_DOCUMENT) {
-            bridge.origin = origin
-            bridge.reply = reply
-        }
-        scope.launch {
-            val result = try {
-                val p = provider ?: throw IllegalStateException("provider not ready")
-                val approved = { approved(reply, request.id) }
-                manifestFresh(bridge, doc, origin, request.method, deadline)
-                    ?: p.request(origin, request.method, request.params, approved, Subscriber(tab.id, doc, reply)) { ask ->
-                        askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved = approved)
-                    }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                Log.w(TAG, "swarm request ${request.method} failed: ${e.javaClass.simpleName}")
-                SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Internal error")
+        // Counted before it's parsed, and answered at once over the tab's share (#459).
+        val ticket = budget.reserve(tab.id, data.length) ?: run {
+            unparsedRequestId(data)?.let {
+                answer(reply, it, SwarmProvider.Reply.Err(BridgeRequestBudget.LIMIT_EXCEEDED, BridgeRequestBudget.LIMIT_MESSAGE))
             }
-            answer(reply, request.id, result)
-            if (request.method == "swarm_subscribe") confirmLater(result)
+            return
+        }
+        // Which of the tab's documents this is, judged on arrival: a
+        // message from the outgoing document can arrive after the tab
+        // started the next (see radicleDocumentFor).
+        val doc = if (isMainFrame && origin != null) {
+            radicleDocumentFor(current = documents[tab.id] ?: 0, origin = origin, committedOrigin = committedOrigins[tab.id])
+        } else {
+            STALE_DOCUMENT
+        }
+        // Up to 72M characters: let go of once parsed, not held while the request waits.
+        var raw: String? = data
+        scope.launch {
+            try {
+                val text = raw!!
+                raw = null
+                // Scanned and parsed off the main thread (#459): a big
+                // upload's message would hold it up for seconds. On
+                // threads with a deeper stack than Default's (see
+                // SwarmRequestParsing). So a
+                // request reaches the provider once it's parsed, not in
+                // the order it arrived: a small one sent after a big
+                // upload can be handled (and take the prompt) first.
+                val (request, refusal) = withContext(SwarmRequestParsing.dispatcher) {
+                    val parsed = parseSwarmRequest(text)
+                    parsed to if (parsed == null) unparsedRequestId(text)?.let { it to unparsedSwarmRequestError(text) } else null
+                }
+                if (request == null) {
+                    // Readable enough to answer: the page learns now, not after five minutes.
+                    refusal?.let { (id, err) -> answer(reply, id, err) }
+                    return@launch
+                }
+                if (!isMainFrame || origin == null) {
+                    val why = if (!isMainFrame) "window.swarm is only available to the top-level page" else "Origin not permitted"
+                    answer(reply, request.id, SwarmProvider.Reply.Err(SwarmProvider.UNAUTHORIZED, why))
+                    return@launch
+                }
+                // Still the document it came from: one started since has its own channel.
+                if (doc != STALE_DOCUMENT && (documents[tab.id] ?: 0) == doc) {
+                    bridge.origin = origin
+                    bridge.reply = reply
+                }
+                val id = request.id
+                val method = request.method
+                val result = try {
+                    val p = provider ?: throw IllegalStateException("provider not ready")
+                    val approved = { approved(reply, id) }
+                    manifestFresh(bridge, doc, origin, method, deadline)
+                        ?: p.request(origin, method, request.params, approved, Subscriber(tab.id, doc, reply)) { ask ->
+                            askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved = approved)
+                        }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Log.w(TAG, "swarm request $method failed: ${e.javaClass.simpleName}")
+                    SwarmProvider.Reply.Err(SwarmProvider.INTERNAL, "Internal error")
+                }
+                answer(reply, id, result)
+                if (method == "swarm_subscribe") confirmLater(result)
+            } finally {
+                ticket.release()
+            }
         }
     }
 
@@ -1032,15 +1084,44 @@ internal fun manifestFromAnswer(status: Int, body: ByteArray): ManifestDiscovery
 
 private const val MANIFEST_TIMEOUT_MS = 30_000
 
+/**
+ * Where [parseSwarmRequest] runs off the main thread. org.json parses
+ * recursively, and [MAX_SWARM_REQUEST_CONTAINERS] lets a request nest
+ * thousands deep: that parses within the main thread's 8 MiB stack but
+ * overflows a `Dispatchers.Default` worker's ~1 MiB one, so a request the
+ * main thread used to accept would be refused as invalid. These threads
+ * get a stack that holds the deepest request the caps allow, and there
+ * are no more of them than Default has (one per core), each let go of
+ * once idle. The stack is address space, touched only as deep as a parse
+ * goes.
+ */
+internal object SwarmRequestParsing {
+    /**
+     * On the emulator, 10,000 nested arrays or objects overflow a thread
+     * asked for 8 MiB (ART keeps part of it back) and parse on 16 MiB:
+     * twice that, for a slower interpreter or bigger frames elsewhere.
+     */
+    const val STACK_BYTES = 32L * 1024 * 1024
+
+    private val threads = AtomicInteger()
+
+    val dispatcher: CoroutineDispatcher by lazy {
+        val n = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+        ThreadPoolExecutor(n, n, 30, TimeUnit.SECONDS, LinkedBlockingQueue()) { r ->
+            Thread(null, r, "swarm-request-parse-${threads.incrementAndGet()}", STACK_BYTES).apply { isDaemon = true }
+        }.apply { allowCoreThreadTimeOut(true) }.asCoroutineDispatcher()
+    }
+}
+
 /** One `window.swarm` request off the channel. */
 internal data class SwarmRequest(val id: Long, val method: String, val params: JSONObject)
 
 /** Parse `{"id": n, "method": "swarm_…", "params": {…}}`, or null if it isn't one. */
 internal fun parseSwarmRequest(data: String?): SwarmRequest? {
     if (data == null || data.length > MAX_SWARM_REQUEST_CHARS) return null
-    // Parsed on the main thread, before any origin or grant check: JSON
-    // whose parse costs far more memory than its length (a huge array of
-    // numbers, nested empty arrays) would take the whole browser down.
+    // Parsed before any origin or grant check (off the main thread, #459):
+    // JSON whose parse costs far more memory than its length (a huge array
+    // of numbers, nested empty arrays) would take the whole browser down.
     if (!jsonShapeWithin(data, MAX_SWARM_REQUEST_VALUES, MAX_SWARM_REQUEST_CONTAINERS)) return null
     val json = try {
         JSONObject(data)
