@@ -4,12 +4,40 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface HistoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entry: HistoryEntry): Long
+
+    /**
+     * Record [entry] and drop every visit but the newest [keep] (#473),
+     * in one transaction, so the table never grows past [keep] rows and
+     * Room's observers re-run once for the two writes. "Newest" is by
+     * row id — the order visits were recorded in — not [HistoryEntry.visitedAt],
+     * so a device clock that's wrong (or later corrected) can't make the
+     * trim throw away the visits the user just made.
+     */
+    @Transaction
+    suspend fun insertKeeping(entry: HistoryEntry, keep: Int): Long {
+        val id = insert(entry)
+        trimTo(keep)
+        return id
+    }
+
+    /**
+     * Delete every visit but the newest [keep] by row id (#473). The
+     * subquery walks the primary key from the top, so it costs [keep]
+     * steps whatever the table's size, and deletes nothing — and so
+     * wakes no observer — while the table holds [keep] rows or fewer.
+     */
+    @Query(
+        "DELETE FROM history WHERE id <= " +
+            "(SELECT id FROM history ORDER BY id DESC LIMIT 1 OFFSET :keep)",
+    )
+    suspend fun trimTo(keep: Int)
 
     @Query("SELECT * FROM history ORDER BY visitedAt DESC LIMIT :limit")
     fun recent(limit: Int = 500): Flow<List<HistoryEntry>>

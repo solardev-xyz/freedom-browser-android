@@ -12,10 +12,12 @@ import androidx.room.PrimaryKey
  * `ens://…`, or plain `https://…`), *not* the gateway-rewritten URL —
  * otherwise history would show Freedom's implementation detail rather
  * than what the user actually visited. [visitedAt] is epoch millis.
+ * [url] is indexed (#473) for the address bar's `GROUP BY url`
+ * ([HistoryDao.suggest]) and the deletes by page.
  */
 @Entity(
     tableName = "history",
-    indices = [Index(value = ["visitedAt"])],
+    indices = [Index(value = ["visitedAt"]), Index(value = ["url"])],
 )
 data class HistoryEntry(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

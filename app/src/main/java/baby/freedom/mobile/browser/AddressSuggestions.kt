@@ -66,6 +66,13 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.data.UrlSuggestion
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.flow.withIndex
 
 /**
  * Clear focus (ending an address-bar edit) and hide the keyboard on any
@@ -117,6 +124,32 @@ internal fun PageWithSuggestions(
     }
 }
 
+/** How long the address bar waits for typing to pause before it searches bookmarks and history (#473). */
+internal const val LOCAL_MATCHES_DEBOUNCE_MS = 100L
+
+/**
+ * [lookup] for the latest of [queries] (#473): the first query at once,
+ * so the panel fills as soon as it opens, and each later one only once
+ * no newer one has come for [debounceMs] — typing "github" quickly runs
+ * one database search, not six. A newer query cancels the older one's
+ * flow, so its late results never show. While waiting, the previous
+ * results stay; the browser ranks them against the text now typed
+ * ([rankSuggestions]), which drops any that no longer match.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal fun <T> debouncedLookup(
+    queries: Flow<String>,
+    debounceMs: Long = LOCAL_MATCHES_DEBOUNCE_MS,
+    lookup: (String) -> Flow<T>,
+): Flow<T> =
+    queries
+        .distinctUntilChanged()
+        .withIndex()
+        .transformLatest { (i, query) ->
+            if (i > 0) delay(debounceMs)
+            emitAll(lookup(query))
+        }
+
 /**
  * Opaque panel that overlays the WebView while the address bar is
  * focused and edited: the action rows for what has been typed (#171 —
@@ -147,9 +180,10 @@ internal fun SuggestionsPanel(
     bottomContentPadding: Dp,
     modifier: Modifier = Modifier,
 ) {
-    // Re-subscribe when the query changes; Room's Flow keeps emitting
+    // Re-subscribe once typing pauses (#473); Room's Flow keeps emitting
     // fresh results if the underlying tables change too.
-    val matchesFlow = remember(repo, query) { repo.suggestionMatches(query) }
+    val latestQuery by rememberUpdatedState(query)
+    val matchesFlow = remember(repo) { debouncedLookup(snapshotFlow { latestQuery }) { repo.suggestionMatches(it) } }
     val matches by matchesFlow.collectAsState(initial = null)
     val history = remember(matches) {
         matches?.pages.orEmpty().map { HistoryCandidate(it.url, it.title, it.visits, it.lastVisit) }

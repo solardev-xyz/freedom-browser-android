@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FaviconEntry::class,
         DownloadEntry::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -151,8 +151,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        internal val MIGRATIONS =
-            arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+        /**
+         * v7 -> v8 (#473): index history's `url`, which the address bar's
+         * suggestions group by on every keystroke, and keep only the newest
+         * [BrowsingRepository.MAX_HISTORY_VISITS] visits — what the
+         * repository trims to on each new visit from now on.
+         */
+        internal val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_history_url` ON `history` (`url`)")
+                db.execSQL(
+                    "DELETE FROM `history` WHERE `id` <= (SELECT `id` FROM `history` " +
+                        "ORDER BY `id` DESC LIMIT 1 OFFSET ${BrowsingRepository.MAX_HISTORY_VISITS})",
+                )
+            }
+        }
+
+        internal val MIGRATIONS = arrayOf(
+            MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8,
+        )
 
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {

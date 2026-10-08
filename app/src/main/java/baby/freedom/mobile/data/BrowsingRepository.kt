@@ -84,17 +84,19 @@ class BrowsingRepository internal constructor(
     /**
      * Record a page visit. No-ops for empty URLs, `about:*`, `data:*`, and
      * `javascript:*` — we don't want internal bookkeeping noise or script
-     * evaluations to show up in the user's history.
+     * evaluations to show up in the user's history. Keeps only the newest
+     * [MAX_HISTORY_VISITS] visits (#473).
      */
     fun recordVisit(url: String, title: String) {
         if (!isRecordable(url)) return
         scope.launch {
-            db.history().insert(
+            db.history().insertKeeping(
                 HistoryEntry(
                     url = url,
                     title = storedTitle(title),
                     visitedAt = System.currentTimeMillis(),
                 ),
+                keep = MAX_HISTORY_VISITS,
             )
         }
     }
@@ -400,6 +402,16 @@ class BrowsingRepository internal constructor(
          * different page, so a longer one isn't kept at all.
          */
         const val MAX_URL_CHARS = 8 * 1024
+
+        /**
+         * How many visits history keeps (#473); recording one more drops
+         * the oldest ([HistoryDao.insertKeeping]). Without a cap the table
+         * only grew, and the address bar's suggestions scan all of it on
+         * every keystroke ([HistoryDao.suggest]). About half a year of
+         * heavy browsing; a page visited often within it still counts all
+         * those visits, and a bookmark is never touched.
+         */
+        const val MAX_HISTORY_VISITS = 10_000
 
         /**
          * The longest title history and bookmarks keep (#461); a longer

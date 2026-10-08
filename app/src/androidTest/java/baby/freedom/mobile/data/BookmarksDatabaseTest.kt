@@ -99,7 +99,7 @@ class BookmarksDatabaseTest {
             close()
         }
 
-        // Opening it with the app's migrations runs v3 -> v4 -> v5 -> v6 -> v7, and
+        // Opening it with the app's migrations runs v3 -> v4 -> v5 -> v6 -> v7 -> v8, and
         // Room checks the migrated tables against the entities (columns,
         // types, defaults, indices) before anything reads them — a
         // mismatch throws here.
@@ -111,7 +111,7 @@ class BookmarksDatabaseTest {
                 val positions = buildMap { while (c.moveToNext()) put(c.getLong(0), c.getLong(1)) }
                 assertEquals(mapOf(2L to 0L, 4L to 1L, 3L to 2L, 1L to 3L), positions)
             }
-            assertEquals(7, db.openHelper.readableDatabase.version)
+            assertEquals(8, db.openHelper.readableDatabase.version)
             runBlocking {
                 val all = db.bookmarks().all().first()
                 assertEquals(listOf(2L, 4L, 3L, 1L), all.map { it.id })
@@ -148,7 +148,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(7, db.openHelper.readableDatabase.version)
+            assertEquals(8, db.openHelper.readableDatabase.version)
             runBlocking {
                 val d = db.downloads().get(7)!!
                 assertEquals("a.zip", d.fileName)
@@ -189,7 +189,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(7, db.openHelper.readableDatabase.version)
+            assertEquals(8, db.openHelper.readableDatabase.version)
             runBlocking {
                 val d = db.downloads().get(9)!!
                 assertEquals("paused", d.status)
@@ -242,7 +242,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(7, db.openHelper.readableDatabase.version)
+            assertEquals(8, db.openHelper.readableDatabase.version)
             runBlocking {
                 val history = db.history().recent().first()
                 assertEquals(listOf(5L, 4L, 1L), history.map { it.id })
@@ -265,11 +265,56 @@ class BookmarksDatabaseTest {
     }
 
     /**
+     * v7 -> v8 (#473): history's `url` gets its index, and a table that
+     * grew past [BrowsingRepository.MAX_HISTORY_VISITS] keeps only the
+     * newest that many visits, by the order they were recorded — even a
+     * newer `visitedAt` on an older row (a clock that was ahead) doesn't
+     * keep it. Bookmarks aren't touched.
+     */
+    @Test
+    fun migrationFromSevenIndexesAndCapsHistory() {
+        val name = "migration-7-8.db"
+        context.deleteDatabase(name)
+        val total = BrowsingRepository.MAX_HISTORY_VISITS + 5
+        createDatabase(name, 7).apply {
+            // Row 1 says year 2100; rows count up from 2 with visitedAt = id.
+            execSQL("INSERT INTO history (id, url, title, visitedAt) VALUES (1, 'https://future.example/', 'F', 4102444800000)")
+            execSQL(
+                "WITH RECURSIVE n(i) AS (SELECT 2 UNION ALL SELECT i + 1 FROM n WHERE i < $total) " +
+                    "INSERT INTO history (id, url, title, visitedAt) SELECT i, 'https://p' || (i % 50) || '.example/', 'P', i FROM n",
+            )
+            execSQL("INSERT INTO bookmarks (id, url, title, createdAt, position) VALUES (1, 'vitalik.eth', 'V', 1, 0)")
+            close()
+        }
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(*AppDatabase.MIGRATIONS)
+            .build()
+        try {
+            val sql = db.openHelper.readableDatabase
+            assertEquals(8, sql.version)
+            sql.query("SELECT COUNT(*), MIN(id), MAX(id) FROM history").use { c ->
+                c.moveToFirst()
+                assertEquals(BrowsingRepository.MAX_HISTORY_VISITS, c.getInt(0))
+                assertEquals(6L, c.getLong(1))
+                assertEquals(total.toLong(), c.getLong(2))
+            }
+            sql.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'history'").use { c ->
+                val names = buildSet { while (c.moveToNext()) add(c.getString(0)) }
+                assertTrue(names.toString(), "index_history_url" in names)
+            }
+            runBlocking { assertEquals(listOf("vitalik.eth"), db.bookmarks().all().first().map { it.url }) }
+        } finally {
+            db.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    /**
      * v1 (history and bookmarks) and v2 (+ favicons) predate the exported
      * schemas, so they are built from v3's — their tables were the same
      * entities until v3 added `downloads` (v1 -> v2 -> v3 kept them
      * unchanged). A database from v0.6.5 or earlier takes these steps on
-     * its way to v7: every row kept, bookmarks numbered newest first,
+     * its way to v8: every row kept, bookmarks numbered newest first,
      * and Room's check of the migrated tables against the entities passes.
      */
     @Test
@@ -294,7 +339,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(7, db.openHelper.readableDatabase.version)
+            assertEquals(8, db.openHelper.readableDatabase.version)
             runBlocking {
                 assertEquals(listOf("vitalik.eth", "https://a.example/"), db.bookmarks().all().first().map { it.url })
                 assertEquals(listOf(0L, 1L), db.bookmarks().all().first().map { it.position })
