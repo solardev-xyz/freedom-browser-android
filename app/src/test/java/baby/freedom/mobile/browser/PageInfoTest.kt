@@ -21,6 +21,81 @@ class PageInfoTest {
     private val ipfs = ProtocolBadge(R.drawable.ic_ipfs, R.string.browser_badge_via_ipfs)
 
     @Test
+    fun `an IPFS page through an external gateway names the gateway, not the network`() {
+        val gw = "https://ipfs.io"
+        val through = DocumentSource(ipfsGateway = gw)
+        val expected = IpfsGatewayUse.Document(gw)
+        assertEquals(expected, ipfsGatewayUseFor(PageConnection.Ipfs, "ipfs://bafy", gw, through))
+        assertEquals(expected, ipfsGatewayUseFor(PageConnection.Ipfs, "vitalik.eth", gw, through))
+        // A raw virtual origin of a CID or an IPNS name is IPFS content too.
+        val cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        val cidOrigin = VirtualOrigin.originFor(ContentRoot.Ipfs(cid))!!
+        assertEquals(expected, ipfsGatewayUseFor(PageConnection.Dweb, "$cidOrigin/index.html", gw, through))
+        val ipnsOrigin = VirtualOrigin.originFor(ContentRoot.IpnsName("docs.ipfs.tech"))!!
+        assertEquals(expected, ipfsGatewayUseFor(PageConnection.Dweb, "$ipnsOrigin/", gw, through))
+        // The gateway that served it, even once Settings has moved on
+        // (the sweep reloads the page, but it's still on screen until then).
+        assertEquals(expected, ipfsGatewayUseFor(PageConnection.Ipfs, "vitalik.eth", "", through))
+        assertEquals(
+            expected,
+            ipfsGatewayUseFor(PageConnection.Ipfs, "vitalik.eth", "https://dweb.link", through),
+        )
+    }
+
+    @Test
+    fun `a page this device's node served before a switch to a gateway isn't said to come through it`() {
+        val gw = "https://ipfs.io"
+        val node = DocumentSource(ipfsGateway = null)
+        assertEquals(
+            IpfsGatewayUse.SinceLoaded(gw),
+            ipfsGatewayUseFor(PageConnection.Ipfs, "vitalik.eth", gw, node),
+        )
+        // Source unknown (a page a service worker answered): the current
+        // setting stands in, on the cautious side.
+        assertEquals(
+            IpfsGatewayUse.Document(gw),
+            ipfsGatewayUseFor(PageConnection.Ipfs, "vitalik.eth", gw, null),
+        )
+    }
+
+    @Test
+    fun `this device's node, Swarm, the web and error pages name no gateway`() {
+        // No external gateway: the embedded node checks content against the CID.
+        val node = DocumentSource(ipfsGateway = null)
+        assertNull(ipfsGatewayUseFor(PageConnection.Ipfs, "ipfs://bafy", "", node))
+        assertNull(ipfsGatewayUseFor(PageConnection.Ipfs, "ipfs://bafy", "", null))
+        val gw = "https://ipfs.io"
+        for (source in listOf(node, null, DocumentSource(gw))) {
+            assertNull(ipfsGatewayUseFor(PageConnection.Swarm, "bzz://abc", gw, source))
+            assertNull(ipfsGatewayUseFor(PageConnection.Secure, "https://example.org/", gw, source))
+            assertNull(ipfsGatewayUseFor(PageConnection.ErrorPage, "ipfs://bafy", gw, source))
+            assertNull(ipfsGatewayUseFor(null, "about:blank", gw, source))
+            val bzzOrigin = VirtualOrigin.originFor(ContentRoot.Bzz("a".repeat(64)))!!
+            assertNull(ipfsGatewayUseFor(PageConnection.Dweb, "$bzzOrigin/", gw, source))
+        }
+    }
+
+    @Test
+    fun `a committed document remembers the gateway its own answer came from`() {
+        val tab = TabDocuments()
+        assertNull(tab.committedSource)
+        tab.mainFrameAnswered("https://a.example/", ipfsGateway = "https://ipfs.io")
+        tab.mainFrameAnswered("https://b.example/", ipfsGateway = null)
+        tab.committed("https://a.example/", null)
+        assertEquals(DocumentSource("https://ipfs.io"), tab.committedSource)
+        tab.committed("https://b.example/", null)
+        assertEquals(DocumentSource(null), tab.committedSource)
+        // Answered by a service worker: no answer of its own, source unknown.
+        tab.navigationStarted("https://c.example/")
+        tab.committed("https://c.example/", null)
+        assertNull(tab.committedSource)
+        // Redirected on the network: the latest answer's.
+        tab.mainFrameAnswered("https://d.example/", ipfsGateway = "https://dweb.link")
+        tab.committed("https://e.example/", null)
+        assertEquals(DocumentSource("https://dweb.link"), tab.committedSource)
+    }
+
+    @Test
     fun `the connection follows the scheme, a dweb page its network`() {
         assertEquals(PageConnection.Secure, pageConnectionFor("https://example.org/a", false, null))
         assertEquals(PageConnection.Secure, pageConnectionFor("HTTPS://example.org", false, null))

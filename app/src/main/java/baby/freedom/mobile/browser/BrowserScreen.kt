@@ -3541,6 +3541,9 @@ fun BrowserScreen(
     }
     pageInfoShown?.let { target ->
         val connection = pageConnectionFor(state.url, state.showsErrorPage, protocolBadgeFor(state))
+        val externalIpfs by Gateways.externalIpfsBaseFlow.collectAsState()
+        // Where the document came from, read when the sheet opens over it (#479).
+        val documentSource = remember(target) { tabs.pageSource?.invoke(state) }
         // Read once, when the sheet opens over this document.
         val certificate = remember(target) {
             if (connection?.hasCertificate == true) tabs.pageCertificate?.invoke(state) else null
@@ -3566,6 +3569,7 @@ fun BrowserScreen(
             siteDataOrigin = dataOrigin,
             siteDataUrl = dataUrl,
             siteDataGateway = siteDataGatewayLabel(dataOrigin),
+            ipfsGateway = ipfsGatewayUseFor(connection, state.url, externalIpfs, documentSource),
             onDeleteSiteData = {
                 if (dataOrigin != null && dataUrl != null) {
                     val tab = state

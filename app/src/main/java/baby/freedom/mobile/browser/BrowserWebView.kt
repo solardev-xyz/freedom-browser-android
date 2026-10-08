@@ -1503,6 +1503,9 @@ fun BrowserWebViewHost(
                 )
             }
         }
+        tabs.pageSource = { tab ->
+            (webViews[tab.id] as? PageWebView)?.documents?.committedSource
+        }
         tabs.cleanSiteInPage = cleanSiteInPage@{ tab, origin, doneKey, answer ->
             val wv = webViews[tab.id]
             if (wv == null || SiteData.committedOrigin(tab.id) != origin) {
@@ -1600,6 +1603,7 @@ fun BrowserWebViewHost(
             tabs.printPage = null
             tabs.dropMemoryCache = null
             tabs.pageCertificate = null
+            tabs.pageSource = null
             tabs.cleanSiteInPage = null
             tabs.siteCleanedInPage = null
             tabs.reloadDocument = null
@@ -4077,6 +4081,8 @@ private fun buildRefreshableWebView(
                     return abandonedResponse()
                 }
                 val work = state.gatewayWork.start(generation)
+                // The external IPFS gateway the document came from, if any (#479).
+                var ipfsGateway: String? = null
                 val response = if (heldBack) heldBackResponse() else if (certPage != null) {
                     certPageResponse(certPage)
                 } else if (cleanup) {
@@ -4091,9 +4097,11 @@ private fun buildRefreshableWebView(
                         freshDocument = { target -> state.fetchedFresh(generation, target) },
                         private = state.private,
                         abandon = ticket,
-                    ) { served ->
-                        noteMainFrameContentLoad(view, state, generation, served)
-                    }
+                        onMainFrameRoot = { served ->
+                            noteMainFrameContentLoad(view, state, generation, served)
+                        },
+                        onMainFrameGateway = { ipfsGateway = it },
+                    )
                 } catch (t: Throwable) {
                     state.gatewayWork.finish(work)
                     throw t
@@ -4121,7 +4129,7 @@ private fun buildRefreshableWebView(
                         fetchedByWebView = response == null,
                     )
                     if (replaces && view is PageWebView) {
-                        view.documents.mainFrameAnswered(request!!.url.toString())
+                        view.documents.mainFrameAnswered(request!!.url.toString(), ipfsGateway)
                     }
                 }
                 state.gatewayWork.answered(work)
@@ -6123,6 +6131,11 @@ private fun syntheticResponse(
  * name's re-check, before the fetch — or `null` when the re-check
  * refused it (an error page is served instead). It is what the tab's
  * IPFS phase line follows while the fetch runs (#94, #179 R5-F1).
+ *
+ * [onMainFrameGateway] hears, for a main-frame request answered from a
+ * content gateway, the external IPFS gateway (#125) that answer was
+ * fetched from, or null for this device's node — what Page info names
+ * as the page's source (#479).
  */
 internal fun interceptVirtualRequest(
     request: WebResourceRequest?,
@@ -6142,6 +6155,7 @@ internal fun interceptVirtualRequest(
     /** Whether the page has given up on this request ([DwebAborts]); null: never asked. */
     abandon: AbandonSignal? = null,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
+    onMainFrameGateway: (String?) -> Unit = {},
 ): WebResourceResponse? {
     val req = request ?: return null
     val url = req.url?.toString() ?: return null
@@ -6168,7 +6182,7 @@ internal fun interceptVirtualRequest(
         RadApi.intercept(req, url)
             ?: interceptOnchainAppRequest(req, url, onchain)
             ?: siteDataCleanupFor(req, url, tab, private)
-            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, private, abandon)
+            ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, onMainFrameGateway, private, abandon)
     } catch (t: Throwable) {
         Log.e(LOG_TAG, "interceptor failed for $url", t)
         syntheticResponse(502, "Bad Gateway", "The browser couldn't serve this request.")
@@ -6384,6 +6398,7 @@ private fun interceptVirtualRequestFor(
     freshFetch: (target: String) -> Boolean,
     freshDocument: (target: String) -> Boolean,
     onMainFrameRoot: (ContentRoot?) -> Unit,
+    onMainFrameGateway: (String?) -> Unit,
     private: Boolean,
     abandon: AbandonSignal?,
 ): WebResourceResponse? {
@@ -6530,6 +6545,7 @@ private fun interceptVirtualRequestFor(
             return@repeat
         }
         if (external != null && response != null) withoutCacheStorage(response)
+        if (req.isForMainFrame) onMainFrameGateway(external)
         // A null here means the gateway socket itself is gone (connection
         // refused / node stopped). Synthesize instead of returning null —
         // null would send Chromium to DNS for a hostname that doesn't
