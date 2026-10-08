@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.room.withTransaction
 import baby.freedom.mobile.browser.BookmarkUrls
 import baby.freedom.mobile.browser.typedForm
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -31,7 +33,7 @@ import kotlinx.coroutines.launch
 class BrowsingRepository internal constructor(
     private val db: AppDatabase,
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val scope = writeScope()
 
     init {
         // One-time cleanup for installs that predate [isRecordable]
@@ -371,6 +373,21 @@ class BrowsingRepository internal constructor(
 
     companion object {
         private const val TAG = "BrowsingRepository"
+
+        /**
+         * The scope the repository's fire-and-forget writes run in (#462).
+         * Nobody waits on them, so whatever one throws — a
+         * `SQLiteFullException` on a phone whose storage is full, from
+         * every finished page load ([recordVisit]) or favicon — is logged
+         * and dropped here instead of reaching the thread's uncaught
+         * handler and killing the app with every open tab. The write is
+         * lost, as it would be anyway; the browser keeps going.
+         */
+        internal fun writeScope(dispatcher: CoroutineDispatcher = Dispatchers.IO): CoroutineScope =
+            CoroutineScope(
+                SupervisorJob() + dispatcher +
+                    CoroutineExceptionHandler { _, e -> Log.w(TAG, "write failed: ${e.message}", e) },
+            )
 
         /**
          * The longest address history and bookmarks keep (#461), the same
