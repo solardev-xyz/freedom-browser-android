@@ -15,7 +15,9 @@ import kotlinx.coroutines.flow.transformLatest
  * each new count reposted the notification and crossed the binder.
  *
  * Any other change (status, error, addresses, …) goes out at once, with
- * the latest count. A held-back count isn't lost: the latest one goes out
+ * the latest count. So does a count that gains its first peer or loses
+ * its last (0 → N, N → 0): "no peers" is a state Home and the
+ * notification show as such, not just a number. A held-back count isn't lost: the latest one goes out
  * when its window ends, unless something newer replaces it first. [now] is
  * a monotonic clock in ms.
  */
@@ -32,7 +34,10 @@ internal fun Flow<NodeInfo>.throttlePeerCount(
     emitAll(this@throttlePeerCount.transformLatest { info ->
         val last = sent
         if (info == last) return@transformLatest
-        if (last != null && info.copy(connectedPeers = last.connectedPeers) == last) {
+        if (last != null &&
+            (info.connectedPeers > 0) == (last.connectedPeers > 0) &&
+            info.copy(connectedPeers = last.connectedPeers) == last
+        ) {
             val wait = sentAt + windowMs - now()
             if (wait > 0) delay(wait)
         }

@@ -29,7 +29,7 @@ class PeerCountThrottleTest {
 
     @Test
     fun aPeerCountChangingEverySecondGoesOutOncePerWindow() = runTest {
-        val source = MutableStateFlow(running)
+        val source = MutableStateFlow(running.copy(connectedPeers = 30))
         val out = collect(source, 5_000)
         val times = mutableListOf<Long>()
         backgroundScope.launch {
@@ -111,5 +111,29 @@ class PeerCountThrottleTest {
         runCurrent()
         assertEquals(2, out.size)
         assertEquals("gateway down", out.last().errorMessage)
+    }
+
+    @Test
+    fun theFirstPeersAndLosingThemAllGoOutAtOnce() = runTest {
+        val source = MutableStateFlow(running)
+        val out = collect(source, 30_000)
+        advanceTimeBy(1_000)
+        // The node finds its first peers: not held back for 29 s.
+        source.value = running.copy(connectedPeers = 12)
+        runCurrent()
+        assertEquals(listOf(0L, 12L), out.map { it.connectedPeers })
+        // A change between non-zero counts is still held back.
+        advanceTimeBy(1_000)
+        source.value = running.copy(connectedPeers = 15)
+        runCurrent()
+        assertEquals(listOf(0L, 12L), out.map { it.connectedPeers })
+        // Losing every peer goes out at once too, replacing the held 15.
+        advanceTimeBy(1_000)
+        source.value = running
+        runCurrent()
+        assertEquals(listOf(0L, 12L, 0L), out.map { it.connectedPeers })
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(3, out.size)
     }
 }
