@@ -711,34 +711,60 @@ class NodeService : Service() {
      * service promptly is crashed. We drop foreground status but keep
      * the service alive for as long as the UI is bound to it, and try
      * to re-promote it the next time the app comes to the foreground
-     * (the budget resets daily; the call is refused until then).
+     * (the budget resets daily; the call is refused until then). With
+     * no UI bound it stops instead (#458): see [ForegroundHold].
      *
      * While demoted, the `:node` process is an ordinary background
      * process: Android may freeze it, which is exactly the state
      * [INodeService.onAppForeground] recovers from.
      */
-    @Volatile
-    private var foregroundDemoted = false
+    private val foreground = ForegroundHold()
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.w(TAG, "foreground service time limit reached (type=$fgsType); demoting")
-        foregroundDemoted = true
+        val stop = foreground.timedOut()
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-    }
-
-    private fun repromoteForegroundIfDemoted() {
-        if (!foregroundDemoted) return
-        runCatching {
-            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
-        }.onSuccess {
-            foregroundDemoted = false
-            Log.i(TAG, "re-promoted to foreground service")
-        }.onFailure {
-            Log.i(TAG, "foreground re-promotion refused: ${it.message}")
+        if (stop) {
+            Log.w(TAG, "no app bound to a demoted node; stopping rather than be sticky-restarted")
+            stopSelf()
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    private fun repromoteForegroundIfDemoted() {
+        if (!foreground.demoted) return
+        val refusal = foreground.promote {
+            startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
+        }
+        Log.i(TAG, if (refusal == null) "re-promoted to foreground service" else "foreground re-promotion refused: ${refusal.message}")
+    }
+
+    override fun onBind(intent: Intent?): IBinder {
+        foreground.bind()
+        return binder
+    }
+
+    override fun onRebind(intent: Intent?) {
+        foreground.bind()
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        val token = foreground.unbind()
+        if (foreground.shouldStop()) {
+            // A moment's grace, so an Activity recreated in place (it
+            // unbinds, then binds again) doesn't stop the node. Only this
+            // unbind's own timer acts, and only if nothing (a rebind, the
+            // app's start, a later unbind) came since.
+            scope.launch {
+                delay(UNBOUND_STOP_GRACE_MS)
+                if (foreground.graceOver(token)) {
+                    Log.w(TAG, "app unbound from a demoted node; stopping")
+                    stopSelf()
+                }
+            }
+        }
+        // onRebind for the next bind, so it's counted too.
+        return true
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -807,11 +833,16 @@ class NodeService : Service() {
             ),
         )
 
-        startForeground(
-            NOTIFICATION_ID,
-            buildNotification(reportedNodeInfo(NodeInfo(), doomed)),
-            foregroundTypeCompat(),
-        )
+        // Refused in the background on Android 12+ (a sticky restart) and
+        // once the day's dataSync budget is spent on 15+ (#458): demoted
+        // then, not crashed; onStartCommand stops it if no app is bound.
+        foreground.promote {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(reportedNodeInfo(NodeInfo(), doomed)),
+                foregroundTypeCompat(),
+            )
+        }?.let { Log.w(TAG, "foreground status refused at create; running demoted: ${it.message}") }
 
         swarmObserver = combine(swarmNode.state, bootIdentity.owed, ::Pair)
             .onEach { (raw, owed) ->
@@ -927,6 +958,13 @@ class NodeService : Service() {
         // The user turned the node (back) on: a stop still waiting for a
         // spend to end (#116) no longer stands.
         stopGate.cancelStop()
+        // A sticky restart (null intent) Android couldn't promote, with no
+        // app bound to re-promote it: stop rather than be killed and
+        // restarted into the same refusal (#458).
+        if (foreground.started(stickyRestart = intent == null)) {
+            Log.w(TAG, "sticky restart refused foreground status with no app bound; stopping")
+            stopSelf()
+        }
         return START_STICKY
     }
 
@@ -1022,7 +1060,7 @@ class NodeService : Service() {
     }
 
     private fun updateNotification(info: NodeInfo) {
-        if (foregroundDemoted) return
+        if (foreground.demoted) return
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.notify(NOTIFICATION_ID, buildNotification(info))
     }
@@ -1078,6 +1116,7 @@ class NodeService : Service() {
          */
         private const val SPEND_STOP_WAIT_MS = 15 * 60_000L
         private const val ANSWER_GRACE_MS = 1_000L
+        private const val UNBOUND_STOP_GRACE_MS = 5_000L
 
         private const val TAG = "NodeService"
         private const val CHANNEL_ID = "freedom_node"
