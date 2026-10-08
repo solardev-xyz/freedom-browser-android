@@ -452,8 +452,9 @@ internal fun providerOriginKey(raw: String?): String? {
 
 /**
  * Whether [originKey] (a [permissionOriginKey]) is a content gateway's
- * own origin on the device (#457): a loopback host, `http` or `https`,
- * on the port of the embedded Swarm or IPFS gateway, or of an external
+ * own origin on the device (#457): any host that reaches the device
+ * itself ([reachesThisDevice], not only a loopback one), `http` or
+ * `https`, on the port of the embedded Swarm or IPFS gateway, or of an external
  * endpoint the user pointed at this device
  * ([Gateways.loopbackGatewayPorts]). Such an origin holds no provider
  * ([providerOriginKey]) and no site permission ([sitePermissionOriginKey]).
