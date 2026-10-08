@@ -582,6 +582,26 @@ class NodeIdentitySyncTest {
         )
     }
 
+    @Test
+    fun `sealing builds the plaintext once and zeroes it`() {
+        // One array at its final size, not `swarm + ipfs + radicle` (#477).
+        val seen = mutableListOf<ByteArray>()
+        val identity = NodeIdentity.derive(abandon12.seed())
+        HdKeys.scratchSeen = { seen += it }
+        try {
+            store.write("tag", identity)
+        } finally {
+            HdKeys.scratchSeen = null
+        }
+        assertEquals(listOf(96), seen.map { it.size })
+        assertTrue(seen.single().all { it == 0.toByte() })
+        val back = store.read("tag")
+        assertNotNull(back)
+        assertEquals(identity.swarmAddress, back!!.swarmAddress)
+        assertEquals(identity.peerId, back.peerId)
+        assertEquals(ABANDON_DID, back.radicleDid)
+    }
+
     private companion object {
         /** Desktop's Radicle DID and key for `abandon ×11 about` (see NodeIdentityTest). */
         const val ABANDON_DID = "did:key:z6Mkgb93MjdiDEUrHVCY2X4EfaSwzoFCorViqqPnjoQX8gAn"

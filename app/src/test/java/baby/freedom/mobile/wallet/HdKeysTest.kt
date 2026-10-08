@@ -73,6 +73,21 @@ class HdKeysTest {
         }
     }
 
+    @Test
+    fun `the Ed25519 hash and clamped scalar are zeroed once the public key is out`() {
+        val seen = mutableListOf<ByteArray>()
+        HdKeys.scratchSeen = { seen += it }
+        try {
+            // RFC 8032 test 1: the scalar is reversed in place, not copied (#477).
+            val sk = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60".unhex()
+            assertEquals("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", Ed25519.publicKey(sk).hex())
+            assertEquals(2, seen.size)
+            seen.forEachIndexed { n, b -> assertTrue("scratch #$n not zeroed", b.all { it == 0.toByte() }) }
+        } finally {
+            HdKeys.scratchSeen = null
+        }
+    }
+
     private fun ByteArray.hex() = joinToString("") { "%02x".format(it) }
 
     private fun String.unhex() = ByteArray(length / 2) { substring(2 * it, 2 * it + 2).toInt(16).toByte() }

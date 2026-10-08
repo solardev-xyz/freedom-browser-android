@@ -8,6 +8,7 @@ import java.math.BigInteger
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -40,6 +41,23 @@ class EthTransactionsTest {
             assertEquals(message, r, HdKeys.to32(sig.r).toHex())
             assertEquals(message, sv.first, HdKeys.to32(sig.s).toHex())
             assertEquals(message, sv.second, sig.recoveryId)
+        }
+    }
+
+    @Test
+    fun `signing leaves no RFC 6979 state or nonce unzeroed`() {
+        // The HMAC inputs are fed in parts, never joined into a key-holding
+        // array (#477); every K, V and candidate nonce goes through the hook.
+        val seen = mutableListOf<ByteArray>()
+        HdKeys.scratchSeen = { seen += it }
+        try {
+            val sig = EthSigning.sign(key, Keccak256.digest("freedom"))
+            assertEquals("76987fda5374892806eedba8a3a8816276aad5bf0cb02cc1265e9c7e4c6687c5", HdKeys.to32(sig.r).toHex())
+            // K, V, K, V (seeding), then V and the nonce copy for the first candidate.
+            assertEquals(6, seen.size)
+            seen.forEachIndexed { n, b -> assertTrue("scratch #$n not zeroed", b.all { it == 0.toByte() }) }
+        } finally {
+            HdKeys.scratchSeen = null
         }
     }
 
