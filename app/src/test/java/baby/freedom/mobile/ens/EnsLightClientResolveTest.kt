@@ -1486,6 +1486,84 @@ class EnsLightClientResolveTest {
     }
 
     @Test
+    fun `a private lookup doesn't read the normal session's light-client name misses`() {
+        // #464 R2-M1: a normal tab's recent miss on evil.eth must not
+        // make a private lookup skip the light client, nor take a private
+        // re-check's light-client allowance away: a private page timing it
+        // would learn what the normal tab looked up.
+        val client = FakeLightClient { _, data ->
+            if (data == EnsResolver.PROBE_CALL_DATA) lightClientOk
+            else if (isEvil(data)) EnsLightClient.Call.Unavailable("all 3 snap peer(s) failed")
+            else lightClientOk
+        }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http)
+        val settings = EnsResolver.Settings(listOf(rpc))
+
+        runBlocking { r.resolveContenthash("evil.eth") }
+        assertEquals(1, client.calls.size)
+        assertEquals(0L, r.lightClientWaitFor(settings, "evil.eth"))
+        // The name-independent probe that miss started is engine health,
+        // shared by both sessions; wait it out (it answers: not backing off).
+        assertTrue((runBlocking { r.resolveContenthash("other.eth") } as EnsResult.Ok).trust.lightClient)
+        assertEquals(2, client.calls.size)
+        assertEquals(0L, r.lightClientWaitFor(settings, "evil.eth"))
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "evil.eth", private = true))
+        runBlocking { r.resolveContenthash("evil.eth", private = true) }
+        assertEquals("the private lookup asks the light client", 3, client.calls.size)
+        // ...and its own miss isn't remembered for either session (once
+        // the probe it started has found the engine healthy).
+        val until = System.currentTimeMillis() + 5_000
+        while (r.lightClientWaitFor(settings, "evil.eth", private = true) != EnsResolver.LIGHT_CLIENT_DEADLINE_MS &&
+            System.currentTimeMillis() < until
+        ) {
+            Thread.sleep(10)
+        }
+        assertEquals(EnsResolver.LIGHT_CLIENT_DEADLINE_MS, r.lightClientWaitFor(settings, "evil.eth", private = true))
+        runBlocking { r.resolveContenthash("evil.eth", private = true) }
+        assertEquals(4, client.calls.size)
+    }
+
+    @Test
+    fun `a private call that answers after the session ended leaves no mark`() {
+        // #464 R2-M2: the engine call is still running when the last
+        // private tab closes; its in-time answer must not re-add a mark
+        // under the ended session's key, which nothing would read or purge.
+        val client = SlotClient(lightClientOk) { 400 }
+        val http = OneServer { rpcResult(wrapAsOuterInner(ipfsContenthash)) }
+        val r = resolver(client, http, deadlineMs = 3_000)
+        val lookup = Thread { runBlocking { r.resolveContenthash("secret.eth", private = true) } }
+        lookup.start()
+        val until = System.currentTimeMillis() + 2_000
+        while (client.started.isEmpty() && System.currentTimeMillis() < until) Thread.sleep(5)
+        assertEquals(1, client.started.size)
+        r.privateSessionEnded()
+        lookup.join(5_000)
+        client.awaitIdle(3_000)
+        assertEquals(emptySet<String>(), r.lightClientMarkedSites())
+    }
+
+    @Test
+    fun `a busy private session doesn't evict a normal tab's light-client marks`() {
+        // #464 R2-M2: private marks have their own bound, apart from the normal session's.
+        val client = FakeLightClient { _, _ -> lightClientOk }
+        val http = OneServer { error("no RPC server should be asked") }
+        val r = resolver(client, http)
+        runBlocking { r.resolveContenthash("keep.eth") }
+        assertTrue(r.lightClientMarkedSites().contains("keep.eth"))
+        runBlocking {
+            for (i in 0..EnsResolver.LIGHT_CLIENT_SLOW_SITES_MAX) r.resolveContenthash("p$i.eth", private = true)
+        }
+        assertTrue("normal mark evicted: ${r.lightClientMarkedSites().size}", r.lightClientMarkedSites().contains("keep.eth"))
+        assertEquals(
+            EnsResolver.LIGHT_CLIENT_SLOW_SITES_MAX + 1,
+            r.lightClientMarkedSites().size,
+        )
+        r.privateSessionEnded()
+        assertEquals(setOf("keep.eth"), r.lightClientMarkedSites())
+    }
+
+    @Test
     fun `slow names from several registrations share a few engine slots once they've outlived a lookup`() {
         // R1-F3: a page loads two slow names from each of four
         // registrations — established ones, each answered in time before

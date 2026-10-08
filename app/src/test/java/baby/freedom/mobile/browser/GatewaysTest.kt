@@ -400,7 +400,7 @@ class GatewaysTest {
         val asked = java.util.concurrent.atomic.AtomicReference<String?>()
         Gateways.reverifyDeadlineMs = 100
         Gateways.colibriAllowanceMs = { _, _ -> 0 }
-        Gateways.lightClientAllowanceMs = { _, name -> asked.set(name); 1_000 }
+        Gateways.lightClientAllowanceMs = { _, name, _ -> asked.set(name); 1_000 }
         try {
             withLookup({ name ->
                 Thread.sleep(400) // longer than the RPC share, well inside the light client's
@@ -413,7 +413,7 @@ class GatewaysTest {
                 assertEquals("myotis.eth", asked.get())
             }
             // With both allowances, the deadline covers both tiers.
-            Gateways.lightClientAllowanceMs = { _, _ -> 300 }
+            Gateways.lightClientAllowanceMs = { _, _, _ -> 300 }
             Gateways.colibriAllowanceMs = { _, _ -> 300 }
             KnownEnsNames.record("bzz://$ref64", "bothtiers.eth", EnsTrust.ASSUMED)
             withLookup({ name ->
@@ -446,7 +446,7 @@ class GatewaysTest {
         Gateways.reverifyDeadlineMs = 100
         Gateways.reverifyLightClientShareMs = 200
         Gateways.colibriAllowanceMs = { _, _ -> 0 }
-        Gateways.lightClientAllowanceMs = { _, _ -> 20_000 } // a stalled engine's whole budget
+        Gateways.lightClientAllowanceMs = { _, _, _ -> 20_000 } // a stalled engine's whole budget
         try {
             withLookup({ name ->
                 try {

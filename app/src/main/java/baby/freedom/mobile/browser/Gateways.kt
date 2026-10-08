@@ -245,11 +245,12 @@ object Gateways {
     /**
      * How long a lookup of a name under these settings may spend on the
      * light client first ([EnsResolver.lightClientWaitFor]); 0 when it
-     * would skip it. A seam for tests.
+     * would skip it. `private`: the lookup is a private tab's (#464). A
+     * seam for tests.
      */
     @Volatile
-    internal var lightClientAllowanceMs: (EnsResolver.Settings, String) -> Long = { settings, name ->
-        ensResolver.lightClientWaitFor(settings, name)
+    internal var lightClientAllowanceMs: (EnsResolver.Settings, String, Boolean) -> Long = { settings, name, private ->
+        ensResolver.lightClientWaitFor(settings, name, private)
     }
 
     /**
@@ -701,7 +702,7 @@ object Gateways {
         val last = fallback?.first
         val lastTrust = fallback?.second
         fun lookup(key: LookupKey): EnsResult? {
-            val lightClient = key.settings?.let { lightClientAllowanceMs(it, key.name) } ?: 0L
+            val lightClient = key.settings?.let { lightClientAllowanceMs(it, key.name, private) } ?: 0L
             // With something to fall back on, don't hold the document for
             // the resolver's worst case (see [reverifyDeadlineMs]).
             val deadline = when {

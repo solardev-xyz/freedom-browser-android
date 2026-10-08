@@ -361,41 +361,74 @@ class EnsResolver internal constructor(
      */
     private val lightClientAnswered = LinkedHashMap<String, Long>()
 
+    /**
+     * The current private session's [lightClientSlowSites] and
+     * [lightClientAnswered] (#464), under [siteKey]'s private keys; guarded
+     * by [lightClientHeld]. Kept apart, each with its own
+     * [LIGHT_CLIENT_SLOW_SITES_MAX], so a busy private session can't evict
+     * a normal tab's marks (nor the other way round), and emptied by
+     * [privateSessionEnded].
+     */
+    private val privateSlowSites = LinkedHashMap<String, Long>()
+    private val privateAnswered = LinkedHashMap<String, Long>()
+
+    /** Where [site]'s slow mark lives. Holds the lock. */
+    private fun slowSitesOf(site: String) =
+        if (site.startsWith(PRIVATE_SITE_PREFIX)) privateSlowSites else lightClientSlowSites
+
+    /** Where [site]'s answered mark lives. Holds the lock. */
+    private fun answeredOf(site: String) =
+        if (site.startsWith(PRIVATE_SITE_PREFIX)) privateAnswered else lightClientAnswered
+
+    /**
+     * Whether [site] is a private key of a session that has since ended
+     * ([privateSessionEnded]): a call still in the engine then must not
+     * mark it, or the mark would sit in memory, read by no one, until
+     * newer ones evicted it. Holds the lock.
+     */
+    private fun endedSessionSiteLocked(site: String): Boolean =
+        site.startsWith(PRIVATE_SITE_PREFIX) && !site.startsWith(privateSitePrefix())
+
     /** Whether [site] is established ([lightClientAnswered]). Holds the lock. */
     private fun establishedSiteLocked(site: String, now: Long): Boolean {
-        val at = lightClientAnswered[site] ?: return false
+        val at = answeredOf(site)[site] ?: return false
         return now - at >= lightClientEstablishedMs
     }
 
     /** Note that one of [site]'s light-client calls answered in time ([lightClientAnswered]). */
     private fun markAnsweredSite(site: String) {
         synchronized(lightClientHeld) {
-            val at = lightClientAnswered.remove(site)
+            if (endedSessionSiteLocked(site)) return
+            val answered = answeredOf(site)
+            val at = answered.remove(site)
             val now = System.currentTimeMillis()
             // A first answer stamped in the future (the clock since set
             // back) would never come of age: start it again.
-            lightClientAnswered[site] = if (at != null && at <= now) at else now
-            while (lightClientAnswered.size > LIGHT_CLIENT_SLOW_SITES_MAX) {
-                lightClientAnswered.remove(lightClientAnswered.keys.first())
+            answered[site] = if (at != null && at <= now) at else now
+            while (answered.size > LIGHT_CLIENT_SLOW_SITES_MAX) {
+                answered.remove(answered.keys.first())
             }
         }
     }
 
     /** Whether [site] is in [lightClientSlowSites] still; drops stale entries. Holds the lock. */
     private fun slowSiteLocked(site: String, now: Long): Boolean {
-        val at = lightClientSlowSites[site] ?: return false
+        val slowSites = slowSitesOf(site)
+        val at = slowSites[site] ?: return false
         if (now - at in 0 until LIGHT_CLIENT_SLOW_SITE_MS) return true
-        lightClientSlowSites.remove(site)
+        slowSites.remove(site)
         return false
     }
 
     /** Mark [site] slow ([lightClientSlowSites]). */
     private fun markSlowSite(site: String) {
         synchronized(lightClientHeld) {
-            lightClientSlowSites.remove(site)
-            lightClientSlowSites[site] = System.currentTimeMillis()
-            while (lightClientSlowSites.size > LIGHT_CLIENT_SLOW_SITES_MAX) {
-                lightClientSlowSites.remove(lightClientSlowSites.keys.first())
+            if (endedSessionSiteLocked(site)) return
+            val slowSites = slowSitesOf(site)
+            slowSites.remove(site)
+            slowSites[site] = System.currentTimeMillis()
+            while (slowSites.size > LIGHT_CLIENT_SLOW_SITES_MAX) {
+                slowSites.remove(slowSites.keys.first())
             }
         }
     }
@@ -479,12 +512,16 @@ class EnsResolver internal constructor(
     /** The key [name]'s light-client marks are kept under; see [privateSession]. */
     private fun siteKey(name: String, private: Boolean): String {
         val site = siteOf(name)
-        return if (private) "$PRIVATE_SITE_PREFIX${privateSession.get()}:$site" else site
+        return if (private) privateSitePrefix() + site else site
     }
 
+    /** The current private session's [siteKey] prefix. */
+    private fun privateSitePrefix(): String = "$PRIVATE_SITE_PREFIX${privateSession.get()}:"
+
     /** Every site key with a slow or answered mark now; for tests. */
-    internal fun lightClientMarkedSites(): Set<String> =
-        synchronized(lightClientHeld) { lightClientSlowSites.keys + lightClientAnswered.keys }
+    internal fun lightClientMarkedSites(): Set<String> = synchronized(lightClientHeld) {
+        lightClientSlowSites.keys + lightClientAnswered.keys + privateSlowSites.keys + privateAnswered.keys
+    }
 
     /** Whether [site] is a slow site now ([lightClientSlowSites]); for tests. */
     internal fun lightClientSlowSite(site: String): Boolean =
@@ -559,13 +596,14 @@ class EnsResolver internal constructor(
      * (the lookup waits for it first, see [resolve]); 0 when the lookup
      * would skip it (no light client, not ready, backing off or having
      * recently missed this name with RPC servers to fall back on, or a
-     * `.tez` name). The re-check's
+     * `.tez` name). A [private] lookup (#464) doesn't read the normal
+     * session's name misses, as [resolve] doesn't. The re-check's
      * counterpart of [colibriWaitFor]: an ordinary answer from the light
      * client takes seconds, and a deadline that doesn't allow for it
      * serves the earlier answer and opens the caller's failure window
      * on a network that is working fine.
      */
-    internal fun lightClientWaitFor(settings: Settings, name: String): Long {
+    internal fun lightClientWaitFor(settings: Settings, name: String, private: Boolean = false): Long {
         val generation = lightClient?.readyGeneration() ?: return 0
         val normalized = try {
             EnsNormalize.fastNormalize(name.trim())
@@ -574,7 +612,7 @@ class EnsResolver internal constructor(
         }
         if (NameSystem.forName(normalized) == NameSystem.TEZOS) return 0
         if (settings.endpoints.isEmpty()) return lightClientDeadlineMs
-        if (lightClientMissedName(normalized, clock())) return 0
+        if (!private && lightClientMissedName(normalized, clock())) return 0
         val probing = lightClientProbe?.takeIf { it.generation == generation && it.healthy.isActive } != null
         if (!probing && lightClientBackingOff(generation, System.currentTimeMillis())) return 0
         return lightClientDeadlineMs + if (probing) LIGHT_CLIENT_PROBE_TIMEOUT_MS else 0
@@ -628,8 +666,8 @@ class EnsResolver internal constructor(
         epoch?.privateCache = ConcurrentHashMap()
         synchronized(lightClientHeld) {
             privateSession.incrementAndGet()
-            lightClientSlowSites.keys.removeAll { it.startsWith(PRIVATE_SITE_PREFIX) }
-            lightClientAnswered.keys.removeAll { it.startsWith(PRIVATE_SITE_PREFIX) }
+            privateSlowSites.clear()
+            privateAnswered.clear()
         }
         tezos.privateSessionEnded()
     }
@@ -774,7 +812,11 @@ class EnsResolver internal constructor(
         // A name it recently missed skips it — and, like
         // [lightClientWaitFor] allowing it nothing, doesn't wait for a
         // probe either: a re-check of it has only the RPC/Colibri share.
-        val missedName = generation != null && config.endpoints.isNotEmpty() &&
+        // A private lookup neither records misses (see [resolveByLightClient])
+        // nor reads the normal session's (#464): skipping the light client for
+        // a name a normal tab missed would tell a private page's timing what
+        // that tab looked up.
+        val missedName = !private && generation != null && config.endpoints.isNotEmpty() &&
             lightClientMissedName(record.cacheKey(normalized), clock())
         // A probe still judging an earlier miss is waited for (it's
         // bounded by [LIGHT_CLIENT_PROBE_TIMEOUT_MS]), so a struggling light
@@ -2656,7 +2698,7 @@ class EnsResolver internal constructor(
         internal const val LIGHT_CLIENT_ESTABLISHED_MS = 10 * 60_000L
 
         /** Most slow sites remembered; the oldest go first. */
-        private const val LIGHT_CLIENT_SLOW_SITES_MAX = 256
+        internal const val LIGHT_CLIENT_SLOW_SITES_MAX = 256
 
         /** Starts a private session's site keys; no name holds a NUL. */
         private const val PRIVATE_SITE_PREFIX = "\u0000private"
