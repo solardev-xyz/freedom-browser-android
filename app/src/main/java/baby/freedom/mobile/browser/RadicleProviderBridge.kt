@@ -434,16 +434,39 @@ private const val MAX_REQUEST_CHARS = 512 * 1024
  * `sourceOrigin`): a normalized `scheme://host[:port]` ([permissionOriginKey])
  * for a secure origin — https, or http on a loopback host — and null for
  * anything else, including the repository browser's own origin.
+ *
+ * Also null for a content gateway's own origin on the device (#457): a
+ * loopback host on the port of the embedded Swarm or IPFS gateway, or of
+ * an external endpoint the user pointed at this device
+ * ([Gateways.loopbackGatewayPorts]). Every Swarm or IPFS root loaded as
+ * `http://127.0.0.1:1633/bzz/<ref>/` shares that one origin, so a grant
+ * given to one of them would be every root's, and any page could
+ * navigate there with an attacker's hash. Content gets its provider on
+ * its own per-root virtual origin ([VirtualOrigin]) instead. Matched by
+ * port on any loopback host, since every loopback name reaches the
+ * gateway.
  */
 internal fun providerOriginKey(raw: String?): String? {
     val key = permissionOriginKey(raw) ?: return null
     if (key == RadUrl.ORIGIN) return null
     if (key.startsWith("https://")) return key
-    val host = key.removePrefix("http://").let { hostPort ->
+    val port = loopbackHttpPort(key) ?: return null
+    return key.takeUnless { port in Gateways.loopbackGatewayPorts() }
+}
+
+/**
+ * The port of [originKey] (a [permissionOriginKey]) if it's `http://` on
+ * a loopback host ([isLoopbackHost]), else null.
+ */
+internal fun loopbackHttpPort(originKey: String): Int? {
+    if (!originKey.startsWith("http://")) return null
+    val hostPort = originKey.removePrefix("http://")
+    val host = (
         if (hostPort.startsWith("[")) hostPort.substringAfter('[').substringBefore(']')
         else hostPort.substringBefore(':')
-    }.trimEnd('.')
-    return key.takeIf { isLoopbackHost(host) }
+    ).trimEnd('.')
+    if (!isLoopbackHost(host)) return null
+    return hostPort.substringAfterLast(']').substringAfter(':', "80").toIntOrNull()
 }
 
 /**

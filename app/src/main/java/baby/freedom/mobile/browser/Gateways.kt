@@ -459,6 +459,17 @@ object Gateways {
     }
 
     /**
+     * The ports a content gateway answers on at a loopback host, so
+     * every `http://<loopback>:<port>` on them is a gateway's own origin
+     * ([providerOriginKey], #457): the embedded Swarm gateway's, the
+     * embedded IPFS gateway's while it runs, and an external endpoint's
+     * when the user set one on this device.
+     */
+    fun loopbackGatewayPorts(): Set<Int> =
+        listOf(EMBEDDED_SWARM_BASE, embeddedIpfsBase, externalSwarmBase, externalIpfsBase)
+            .mapNotNullTo(mutableSetOf()) { base -> permissionOriginKey(base)?.let(::loopbackHttpPort) }
+
+    /**
      * The external IPFS gateway [gatewayUrl] (a [gatewayUrlFor] answer)
      * is served from, or `null` when it isn't one — an embedded node's,
      * or an external Swarm endpoint's.
