@@ -373,6 +373,20 @@ class TabsState(
         val tabId: Long,
         val view: View,
         val callback: WebChromeClient.CustomViewCallback?,
+        /**
+         * The site whose page went fullscreen, as the user reads it
+         * ([fullscreenSiteName]), taken when the session starts, so the
+         * notice names the site even if the tab's state moves on (#467).
+         * Null for a page with no site to name (a `data:` page, say).
+         *
+         * This is the tab's top-level site, not necessarily the frame
+         * that asked: `onShowCustomView` doesn't say which frame called
+         * `requestFullscreen()`, so a cross-origin iframe the page let go
+         * fullscreen (`allow="fullscreen"`, a video or ad embed) is
+         * credited to the page that embedded it. That's the site that
+         * granted it the screen, and the one the address bar showed.
+         */
+        val site: String? = null,
     )
 
     var fullscreen: Fullscreen? by mutableStateOf(null)
@@ -392,7 +406,7 @@ class TabsState(
             callback?.onCustomViewHidden()
             return
         }
-        fullscreen = Fullscreen(tab.id, view, callback)
+        fullscreen = Fullscreen(tab.id, view, callback, fullscreenSiteName(tab))
     }
 
     /**
@@ -1181,3 +1195,48 @@ class TabsState(
         private val idSeq = AtomicLong(0L)
     }
 }
+
+/**
+ * How the fullscreen notice names [tab]'s page (#467): its top-level
+ * site ([BrowserState.permissionTop]) the way a permission prompt does.
+ * A page on a content gateway's own origin (`http://127.0.0.1:1633/bzz/<ref>/`)
+ * has no permission site by design (#457) but still has a document
+ * origin ([BrowserState.siteOrigin]); that origin is shared by every
+ * root the gateway serves, so it's named by the root the address bar
+ * shows (`bzz://<ref>`, or the ENS name it's known by) rather than
+ * left anonymous. That name is not a site boundary there: a page from
+ * any other root on the same gateway origin can script this one (a
+ * `window.open` popup of another root's path, say), so the notice
+ * claims no more than the address bar already does for the same
+ * document. A document whose address names no root of its own (a
+ * top-level `blob:` URL, which [addressRoot] refuses) is named by
+ * that shared origin instead. Null only for a page with no origin at
+ * all.
+ */
+internal fun fullscreenSiteName(tab: BrowserState): String? {
+    tab.permissionTop?.let { return permissionOriginDisplay(it) }
+    val origin = tab.siteOrigin ?: return null
+    return addressRoot(tab.url) ?: permissionOriginDisplay(origin)
+}
+
+/**
+ * `scheme://authority` of a display address, or null if it has no
+ * plain scheme. A nested-origin URL (`blob:http://host/<uuid>`,
+ * `filesystem:…`) is refused rather than read as scheme `blob:http`:
+ * its inner origin is the document's origin, which the caller names
+ * anyway.
+ */
+internal fun addressRoot(address: String): String? {
+    val schemeEnd = address.indexOf("://")
+    if (schemeEnd <= 0) return null
+    val scheme = address.substring(0, schemeEnd)
+    if (!scheme[0].isAsciiLetter() || !scheme.all { it.isAsciiLetter() || it in '0'..'9' || it in "+-." }) {
+        return null
+    }
+    val rest = address.substring(schemeEnd + 3)
+    val authority = rest.substringBefore('/').substringBefore('?').substringBefore('#')
+    if (authority.isEmpty()) return null
+    return address.substring(0, schemeEnd + 3) + authority
+}
+
+private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
