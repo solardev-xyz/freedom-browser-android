@@ -1,0 +1,58 @@
+package baby.freedom.mobile.browser
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
+
+/**
+ * Runs [poll], then waits [periodMs], over and over, but only while this
+ * lifecycle is at least STARTED (#472). Compose keeps a screen's
+ * composition, and its `produceState`/`LaunchedEffect` loops, alive after
+ * `onStop`, and `:node` is a foreground service, so an ungated loop goes on
+ * reading the gateway and chain RPCs for as long as the app sits in the
+ * background. This one stops when the app goes to the background and reads
+ * again at once when it comes back. Never returns while the lifecycle lives:
+ * cancel the calling coroutine to end it.
+ */
+internal suspend fun Lifecycle.pollWhileStarted(periodMs: Long, poll: suspend () -> Unit) {
+    repeatOnLifecycle(Lifecycle.State.STARTED) {
+        while (true) {
+            poll()
+            delay(periodMs)
+        }
+    }
+}
+
+/**
+ * Like [pollWhileStarted], for a poll that backs off and can finish: runs
+ * [poll] while it answers true, waiting [firstMs] after the first read and
+ * twice as long after each later one, up to [maxMs]. Reads only while this
+ * lifecycle is at least STARTED: a read in flight is cancelled on `onStop`
+ * and the wait so far is kept, so coming back reads again at once and then
+ * carries on at the backed-off pace. Once [poll] answers false it stops,
+ * apart from one read on each later return to the foreground (which starts
+ * the wait over if it answers true). Never returns while the lifecycle
+ * lives: cancel the calling coroutine to end it.
+ */
+internal suspend fun Lifecycle.pollWhileStartedBackingOff(
+    firstMs: Long,
+    maxMs: Long,
+    poll: suspend () -> Boolean,
+) {
+    var wait = firstMs
+    repeatOnLifecycle(Lifecycle.State.STARTED) {
+        while (poll()) {
+            delay(wait)
+            wait = minOf(wait * 2, maxMs)
+        }
+        wait = firstMs
+    }
+}
+
+/** The current composition's lifecycle, for [pollWhileStarted]; also a fitting key for the effect that polls. */
+@Composable
+@ReadOnlyComposable
+internal fun currentLifecycle(): Lifecycle = LocalLifecycleOwner.current.lifecycle
