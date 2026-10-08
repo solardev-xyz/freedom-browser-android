@@ -95,6 +95,51 @@ class PollWhileStartedTest {
         job.cancel()
     }
 
+    @Test
+    fun `a backing-off poll reads only while started, keeps its pace, and stops when done`() = runTest(main) {
+        val lifecycle = lifecycle()
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        val at = mutableListOf<Long>()
+        var due = true
+        val job = launch {
+            lifecycle.pollWhileStartedBackingOff(PERIOD, 4 * PERIOD) {
+                at += testScheduler.currentTime
+                due
+            }
+        }
+        runCurrent()
+        advanceTimeBy(3 * PERIOD + 1)
+        assertEquals("waits double each time", listOf(0L, PERIOD, 3 * PERIOD), at)
+
+        // Home with a send still pending: no chain reads in the background.
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        runCurrent()
+        advanceTimeBy(100 * PERIOD)
+        assertEquals(3, at.size)
+
+        // Back: reads at once, then carries on at the backed-off pace, capped.
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        runCurrent()
+        val back = testScheduler.currentTime
+        assertEquals(back, at.last())
+        advanceTimeBy(4 * PERIOD + 1)
+        assertEquals("the wait so far is kept", back + 4 * PERIOD, at.last())
+        advanceTimeBy(4 * PERIOD + 1)
+        assertEquals("capped at the max", back + 8 * PERIOD, at.last())
+
+        // Settled: no more reads while up, one on the next return.
+        due = false
+        advanceTimeBy(4 * PERIOD + 1)
+        val n = at.size
+        advanceTimeBy(100 * PERIOD)
+        assertEquals(n, at.size)
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        runCurrent()
+        assertEquals(n + 1, at.size)
+        job.cancel()
+    }
+
     private companion object {
         const val PERIOD = 5_000L
     }

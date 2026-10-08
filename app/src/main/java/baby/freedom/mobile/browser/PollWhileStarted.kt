@@ -26,6 +26,32 @@ internal suspend fun Lifecycle.pollWhileStarted(periodMs: Long, poll: suspend ()
     }
 }
 
+/**
+ * Like [pollWhileStarted], for a poll that backs off and can finish: runs
+ * [poll] while it answers true, waiting [firstMs] after the first read and
+ * twice as long after each later one, up to [maxMs]. Reads only while this
+ * lifecycle is at least STARTED: a read in flight is cancelled on `onStop`
+ * and the wait so far is kept, so coming back reads again at once and then
+ * carries on at the backed-off pace. Once [poll] answers false it stops,
+ * apart from one read on each later return to the foreground (which starts
+ * the wait over if it answers true). Never returns while the lifecycle
+ * lives: cancel the calling coroutine to end it.
+ */
+internal suspend fun Lifecycle.pollWhileStartedBackingOff(
+    firstMs: Long,
+    maxMs: Long,
+    poll: suspend () -> Boolean,
+) {
+    var wait = firstMs
+    repeatOnLifecycle(Lifecycle.State.STARTED) {
+        while (poll()) {
+            delay(wait)
+            wait = minOf(wait * 2, maxMs)
+        }
+        wait = firstMs
+    }
+}
+
 /** The current composition's lifecycle, for [pollWhileStarted]; also a fitting key for the effect that polls. */
 @Composable
 @ReadOnlyComposable
