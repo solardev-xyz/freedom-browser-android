@@ -81,7 +81,6 @@ import baby.freedom.mobile.l10n.pluralText
 import java.io.IOException
 import java.text.NumberFormat
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /*
@@ -542,10 +541,10 @@ internal fun ChainDetailPage(
     // client's published readiness, Colibri's switch and back-off (which
     // ends on a clock) — so it's re-read while the page is open, and a
     // change redraws the opening line and the read steps.
-    val gaps by produceState(proofTierGaps(router, chain.id), router, chain.id) {
-        while (true) {
+    val lifecycle = currentLifecycle()
+    val gaps by produceState(proofTierGaps(router, chain.id), router, chain.id, lifecycle) {
+        lifecycle.pollWhileStarted(PROOF_TIER_REFRESH_MS) {
             value = proofTierGaps(router, chain.id)
-            delay(PROOF_TIER_REFRESH_MS)
         }
     }
     val answers = tierAnswers(gaps)

@@ -64,7 +64,6 @@ import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -254,10 +253,11 @@ internal fun StampsScreen(
     LaunchedEffect(discovery) {
         if (discovery is StampClient.Discovery.Finished) refresh++
     }
-    val batches by produceState<List<PostageBatch>?>(null, light, refresh) {
-        while (light) {
+    val lifecycle = currentLifecycle()
+    val batches by produceState<List<PostageBatch>?>(null, light, refresh, lifecycle) {
+        if (!light) return@produceState
+        lifecycle.pollWhileStarted(STAMPS_POLL_MS) {
             gatewayGet("/stamps", STAMPS_TIMEOUT_MS)?.let(::stampsFrom)?.let { value = it }
-            delay(STAMPS_POLL_MS)
         }
     }
     // Which batch ant would top up: only that one can be extended here.
