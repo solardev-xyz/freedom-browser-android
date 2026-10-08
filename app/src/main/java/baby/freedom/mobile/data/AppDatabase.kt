@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FaviconEntry::class,
         DownloadEntry::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -120,7 +120,28 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        internal val MIGRATIONS = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+        /**
+         * v6 -> v7 (#461): drop history and bookmark rows whose address is
+         * longer than [BrowsingRepository.MAX_URL_CHARS], and cut titles
+         * to [BrowsingRepository.MAX_TITLE_CHARS] — what the repository
+         * refuses to write from now on. A row near 2 MB doesn't fit the
+         * window Android reads results through, so before this, one such
+         * visit made the Home page and History crash on every open; the
+         * statements here never read it into one. No schema change.
+         */
+        internal val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val url = BrowsingRepository.MAX_URL_CHARS
+                val title = BrowsingRepository.MAX_TITLE_CHARS
+                for (table in listOf("history", "bookmarks")) {
+                    db.execSQL("DELETE FROM `$table` WHERE length(`url`) > $url")
+                    db.execSQL("UPDATE `$table` SET `title` = substr(`title`, 1, $title) WHERE length(`title`) > $title")
+                }
+            }
+        }
+
+        internal val MIGRATIONS =
+            arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
 
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {

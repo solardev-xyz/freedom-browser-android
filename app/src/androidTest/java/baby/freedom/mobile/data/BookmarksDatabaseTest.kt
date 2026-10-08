@@ -99,7 +99,7 @@ class BookmarksDatabaseTest {
             close()
         }
 
-        // Opening it with the app's migrations runs v3 -> v4 -> v5 -> v6, and
+        // Opening it with the app's migrations runs v3 -> v4 -> v5 -> v6 -> v7, and
         // Room checks the migrated tables against the entities (columns,
         // types, defaults, indices) before anything reads them — a
         // mismatch throws here.
@@ -111,7 +111,7 @@ class BookmarksDatabaseTest {
                 val positions = buildMap { while (c.moveToNext()) put(c.getLong(0), c.getLong(1)) }
                 assertEquals(mapOf(2L to 0L, 4L to 1L, 3L to 2L, 1L to 3L), positions)
             }
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            assertEquals(7, db.openHelper.readableDatabase.version)
             runBlocking {
                 val all = db.bookmarks().all().first()
                 assertEquals(listOf(2L, 4L, 3L, 1L), all.map { it.id })
@@ -148,7 +148,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            assertEquals(7, db.openHelper.readableDatabase.version)
             runBlocking {
                 val d = db.downloads().get(7)!!
                 assertEquals("a.zip", d.fileName)
@@ -189,7 +189,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            assertEquals(7, db.openHelper.readableDatabase.version)
             runBlocking {
                 val d = db.downloads().get(9)!!
                 assertEquals("paused", d.status)
@@ -207,11 +207,57 @@ class BookmarksDatabaseTest {
     }
 
     /**
+     * v6 -> v7 (#461): a database holding a ~2 MB address — what made the
+     * Home page crash on every open — loses that row, and any other over
+     * 8 KiB, in history and bookmarks; long titles are cut; everything
+     * else stays. Reading the tables back afterwards works.
+     */
+    @Test
+    fun migrationFromSixDropsOversizedAddresses() {
+        val name = "migration-6-7.db"
+        context.deleteDatabase(name)
+        // 2,200,000 'a's, built inside SQLite: too long for a statement.
+        val huge = "'https://e.example/#' || replace(hex(zeroblob(1100000)), '00', 'aa')"
+        val over = "'https://e.example/' || replace(hex(zeroblob(4097)), '00', 'aa')"
+        val atLimit = "https://e.example/" + "a".repeat(BrowsingRepository.MAX_URL_CHARS - 18)
+        createDatabase(name, 6).apply {
+            execSQL("INSERT INTO history (id, url, title, visitedAt) VALUES (1, 'https://ok.example/', 'Ok', 1)")
+            execSQL("INSERT INTO history (id, url, title, visitedAt) VALUES (2, $huge, 'big', 2)")
+            execSQL("INSERT INTO history (id, url, title, visitedAt) VALUES (3, $over, 'over', 3)")
+            execSQL("INSERT INTO history (id, url, title, visitedAt) VALUES (4, ?, 'limit', 4)", arrayOf(atLimit))
+            execSQL(
+                "INSERT INTO history (id, url, title, visitedAt) VALUES " +
+                    "(5, 'https://t.example/', replace(hex(zeroblob(5000)), '00', 'tt'), 5)",
+            )
+            execSQL("INSERT INTO bookmarks (id, url, title, createdAt, position) VALUES (1, 'vitalik.eth', 'V', 1, 0)")
+            execSQL("INSERT INTO bookmarks (id, url, title, createdAt, position) VALUES (2, $huge, 'big', 2, 1)")
+            close()
+        }
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
+            .addMigrations(*AppDatabase.MIGRATIONS)
+            .build()
+        try {
+            assertEquals(7, db.openHelper.readableDatabase.version)
+            runBlocking {
+                val history = db.history().recent().first()
+                assertEquals(listOf(5L, 4L, 1L), history.map { it.id })
+                assertEquals(atLimit, history.single { it.id == 4L }.url)
+                assertEquals(BrowsingRepository.MAX_TITLE_CHARS, history.single { it.id == 5L }.title.length)
+                assertEquals("Ok", history.single { it.id == 1L }.title)
+                assertEquals(listOf("vitalik.eth"), db.bookmarks().all().first().map { it.url })
+            }
+        } finally {
+            db.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    /**
      * v1 (history and bookmarks) and v2 (+ favicons) predate the exported
      * schemas, so they are built from v3's — their tables were the same
      * entities until v3 added `downloads` (v1 -> v2 -> v3 kept them
      * unchanged). A database from v0.6.5 or earlier takes these steps on
-     * its way to v6: every row kept, bookmarks numbered newest first,
+     * its way to v7: every row kept, bookmarks numbered newest first,
      * and Room's check of the migrated tables against the entities passes.
      */
     @Test
@@ -236,7 +282,7 @@ class BookmarksDatabaseTest {
             .addMigrations(*AppDatabase.MIGRATIONS)
             .build()
         try {
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            assertEquals(7, db.openHelper.readableDatabase.version)
             runBlocking {
                 assertEquals(listOf("vitalik.eth", "https://a.example/"), db.bookmarks().all().first().map { it.url })
                 assertEquals(listOf(0L, 1L), db.bookmarks().all().first().map { it.position })

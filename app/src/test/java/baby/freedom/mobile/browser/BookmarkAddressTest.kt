@@ -62,6 +62,13 @@ class BookmarkAddressTest {
     }
 
     @Test
+    fun `an address too long for history and bookmarks is refused`() {
+        // #461: past `BrowsingRepository.MAX_URL_CHARS` (8 KiB).
+        assertTrue(bookmarkAddress("https://example.com/" + "a".repeat(8 * 1024)) is BookmarkAddress.Invalid)
+        assertTrue(bookmarkAddress("https://example.com/" + "a".repeat(8000)) is BookmarkAddress.Ok)
+    }
+
+    @Test
     fun `names are one trimmed line`() {
         assertEquals("My site", bookmarkTitle("  My site "))
         assertEquals("a b c", bookmarkTitle("a\nb \tc"))
