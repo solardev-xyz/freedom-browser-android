@@ -24,15 +24,19 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.WeakHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -438,11 +442,13 @@ object SwarmProviders {
                 val text = raw!!
                 raw = null
                 // Scanned and parsed off the main thread (#459): a big
-                // upload's message would hold it up for seconds. So a
+                // upload's message would hold it up for seconds. On
+                // threads with a deeper stack than Default's (see
+                // SwarmRequestParsing). So a
                 // request reaches the provider once it's parsed, not in
                 // the order it arrived: a small one sent after a big
                 // upload can be handled (and take the prompt) first.
-                val (request, refusal) = withContext(Dispatchers.Default) {
+                val (request, refusal) = withContext(SwarmRequestParsing.dispatcher) {
                     val parsed = parseSwarmRequest(text)
                     parsed to if (parsed == null) unparsedRequestId(text)?.let { it to unparsedSwarmRequestError(text) } else null
                 }
@@ -1077,6 +1083,35 @@ internal fun manifestFromAnswer(status: Int, body: ByteArray): ManifestDiscovery
 }
 
 private const val MANIFEST_TIMEOUT_MS = 30_000
+
+/**
+ * Where [parseSwarmRequest] runs off the main thread. org.json parses
+ * recursively, and [MAX_SWARM_REQUEST_CONTAINERS] lets a request nest
+ * thousands deep: that parses within the main thread's 8 MiB stack but
+ * overflows a `Dispatchers.Default` worker's ~1 MiB one, so a request the
+ * main thread used to accept would be refused as invalid. These threads
+ * get a stack that holds the deepest request the caps allow, and there
+ * are no more of them than Default has (one per core), each let go of
+ * once idle. The stack is address space, touched only as deep as a parse
+ * goes.
+ */
+internal object SwarmRequestParsing {
+    /**
+     * On the emulator, 10,000 nested arrays or objects overflow a thread
+     * asked for 8 MiB (ART keeps part of it back) and parse on 16 MiB:
+     * twice that, for a slower interpreter or bigger frames elsewhere.
+     */
+    const val STACK_BYTES = 32L * 1024 * 1024
+
+    private val threads = AtomicInteger()
+
+    val dispatcher: CoroutineDispatcher by lazy {
+        val n = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+        ThreadPoolExecutor(n, n, 30, TimeUnit.SECONDS, LinkedBlockingQueue()) { r ->
+            Thread(null, r, "swarm-request-parse-${threads.incrementAndGet()}", STACK_BYTES).apply { isDaemon = true }
+        }.apply { allowCoreThreadTimeOut(true) }.asCoroutineDispatcher()
+    }
+}
 
 /** One `window.swarm` request off the channel. */
 internal data class SwarmRequest(val id: Long, val method: String, val params: JSONObject)
