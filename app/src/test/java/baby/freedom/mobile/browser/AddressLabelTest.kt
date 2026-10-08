@@ -108,6 +108,20 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `userinfo in a name is shown as typed, never stripped`() {
+        // `ens://evil@vitalik.eth` resolves the name `evil@vitalik.eth`,
+        // which is refused — the capsule must not rest on `vitalik.eth`
+        // over that error page (#478).
+        assertEquals("evil@vitalik.eth", AddressLabel.resting("evil@vitalik.eth"))
+        assertEquals("evil@vitalik.eth/x", AddressLabel.resting("evil@vitalik.eth/x"))
+        assertEquals("ens://evil@vitalik.eth", AddressLabel.resting("ens://evil@vitalik.eth"))
+        assertEquals("bzz://a:b@swarm.eth/x", AddressLabel.resting("bzz://a:b@swarm.eth/x"))
+        assertEquals("ipfs://evilevil@vitalik.eth", AddressLabel.resting("ipfs://evilevil@vitalik.eth"))
+        // Web URLs keep the userinfo strip: that is the host that loads.
+        assertEquals("example.com", AddressLabel.resting("https://evil@www.example.com/x"))
+    }
+
+    @Test
     fun `ens subnames are never collapsed into their parent`() {
         // Each ENS label is its own name with its own owner and
         // resolver, so `pay.vitalik.eth` must not rest on the name

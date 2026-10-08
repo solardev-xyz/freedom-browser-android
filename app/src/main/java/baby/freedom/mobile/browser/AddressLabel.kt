@@ -103,9 +103,15 @@ object AddressLabel {
             // the name — the protocol badge already says which network
             // served it) or a raw hash / CID, which is only ever
             // recognisable by its head and tail.
-            "bzz", "ipfs", "ipns", "ens" ->
-                if (looksLikeHost(authority)) hostLabel(authority)
-                else "$scheme://${elideId(authority)}"
+            "bzz", "ipfs", "ipns", "ens" -> when {
+                looksLikeHost(authority) -> hostLabel(authority)
+                // Userinfo is never part of a name or a content id: show
+                // it as typed rather than elide it into one (see
+                // [looksLikeHost]). A backslash already makes it an
+                // elided id, which can't read as a domain either.
+                authority.contains('@') && !authority.contains('\\') -> raw
+                else -> "$scheme://${elideId(authority)}"
+            }
             else -> raw
         }
     }
@@ -199,6 +205,15 @@ object AddressLabel {
         // the authority at it already); the rest fall through to the
         // elided-id form, which cannot be mistaken for a domain.
         if (authority.contains('\\')) return false
+        // Nor is one carrying an `@`. A name or a content id has no
+        // userinfo, so `ens://evil@vitalik.eth` (from another app's link
+        // or a page's own navigation) is the name `evil@vitalik.eth`,
+        // which the resolver refuses — and stripping the `evil@` here
+        // would have the capsule rest on `vitalik.eth` over that error
+        // page (#478). This runs only for the bare-name form and the
+        // content-addressed schemes; `https://user@host` keeps its
+        // userinfo strip in [hostLabel], where it matches what loads.
+        if (authority.contains('@')) return false
         val h = hostOnly(authority)
         if (!h.contains('.')) return false
         // A lookalike `.tez` name is shown `%XX`-escaped (#465).
