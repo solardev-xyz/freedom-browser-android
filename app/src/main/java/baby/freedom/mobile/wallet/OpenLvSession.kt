@@ -573,6 +573,9 @@ class OpenLvSession internal constructor(
         @Volatile
         private var instance: OpenLvSession? = null
 
+        /** The session, if one was ever made; none is made just for this (#470). */
+        fun peek(): OpenLvSession? = instance
+
         fun get(context: Context): OpenLvSession = instance ?: synchronized(this) {
             instance ?: create(context.applicationContext).also { instance = it }
         }
