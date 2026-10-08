@@ -72,20 +72,46 @@ internal class ForegroundHold(
         return !bound
     }
 
+    /**
+     * Bumped by every bind, unbind and app start, so an unbind's grace
+     * timer ([graceOver]) acts only if nothing happened since that unbind.
+     * The service's lifecycle callbacks and its timer all run on the main
+     * thread.
+     */
+    @Volatile
+    private var epoch = 0L
+
     fun bind() {
         bound = true
+        epoch++
     }
 
-    fun unbind() {
+    /** `onUnbind`; returns the token its grace timer hands to [graceOver]. */
+    fun unbind(): Long {
         bound = false
+        return ++epoch
     }
 
     /**
      * `onStartCommand`: true to stop now. A null intent is Android's sticky
      * restart, which no UI asked for; the UI's own start carries an intent
-     * and binds right after, so it's never stopped here.
+     * and binds right after, so it's never stopped here, and it voids any
+     * unbind grace timer still pending (the reopened app's start can come
+     * before its `onRebind`).
      */
-    fun started(stickyRestart: Boolean): Boolean = stickyRestart && shouldStop()
+    fun started(stickyRestart: Boolean): Boolean {
+        if (!stickyRestart) epoch++
+        return stickyRestart && shouldStop()
+    }
+
+    /**
+     * The grace after the unbind that returned [unbindToken] ran out: true
+     * to stop now. False once anything happened since (a bind, a later
+     * unbind with its own timer, the app's start), so a stale timer
+     * neither stops a reopened app's node nor cuts a later unbind's grace
+     * short.
+     */
+    fun graceOver(unbindToken: Long): Boolean = unbindToken == epoch && shouldStop()
 
     /** A demoted service with no UI bound stops rather than wait to be killed. */
     fun shouldStop(): Boolean = demoted && !bound

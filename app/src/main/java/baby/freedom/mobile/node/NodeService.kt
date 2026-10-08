@@ -748,13 +748,15 @@ class NodeService : Service() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        foreground.unbind()
+        val token = foreground.unbind()
         if (foreground.shouldStop()) {
             // A moment's grace, so an Activity recreated in place (it
-            // unbinds, then binds again) doesn't stop the node.
+            // unbinds, then binds again) doesn't stop the node. Only this
+            // unbind's own timer acts, and only if nothing (a rebind, the
+            // app's start, a later unbind) came since.
             scope.launch {
                 delay(UNBOUND_STOP_GRACE_MS)
-                if (foreground.shouldStop()) {
+                if (foreground.graceOver(token)) {
                     Log.w(TAG, "app unbound from a demoted node; stopping")
                     stopSelf()
                 }

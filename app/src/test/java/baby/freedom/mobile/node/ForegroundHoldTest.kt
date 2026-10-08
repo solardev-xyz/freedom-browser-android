@@ -93,4 +93,45 @@ class ForegroundHoldTest {
         hold.unbind()
         assertFalse(hold.shouldStop())
     }
+
+    @Test
+    fun `an unbind's grace runs out to a stop when nothing came since`() {
+        hold.promote(refused)
+        hold.bind()
+        val token = hold.unbind()
+        assertTrue(hold.graceOver(token))
+    }
+
+    @Test
+    fun `the app's start before its rebind voids a pending unbind grace`() {
+        // Back while demoted, reopen: startForegroundService's
+        // onStartCommand comes before onRebind.
+        hold.promote(refused)
+        hold.bind()
+        val token = hold.unbind()
+        assertFalse(hold.started(stickyRestart = false))
+        assertFalse("a stale timer must not cancel the app's start", hold.graceOver(token))
+    }
+
+    @Test
+    fun `a stale timer doesn't cut a later unbind's grace short`() {
+        // Back, reopen, Back within the grace: only the second unbind's
+        // own timer may stop the node.
+        hold.promote(refused)
+        hold.bind()
+        val first = hold.unbind()
+        hold.bind()
+        val second = hold.unbind()
+        assertFalse(hold.graceOver(first))
+        assertTrue(hold.graceOver(second))
+    }
+
+    @Test
+    fun `a sticky restart doesn't void a pending unbind grace`() {
+        hold.promote(refused)
+        hold.bind()
+        val token = hold.unbind()
+        hold.started(stickyRestart = true)
+        assertTrue(hold.graceOver(token))
+    }
 }
