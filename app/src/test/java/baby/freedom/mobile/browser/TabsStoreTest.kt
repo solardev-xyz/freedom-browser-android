@@ -387,6 +387,89 @@ class TabsStoreTest {
         assertEquals(listOf("a", "b", "c"), next.heldTabs!!.group.tabs.map { it.title })
     }
 
+    /**
+     * Move the virtual clock a second at a time until the restore [mark]
+     * is settled (deleted), and assert it settled once
+     * [TabsStore.CRASH_WINDOW_MS] had passed, and not long after.
+     *
+     * Not one jump past [TabsStore.CRASH_WINDOW_MS] (#518). Under the
+     * test's unconfined Main, the settle coroutine is resumed from the
+     * mark's disk write on an IO thread, and only once the launch that
+     * completes [TabsSession.ready] has finished; so it may not have
+     * scheduled its crash-window delay yet when the test moves the clock,
+     * and a delay scheduled after a single jump never fires. (On a device
+     * all of it runs on the main thread, one step after another.)
+     *
+     * The clock moves only here, so the delay is scheduled no earlier than
+     * the call: a restore that settled before the window had passed shows
+     * as less than [TabsStore.CRASH_WINDOW_MS], one that never settles
+     * times out. For a test that hasn't moved the clock since the change
+     * that starts the window (the mark itself, or the tab state after it).
+     * The upper bound, [SETTLE_SLACK_MS] past the window, leaves room for
+     * the steps it takes the settle coroutine to see the change and the
+     * IO thread to delete the mark; a window twice as long fails it (R1-M1).
+     *
+     * [nudge] runs before each step, for a test that changed the tabs
+     * after the mark was written: that IO-thread start can still be in
+     * the settle coroutine's first snapshot read while the test thread
+     * applies its change, and a change that lands under a read in flight
+     * isn't reported to it. One applied after the read always is. The
+     * nudge must re-apply only the state the test changed (see
+     * [reapplyLoaded]), never another one the settle predicate reads:
+     * that would make it re-read everything, and pass even if it no
+     * longer observed the change under test (R1-F1).
+     */
+    private suspend fun assertSettlesAfterWindow(mark: File, nudge: () -> Unit = {}) {
+        val from = main.scheduler.currentTime
+        withTimeout(10_000) {
+            while (mark.exists()) {
+                nudge()
+                androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+                main.scheduler.advanceTimeBy(1_000)
+                // Past the window, give the IO thread's delete real time
+                // to land, so the slack isn't spent waiting on it.
+                val past = main.scheduler.currentTime - from > TabsStore.CRASH_WINDOW_MS
+                kotlinx.coroutines.delay(if (past) 100 else 10)
+            }
+        }
+        val took = main.scheduler.currentTime - from
+        assertTrue("settled after $took ms", took >= TabsStore.CRASH_WINDOW_MS)
+        assertTrue("settled after $took ms", took <= TabsStore.CRASH_WINDOW_MS + SETTLE_SLACK_MS)
+    }
+
+    /**
+     * A nudge for [assertSettlesAfterWindow]: write this tab's finished
+     * load again, in one snapshot, through another value and back. Its
+     * state is unchanged, but its progress is reported as written, so
+     * the settle coroutine re-reads only if it observes that progress.
+     */
+    private fun BrowserState.reapplyLoaded() {
+        check(progress < 0)
+        androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+            progress = 99
+            progress = -1
+        }
+    }
+
+    /**
+     * Wait for the held-tabs offer to end, through the session's watch on
+     * the reopen stack, after a change the test made to it. That watch
+     * starts like the restore's settle (see [assertSettlesAfterWindow]): its
+     * first snapshot read can still be running on an IO thread when the
+     * change is applied, and miss it. So until the offer is over, [nudge]
+     * makes another change to the stack that leaves the same outcome, and
+     * applies it.
+     */
+    private fun TabsSession.awaitOfferOver(nudge: () -> Unit) = runBlocking {
+        withTimeout(5_000) {
+            while (heldTabs != null) {
+                nudge()
+                androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+                kotlinx.coroutines.delay(10)
+            }
+        }
+    }
+
     /** The held-tabs file is gone, once the store's background release has run. */
     private fun awaitHeldGone() = runBlocking {
         withTimeout(5_000) { while (File(dir, TabsStore.HELD).exists()) kotlinx.coroutines.delay(10) }
@@ -439,7 +522,23 @@ class TabsStoreTest {
             // Applied at once, as the main thread would: the watcher sees the whole group back.
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot { assertNotNull(tabs.reopenClosedTab()) }
             androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-            runBlocking { withTimeout(5_000) { while (heldTabs != null) kotlinx.coroutines.delay(10) } }
+            // The held group was the whole reopen stack: Reopen emptied it.
+            assertFalse(tabs.canReopenClosedTab)
+            val reopened = tabs.tabs.map { it.title }
+            assertEquals(listOf("a", "b", "c"), reopened)
+            // Should the watcher have missed it, the user closes a tab and
+            // reopens it (see [awaitOfferOver]). Not part of the scenario:
+            // each one leaves the open tabs and the (empty) reopen stack
+            // exactly as Reopen did, asserted here, so the checks below see
+            // what Reopen itself left, whether or not a nudge ran (R1-M2).
+            awaitOfferOver {
+                androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                    tabs.closeTab(tabs.tabs.lastIndex)
+                    assertNotNull(tabs.reopenClosedTab())
+                }
+                assertFalse(tabs.canReopenClosedTab)
+                assertEquals(reopened, tabs.tabs.map { it.title })
+            }
             assertEquals(3, tabs.tabs.size)
             awaitHeldGone()
             // Open tabs now, saved and marked like the offer's Restore (R4-M1).
@@ -451,7 +550,8 @@ class TabsStoreTest {
         crashedRestoreSession().apply {
             tabs.forgetClosedTabs()
             androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-            runBlocking { withTimeout(5_000) { while (heldTabs != null) kotlinx.coroutines.delay(10) } }
+            // …or deletes it again, should the watcher have missed it.
+            awaitOfferOver { tabs.forgetClosedTabs() }
             awaitHeldGone()
         }
     }
@@ -538,13 +638,10 @@ class TabsStoreTest {
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
         session.tabs.active.progress = -1
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        // …and a crash within the window after that still counts…
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
-        kotlinx.coroutines.delay(50)
-        assertTrue(mark.exists())
-        // …but not once it has passed.
-        main.scheduler.advanceTimeBy(2_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        // …and a crash within the window after that still counts, but not
+        // once it has passed.
+        val page = session.tabs.active
+        assertSettlesAfterWindow(mark) { page.reapplyLoaded() }
     }
 
     /** A session relaunched from saved instance state (a process killed in the background). */
@@ -594,10 +691,8 @@ class TabsStoreTest {
         val mark = File(dir, TabsStore.RESTORE_MARK)
         // The old mark is gone, replaced by this run's own…
         withTimeout(5_000) { while (mark.takeIf { it.exists() }?.readText()?.trim() != now.toString()) kotlinx.coroutines.delay(10) }
-        kotlinx.coroutines.delay(50)
         // …which settles like any restore's (home on screen: nothing to load).
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS + 1_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        assertSettlesAfterWindow(mark)
         // An unrelated crash now doesn't hold the tabs back next time.
         session.viewModelScope.cancel()
         store().save(threeTabs().saveForProcessDeath())
@@ -615,12 +710,8 @@ class TabsStoreTest {
         assertTrue(session.tabs.active.isHome)
         val mark = File(dir, TabsStore.RESTORE_MARK)
         withTimeout(5_000) { while (!mark.exists()) kotlinx.coroutines.delay(10) }
-        kotlinx.coroutines.delay(50)
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
-        kotlinx.coroutines.delay(50)
-        assertTrue(mark.exists())
-        main.scheduler.advanceTimeBy(2_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        // Not a moment before the window has passed.
+        assertSettlesAfterWindow(mark)
     }
 
     @Test
@@ -650,11 +741,10 @@ class TabsStoreTest {
             progress = 50
         }
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        session.tabs.active.progress = -1
+        val link = session.tabs.active
+        link.progress = -1
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        kotlinx.coroutines.delay(50)
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS + 1_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        assertSettlesAfterWindow(mark) { link.reapplyLoaded() }
     }
 
     @Test
@@ -708,12 +798,7 @@ class TabsStoreTest {
         // It finishes off screen: the window starts from there.
         restored.progress = -1
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        kotlinx.coroutines.delay(50)
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
-        kotlinx.coroutines.delay(50)
-        assertTrue(mark.exists())
-        main.scheduler.advanceTimeBy(2_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        assertSettlesAfterWindow(mark) { restored.reapplyLoaded() }
     }
 
     @Test
@@ -723,3 +808,11 @@ class TabsStoreTest {
         assertTrue(session.tabs.pristine)
     }
 }
+
+/**
+ * How long past [TabsStore.CRASH_WINDOW_MS] a restore may take to settle in
+ * the stepped clock of [TabsStoreTest.assertSettlesAfterWindow]: the steps
+ * until the settle coroutine sees the change, and until the IO thread has
+ * deleted the mark.
+ */
+private const val SETTLE_SLACK_MS = 10_000L
