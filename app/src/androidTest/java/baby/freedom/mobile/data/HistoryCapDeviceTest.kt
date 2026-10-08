@@ -80,12 +80,17 @@ class HistoryCapDeviceTest {
 
     @Test
     fun suggestionsGroupByThePageIndex() {
+        // The exact statement Room runs for HistoryDao.suggest; binds
+        // :q, :prefix, :word, :limit in that order.
         val plan = db.openHelper.readableDatabase.query(
-            "EXPLAIN QUERY PLAN SELECT url, title, COUNT(*) AS visits, MAX(visitedAt) AS lastVisit FROM history " +
-                "WHERE url LIKE ? OR title LIKE ? GROUP BY url",
-            arrayOf("%g%", "%g%"),
+            "EXPLAIN QUERY PLAN $SUGGEST_HISTORY",
+            arrayOf<Any>("%g%", "g%", "g%", 60),
         ).use { c -> buildString { while (c.moveToNext()) appendLine(c.getString(3)) } }
+        // The GROUP BY walks the url index instead of sorting...
         assertTrue(plan, "index_history_url" in plan)
-        assertTrue(plan, "TEMP B-TREE" !in plan)
+        assertTrue(plan, "TEMP B-TREE FOR GROUP BY" !in plan)
+        // ...while ranking by strength/visits/recency still sorts the
+        // matched pages: those are computed per page, no index has them.
+        assertTrue(plan, "TEMP B-TREE FOR ORDER BY" in plan)
     }
 }

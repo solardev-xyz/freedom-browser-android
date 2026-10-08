@@ -155,15 +155,17 @@ abstract class AppDatabase : RoomDatabase() {
          * v7 -> v8 (#473): index history's `url`, which the address bar's
          * suggestions group by on every keystroke, and keep only the newest
          * [BrowsingRepository.MAX_HISTORY_VISITS] visits — what the
-         * repository trims to on each new visit from now on.
+         * repository trims to on each new visit from now on. The trim runs
+         * first, so a large legacy table doesn't update the new index for
+         * every row it then deletes.
          */
         internal val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("CREATE INDEX IF NOT EXISTS `index_history_url` ON `history` (`url`)")
                 db.execSQL(
                     "DELETE FROM `history` WHERE `id` <= (SELECT `id` FROM `history` " +
                         "ORDER BY `id` DESC LIMIT 1 OFFSET ${BrowsingRepository.MAX_HISTORY_VISITS})",
                 )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_history_url` ON `history` (`url`)")
             }
         }
 

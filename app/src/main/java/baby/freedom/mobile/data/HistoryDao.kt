@@ -67,13 +67,7 @@ interface HistoryDao {
      * `www.` followed by `%`, [word] the text as typed followed by `%`;
      * all three carry no wildcards of their own (`escapeForLike`).
      */
-    @Query(
-        "SELECT url, title, COUNT(*) AS visits, MAX(visitedAt) AS lastVisit FROM history " +
-            "WHERE url LIKE :q OR title LIKE :q " +
-            "GROUP BY url " +
-            "ORDER BY " + SUGGEST_STRENGTH + " DESC, visits DESC, lastVisit DESC " +
-            "LIMIT :limit",
-    )
+    @Query(SUGGEST_HISTORY)
     fun suggest(q: String, prefix: String, word: String, limit: Int): Flow<List<HistoryPage>>
 
     /**
@@ -138,3 +132,18 @@ internal const val SUGGEST_STRENGTH =
         "WHEN url LIKE '%.' || :word THEN 3 " +
         "WHEN title LIKE :word OR title LIKE '% ' || :word THEN 2 " +
         "ELSE 1 END)"
+
+/**
+ * [HistoryDao.suggest]'s SQL, kept here so `HistoryCapDeviceTest` can
+ * check the query plan of the exact statement Room runs. Binds, in order
+ * of first use: `:q`, `:prefix`, `:word`, `:limit`. With
+ * `index_history_url` (#473) the `GROUP BY` walks the index; the
+ * `ORDER BY` sorts on computed values (match strength, the aggregates),
+ * so it still sorts the matched pages in a temp B-tree.
+ */
+internal const val SUGGEST_HISTORY =
+    "SELECT url, title, COUNT(*) AS visits, MAX(visitedAt) AS lastVisit FROM history " +
+        "WHERE url LIKE :q OR title LIKE :q " +
+        "GROUP BY url " +
+        "ORDER BY " + SUGGEST_STRENGTH + " DESC, visits DESC, lastVisit DESC " +
+        "LIMIT :limit"
