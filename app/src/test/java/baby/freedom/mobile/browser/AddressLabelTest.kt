@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AddressLabelTest {
@@ -90,12 +91,29 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `a bare ens name is not split at a backslash`() {
+        // EnsInput takes the whole `paypal.com\vitalik.eth` as the name
+        // (the resolver refuses it), so it is not `paypal.com`.
+        assertEquals("paypal.com\\vitalik.eth", AddressLabel.resting("paypal.com\\vitalik.eth"))
+        assertEquals("paypal.com\\@vitalik.eth", AddressLabel.resting("paypal.com\\@vitalik.eth"))
+        assertEquals("paypal.com\\vitalik.eth/x", AddressLabel.resting("paypal.com\\vitalik.eth/x"))
+        // keepingAt splits the same way: the `@` after the backslash is
+        // in the name's authority, and stays on screen.
+        val a64 = "a".repeat(64)
+        assertEquals("aa…@vitalik.eth", AddressLabel.keepingAt("$a64\\@vitalik.eth") { it.length <= 15 })
+    }
+
+    @Test
     fun `backslashes are kept inside non-special authorities`() {
         // `bzz:` is not a special scheme, so its authority is not split
         // on `\` — but a backslash means it is not a host either, so it
-        // is elided as an id rather than re-read as `bank.com`.
-        assertEquals("bzz://swarm.….com", AddressLabel.resting("bzz://swarm.eth\\@bank.com/x"))
-        assertEquals("bzz://a\\@b.co", AddressLabel.resting("bzz://a\\@b.co/x"))
+        // is never re-read as `bank.com`; and as it carries an `@`, it
+        // is shown as typed rather than elided into `swarm.….com`.
+        assertEquals("bzz://swarm.eth\\@bank.com/x", AddressLabel.resting("bzz://swarm.eth\\@bank.com/x"))
+        assertEquals("bzz://a\\@b.co/x", AddressLabel.resting("bzz://a\\@b.co/x"))
+        assertEquals("bzz://paypal\\@aaaaaaaaaaaa.com", AddressLabel.resting("bzz://paypal\\@aaaaaaaaaaaa.com"))
+        // Without an `@`, a backslashed id is still elided.
+        assertEquals("bzz://swarm.….com", AddressLabel.resting("bzz://swarm.eth\\bank.com/x"))
     }
 
     @Test
@@ -105,6 +123,95 @@ class AddressLabelTest {
         assertEquals("swarm.eth", AddressLabel.resting("bzz://swarm.eth/docs"))
         assertEquals("swarm.eth", AddressLabel.resting("ens://swarm.eth"))
         assertEquals("vitalik.eth", AddressLabel.resting("ipfs://vitalik.eth/posts"))
+    }
+
+    @Test
+    fun `userinfo in a name is shown as typed, never stripped`() {
+        // `ens://evil@vitalik.eth` resolves the name `evil@vitalik.eth`,
+        // which is refused — the capsule must not rest on `vitalik.eth`
+        // over that error page (#478).
+        assertEquals("evil@vitalik.eth", AddressLabel.resting("evil@vitalik.eth"))
+        assertEquals("evil@vitalik.eth/x", AddressLabel.resting("evil@vitalik.eth/x"))
+        assertEquals("ens://evil@vitalik.eth", AddressLabel.resting("ens://evil@vitalik.eth"))
+        assertEquals("bzz://a:b@swarm.eth/x", AddressLabel.resting("bzz://a:b@swarm.eth/x"))
+        assertEquals("ipfs://evilevil@vitalik.eth", AddressLabel.resting("ipfs://evilevil@vitalik.eth"))
+        // A percent-encoded `@` is not elided into a name either.
+        assertEquals("ipfs://evil%40vitalik.eth", AddressLabel.resting("ipfs://evil%40vitalik.eth"))
+        assertEquals("ens://evil%40vitalik.eth", AddressLabel.resting("ens://evil%40vitalik.eth"))
+        // Web URLs keep the userinfo strip: that is the host that loads.
+        assertEquals("example.com", AddressLabel.resting("https://evil@www.example.com/x"))
+    }
+
+    @Test
+    fun `a label too long for the capsule is shortened around its at sign`() {
+        // Width stand-in: a label fits in [n] characters.
+        fun within(n: Int): (String) -> Boolean = { it.length <= n }
+        val a64 = "a".repeat(64)
+        // Fits: unchanged, and a label with no `@` is never touched here.
+        assertEquals("evil@vitalik.eth", AddressLabel.keepingAt("evil@vitalik.eth", within(18)))
+        assertEquals("x".repeat(40), AddressLabel.keepingAt("x".repeat(40), within(18)))
+        // The userinfo gives way first, keeping the name after the `@`.
+        assertEquals("aaaaaa…@vitalik.eth", AddressLabel.keepingAt("$a64@vitalik.eth", within(19)))
+        assertEquals("ens://a…@vitalik.eth", AddressLabel.keepingAt("ens://$a64@vitalik.eth", within(20)))
+        // Then the name keeps its tail — the `@` is never dropped.
+        assertEquals("e…@…lik.eth", AddressLabel.keepingAt("ens://$a64@vitalik.eth", within(11)))
+        // A `%40` is kept whole the same way.
+        assertEquals("ens://aa…%40vitalik.eth", AddressLabel.keepingAt("ens://$a64%40vitalik.eth", within(23)))
+        // The last `@` is the one kept — where a userinfo strip would cut.
+        assertEquals("a@b…@vitalik.eth", AddressLabel.keepingAt("a@b$a64@vitalik.eth", within(16)))
+        // A surrogate pair is never split by the cut.
+        val emoji = "\uD83D\uDE00".repeat(20)
+        val cut = AddressLabel.keepingAt("$emoji@vitalik.eth", within(16))
+        assertEquals("\uD83D\uDE00…@vitalik.eth", cut)
+        // Nor at one character: a leading pair is kept whole, not halved.
+        val tight = AddressLabel.keepingAt("${emoji}@" + "b".repeat(60) + ".eth", within(10))
+        assertEquals("\uD83D\uDE00…@…b.eth", tight)
+        // A trailing pair after the `@` is kept whole too.
+        val tail = AddressLabel.keepingAt("x@" + "b".repeat(60) + "\uD83D\uDE00", within(4))
+        assertEquals("x@…\uD83D\uDE00", tail)
+        // Every result is well-formed UTF-16 at every width.
+        for (n in 1..30) {
+            for (label in listOf("$emoji@vitalik.eth", "$emoji@" + emoji, "a@" + emoji)) {
+                val s = AddressLabel.keepingAt(label, within(n))
+                s.forEachIndexed { i, c ->
+                    if (c.isHighSurrogate()) assertTrue(s, i + 1 < s.length && s[i + 1].isLowSurrogate())
+                    if (c.isLowSurrogate()) assertTrue(s, i > 0 && s[i - 1].isHighSurrogate())
+                }
+            }
+        }
+        // A one-character part that lost nothing gets no ellipsis.
+        assertEquals("x@y", AddressLabel.keepingAt("x@y", within(2)))
+        assertEquals("e@…vvvvvv", AddressLabel.keepingAt("e@" + "v".repeat(50), within(9)))
+    }
+
+    @Test
+    fun `the at sign kept is the authority's, never one in the path`() {
+        fun within(n: Int): (String) -> Boolean = { it.length <= n }
+        val a64 = "a".repeat(64)
+        val label = "ens://$a64@vitalik.eth/@paypal.com"
+        // The userinfo gives way first, the name and path kept whole.
+        assertEquals("ens://a…@vitalik.eth/@paypal.com", AddressLabel.keepingAt(label, within(32)))
+        // Then the path keeps its head, down to a bare `…`.
+        assertEquals("e…@vitalik.eth/@pa…", AddressLabel.keepingAt(label, within(19)))
+        assertEquals("e…@vitalik.eth…", AddressLabel.keepingAt(label, within(15)))
+        // Only then does the name give up its middle.
+        assertEquals("e…@…lik.eth…", AddressLabel.keepingAt(label, within(12)))
+        // At no width does it rest on the path's `@paypal.com`.
+        for (n in 1..label.length) {
+            val s = AddressLabel.keepingAt(label, within(n))
+            assertTrue(s, '@' in s)
+            assertTrue(s, "@paypal.com" !in s || "@vitalik.eth/" in s)
+        }
+        // The bare-name form and `%40` split the authority the same way.
+        assertEquals("a…@vitalik.eth…", AddressLabel.keepingAt("$a64@vitalik.eth/@paypal.com", within(15)))
+        assertEquals("e…%40vitalik.eth…", AddressLabel.keepingAt("ens://$a64%40vitalik.eth/%40paypal.com", within(17)))
+        // An `@` only in the path is no userinfo: left to the capsule.
+        val pathOnly = "ens://vitalik.eth/" + a64 + "@paypal.com"
+        assertEquals(pathOnly, AddressLabel.keepingAt(pathOnly, within(20)))
+        // A special scheme's authority ends at a backslash; a content one's doesn't.
+        val bs = "https://$a64\\@paypal.com"
+        assertEquals(bs, AddressLabel.keepingAt(bs, within(20)))
+        assertEquals("bzz://swa…@bank.com", AddressLabel.keepingAt("bzz://swarm.eth\\@bank.com", within(19)))
     }
 
     @Test

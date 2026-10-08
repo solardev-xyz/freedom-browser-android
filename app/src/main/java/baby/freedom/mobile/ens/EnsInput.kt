@@ -59,8 +59,11 @@ object EnsInput {
         // to the lowercase anyway — so the answer is the same, and the
         // address bar's per-composition checks (every `https://…` URL
         // goes through here via [looksLikeEns]) never trigger the
-        // library's spec decode on the main thread.
-        val canonical = if (name.all { it.code < 0x80 }) {
+        // library's spec decode on the main thread. A name with a `\` in
+        // it takes the same path: ENSIP-15 disallows that character, so
+        // the library could only refuse it, and the address capsule asks
+        // about such names in composition (`AddressLabel`).
+        val canonical = if (name.all { it.code < 0x80 } || '\\' in name) {
             // A `.tez` name's `%XX` escapes are its Unicode name
             // ([EnsNormalize.tezosForm]) — how a lookalike one is shown.
             EnsNormalize.tezosForm(name) ?: name.lowercase()
