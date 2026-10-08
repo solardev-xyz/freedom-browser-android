@@ -458,8 +458,11 @@ internal fun providerOriginKey(raw: String?): String? {
  * ([Gateways.loopbackGatewayPorts]). Such an origin holds no provider
  * ([providerOriginKey]) and no site permission ([sitePermissionOriginKey]).
  *
- * Matched by port on any loopback name (`127.0.0.0/8`, `localhost`,
- * `*.localhost`, `[::1]`), since every one of them reaches the gateway.
+ * Matched by port on any host that reaches the device itself
+ * ([reachesThisDevice]): every loopback name (`127.0.0.0/8`, `localhost`,
+ * `*.localhost`, `[::1]`) and also the unspecified and IPv4-mapped
+ * literals (`0.0.0.0`, `[::]`, `[::ffff:7f00:1]`), since every one of
+ * them reaches the gateway (R3-M2).
  * That includes a subdomain gateway's per-root host
  * (`http://<cid>.ipfs.localhost:8080`, what Kubo redirects a path
  * request to): it is one root's origin, but nothing here can tell a
@@ -468,7 +471,7 @@ internal fun providerOriginKey(raw: String?): String? {
  * either; content keeps both on its virtual origin.
  */
 internal fun isLoopbackGatewayOrigin(originKey: String): Boolean {
-    val port = loopbackPort(originKey) ?: return false
+    val port = deviceOriginPort(originKey) ?: return false
     return port in Gateways.loopbackGatewayPorts()
 }
 
@@ -484,7 +487,18 @@ internal fun loopbackHttpPort(originKey: String): Int? =
  * `https://` on a loopback host ([isLoopbackHost]), the scheme's default
  * when it names none; else null.
  */
-internal fun loopbackPort(originKey: String): Int? {
+internal fun loopbackPort(originKey: String): Int? = originPort(originKey, ::isLoopbackHost)
+
+/**
+ * The port of [originKey] (a [permissionOriginKey]) if it's `http://` or
+ * `https://` on a host that reaches this device ([reachesThisDevice]),
+ * the scheme's default when it names none; else null. Wider than
+ * [loopbackPort]: for matching what a gateway on the device answers, not
+ * for what Chromium deems a secure origin.
+ */
+internal fun deviceOriginPort(originKey: String): Int? = originPort(originKey, ::reachesThisDevice)
+
+private fun originPort(originKey: String, hostMatches: (String) -> Boolean): Int? {
     val (prefix, defaultPort) = when {
         originKey.startsWith("http://") -> "http://" to "80"
         originKey.startsWith("https://") -> "https://" to "443"
@@ -495,8 +509,59 @@ internal fun loopbackPort(originKey: String): Int? {
         if (hostPort.startsWith("[")) hostPort.substringAfter('[').substringBefore(']')
         else hostPort.substringBefore(':')
     ).trimEnd('.')
-    if (!isLoopbackHost(host)) return null
+    if (!hostMatches(host)) return null
     return hostPort.substringAfterLast(']').substringAfter(':', defaultPort).toIntOrNull()
+}
+
+/**
+ * Whether a connection to [host] (lowercased, brackets and trailing dot
+ * stripped) lands on this device: a loopback host ([isLoopbackHost]),
+ * or an address literal the kernel routes to the device too though
+ * Chromium doesn't call it loopback — the unspecified `0.0.0.0` and
+ * `::`, and an IPv4-mapped IPv6 literal of either kind
+ * (`::ffff:7f00:1`, `::ffff:127.0.0.1`, `::ffff:0:0`). Only literals:
+ * nothing here resolves a name.
+ */
+internal fun reachesThisDevice(host: String): Boolean {
+    if (isLoopbackHost(host) || host == "0.0.0.0") return true
+    if (':' !in host) return false
+    val bytes = ipv6Bytes(host) ?: return false
+    if (bytes.all { it == 0 }) return true
+    if (bytes.take(15).all { it == 0 } && bytes[15] == 1) return true
+    val mapped = bytes.take(10).all { it == 0 } && bytes[10] == 0xff && bytes[11] == 0xff
+    if (!mapped) return false
+    val v4 = bytes.subList(12, 16)
+    return v4[0] == 127 || v4.all { it == 0 }
+}
+
+/** The 16 bytes of an IPv6 literal (with an optional trailing dotted quad), or null. */
+private fun ipv6Bytes(literal: String): List<Int>? {
+    var text = literal
+    val tail = mutableListOf<Int>()
+    val lastColon = text.lastIndexOf(':')
+    if ('.' in text.substring(lastColon + 1)) {
+        val quad = text.substring(lastColon + 1).split('.')
+        if (quad.size != 4 || quad.any { o -> o.isEmpty() || o.length > 3 || !o.all { it in '0'..'9' } || o.toInt() > 255 }) return null
+        quad.forEach { tail += it.toInt() }
+        text = text.substring(0, lastColon + 1) + "0:0"
+    }
+    val halves = text.split("::")
+    if (halves.size > 2) return null
+    fun groups(part: String): List<Int>? =
+        if (part.isEmpty()) emptyList()
+        else part.split(':').map { g ->
+            if (g.isEmpty() || g.length > 4 || !g.all { it in '0'..'9' || it in 'a'..'f' }) return null
+            g.toInt(16)
+        }
+    val head = groups(halves[0]) ?: return null
+    val rest = if (halves.size == 2) groups(halves[1]) ?: return null else emptyList()
+    val words = when {
+        halves.size == 2 && head.size + rest.size <= 7 -> head + List(8 - head.size - rest.size) { 0 } + rest
+        halves.size == 1 && head.size == 8 -> head
+        else -> return null
+    }
+    val bytes = words.flatMap { listOf(it shr 8, it and 0xff) }
+    return if (tail.isEmpty()) bytes else bytes.subList(0, 12) + tail
 }
 
 /**

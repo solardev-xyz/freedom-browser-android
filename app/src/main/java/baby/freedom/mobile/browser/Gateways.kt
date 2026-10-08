@@ -459,19 +459,25 @@ object Gateways {
     }
 
     /**
-     * The ports a content gateway answers on at a loopback host, so
-     * every `http(s)://<loopback>:<port>` on them is a gateway's own
-     * origin ([isLoopbackGatewayOrigin], #457): the embedded Swarm
-     * gateway's, the embedded IPFS gateway's while it runs, and an
-     * external endpoint's (`http` or `https`) when the user set one on
-     * this device.
+     * The ports a content gateway answers on at a host reaching this
+     * device ([reachesThisDevice]), so every `http(s)://<that host>:<port>`
+     * on them is a gateway's own origin ([isLoopbackGatewayOrigin],
+     * #457): the embedded Swarm gateway's, the embedded IPFS gateway's
+     * while it runs, and an external endpoint's (`http` or `https`) when
+     * the user set one on this device.
+     *
+     * A remote external endpoint's raw origin
+     * (`https://<endpoint>/bzz/<ref>/`) is just as shared by every root,
+     * but it's out of scope here: it's a public path gateway's origin
+     * like any other site's (`https://gateway.example/ipfs/<cid>/`), and
+     * keeps its provider and permissions the way those do.
      */
     fun loopbackGatewayPorts(): Set<Int> =
         loopbackGatewayPorts(embeddedIpfsBase, externalSwarmBase, externalIpfsBase)
 
     private fun loopbackGatewayPorts(embeddedIpfs: String, externalSwarm: String, externalIpfs: String): Set<Int> =
         listOf(EMBEDDED_SWARM_BASE, embeddedIpfs, externalSwarm, externalIpfs)
-            .mapNotNullTo(mutableSetOf()) { base -> permissionOriginKey(base)?.let(::loopbackPort) }
+            .mapNotNullTo(mutableSetOf()) { base -> permissionOriginKey(base)?.let(::deviceOriginPort) }
 
     /**
      * The external IPFS gateway [gatewayUrl] (a [gatewayUrlFor] answer)

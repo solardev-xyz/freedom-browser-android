@@ -9,6 +9,8 @@ import baby.freedom.mobile.data.SwarmGrantStore
 import baby.freedom.mobile.data.X402Store
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Takes away what an earlier release let a content gateway's own origin
@@ -22,9 +24,11 @@ import kotlinx.coroutines.flow.first
  * site permissions.
  *
  * Only the embedded Swarm gateway's port ([Gateways.EMBEDDED_SWARM_BASE],
- * 1633 in every release) is swept, on every loopback name. That port has
+ * 1633 in every release) is swept, on every name reaching the device. That port has
  * been a gateway's in every release, so a grant under it can only have
- * been given to the gateway's shared origin. The other gateway ports
+ * been given to the gateway's shared origin, on whichever name reaching
+ * the device it was loaded ([deviceOriginPort]: `0.0.0.0` and an
+ * IPv4-mapped `[::ffff:7f00:1]` reach it too). The other gateway ports
  * aren't: the embedded IPFS gateway draws an ephemeral port on each start,
  * and an external endpoint is wherever the user points it. A grant under
  * one of those ports may as well be a dev server's (`http://localhost:N`
@@ -43,20 +47,29 @@ import kotlinx.coroutines.flow.first
 object GatewayOriginSweep {
     private const val TAG = "GatewayOriginSweep"
 
-    /** Once per process; main thread. */
-    suspend fun run(context: Context) = sweep(context.applicationContext)
+    private val once = OnceGate()
+
+    /**
+     * Sweeps once per process; main thread. Called from every Activity
+     * creation (a rotation or theme change recreates it, R3-M1), so a
+     * later call returns at once once a sweep has finished, and one
+     * that finds an earlier Activity's sweep still running waits for it
+     * and only reruns it if that one was cancelled with its Activity.
+     */
+    suspend fun run(context: Context) = once.run { sweep(context.applicationContext) }
 
     /** The embedded Swarm gateway's port, the one port swept. */
-    private val SWEPT_PORT: Int? = permissionOriginKey(Gateways.EMBEDDED_SWARM_BASE)?.let(::loopbackPort)
+    private val SWEPT_PORT: Int? = permissionOriginKey(Gateways.EMBEDDED_SWARM_BASE)?.let(::deviceOriginPort)
 
     /**
      * Whether [origin] (a [permissionOriginKey]) is the embedded Swarm
-     * gateway's own origin on some loopback name, `http` or `https`:
+     * gateway's own origin on some name reaching the device
+     * ([reachesThisDevice]), `http` or `https`:
      * what the sweep takes. Not the live [isLoopbackGatewayOrigin], whose
      * ephemeral and user-set ports may belong to another site's grant.
      */
     internal fun isSweptOrigin(origin: String): Boolean =
-        SWEPT_PORT != null && loopbackPort(origin) == SWEPT_PORT
+        SWEPT_PORT != null && deviceOriginPort(origin) == SWEPT_PORT
 
     /** The [origins] the sweep takes ([isSweptOrigin]), each once. */
     internal fun gatewayOrigins(origins: Iterable<String>): List<String> =
@@ -105,6 +118,26 @@ object GatewayOriginSweep {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "sweeping $what failed", e)
+        }
+    }
+}
+
+/**
+ * Runs a block to completion once per instance: a call after it
+ * finished returns at once, a call while it runs waits for it, and a
+ * run that ends with an exception (its caller cancelled) leaves the
+ * next call to run it again.
+ */
+internal class OnceGate {
+    private val mutex = Mutex()
+    @Volatile private var done = false
+
+    suspend fun run(block: suspend () -> Unit) {
+        if (done) return
+        mutex.withLock {
+            if (done) return
+            block()
+            done = true
         }
     }
 }

@@ -427,6 +427,39 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `a host that reaches the device is the gateway's origin even when it isn't loopback`() {
+        // R3-M2: the kernel routes the unspecified and IPv4-mapped literals to the
+        // device too, so they reach the gateway on its port.
+        for (host in listOf("0.0.0.0", "::", "::ffff:7f00:1", "::ffff:127.0.0.1", "::ffff:7f12:3456",
+            "0:0:0:0:0:ffff:7f00:1", "::ffff:0:0", "::ffff:0.0.0.0", "::1", "0:0:0:0:0:0:0:1", "127.0.0.1", "localhost")) {
+            assertTrue(host, reachesThisDevice(host))
+        }
+        for (host in listOf("::ffff:c0a8:114", "::ffff:192.168.1.20", "::2", "1::", "::7f00:1", "0.0.0.1",
+            "127.example", "::ffff:7f00:1:2:3:4:5", "::ffff:127.0.0.1.1", "::ffff:256.0.0.1", ":::1", "fe80::1", "")) {
+            assertFalse(host, reachesThisDevice(host))
+        }
+        try {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+            assertTrue(isLoopbackGatewayOrigin("http://0.0.0.0:1633"))
+            assertTrue(isLoopbackGatewayOrigin("http://[::ffff:7f00:1]:1633"))
+            assertTrue(isLoopbackGatewayOrigin("https://[::]:1633"))
+            assertFalse(isLoopbackGatewayOrigin("http://0.0.0.0:8700"))
+            assertFalse(isLoopbackGatewayOrigin("http://[::ffff:c0a8:114]:1633"))
+            // Still no provider there, and the http exemption itself stays Chromium's loopback set.
+            assertNull(providerOriginKey("http://[::ffff:7f00:1]:1633"))
+            assertNull(providerOriginKey("http://0.0.0.0:8700"))
+            assertNull(loopbackHttpPort("http://0.0.0.0:8700"))
+            // An external endpoint set on such a literal holds its port too.
+            Gateways.setExternalEndpoints("http://0.0.0.0:1700", "")
+            assertTrue(isLoopbackGatewayOrigin("http://127.0.0.1:1700"))
+        } finally {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+        }
+    }
+
+    @Test
     fun `a late message from the outgoing document is not the new page's`() {
         assertEquals(3, radicleDocumentFor(3, site, providerOriginKey("$site/next")))
         assertEquals(STALE_DOCUMENT, radicleDocumentFor(3, site, providerOriginKey("https://other.example/")))

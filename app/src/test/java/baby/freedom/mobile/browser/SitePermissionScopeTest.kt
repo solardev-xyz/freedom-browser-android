@@ -8,6 +8,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import baby.freedom.mobile.data.SitePermissionStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -119,10 +121,36 @@ class SitePermissionScopeTest {
             assertNull(sitePermissionOriginKey("http://127.0.0.1:41234/"))
             assertFalse(GatewayOriginSweep.isSweptOrigin("http://127.0.0.1:41234"))
             assertFalse(GatewayOriginSweep.isSweptOrigin("https://example.com:1633"))
+            // Names that reach the device without being loopback (R3-M2): no site
+            // permission there, and an earlier grant on the Swarm port is swept.
+            assertNull(sitePermissionOriginKey("http://[::ffff:7f00:1]:1633/bzz/a/"))
+            assertNull(sitePermissionOriginKey("http://0.0.0.0:1633/bzz/a/"))
+            assertTrue(GatewayOriginSweep.isSweptOrigin("http://[::ffff:7f00:1]:1633"))
+            assertTrue(GatewayOriginSweep.isSweptOrigin("http://0.0.0.0:1633"))
+            assertFalse(GatewayOriginSweep.isSweptOrigin("http://[::ffff:c0a8:114]:1633"))
         } finally {
             Gateways.setIpfsBase("")
             Gateways.setExternalEndpoints("", "")
         }
+    }
+
+    @Test
+    fun `the gateway origin sweep runs once per process however often an Activity starts it`() = runBlocking {
+        // R3-M1: every Activity creation calls it; only a cancelled run is retried.
+        val gate = OnceGate()
+        var runs = 0
+        val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val first = launch {
+            gate.run { runs++; started.complete(Unit); kotlinx.coroutines.awaitCancellation() }
+        }
+        started.await()
+        val second = async { gate.run { runs++ } }
+        first.cancel()
+        second.await()
+        assertEquals(2, runs)
+        gate.run { runs++ }
+        gate.run { runs++ }
+        assertEquals(2, runs)
     }
 
     @Test

@@ -679,7 +679,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         // A content gateway's own origin holds no grant or site
         // permission any more (#457): what an earlier release let the
         // embedded Swarm gateway's fixed-port origin keep is disconnected
-        // once per launch ([GatewayOriginSweep] says why only that port).
+        // once per process ([GatewayOriginSweep] says why only that port;
+        // a recreated Activity's call returns once it has run).
         lifecycleScope.launch { GatewayOriginSweep.run(this@MainActivity) }
 
         // The address label's resting form needs the vendored Public
