@@ -61,7 +61,7 @@ object EnsInput {
         // goes through here via [looksLikeEns]) never trigger the
         // library's spec decode on the main thread.
         val canonical = if (name.all { it.code < 0x80 }) {
-            // A `.tez` name's `xn--` labels are its Unicode name
+            // A `.tez` name's `%XX` escapes are its Unicode name
             // ([EnsNormalize.tezosForm]) — how a lookalike one is shown.
             EnsNormalize.tezosForm(name) ?: name.lowercase()
         } else {

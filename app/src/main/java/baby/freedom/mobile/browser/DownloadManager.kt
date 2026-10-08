@@ -20,6 +20,7 @@ import baby.freedom.mobile.data.AppDatabase
 import baby.freedom.mobile.data.DownloadDao
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.l10n.Strings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -1353,7 +1354,11 @@ class DownloadManager private constructor(context: Context) {
         is DownloadTarget.Dweb -> {
             val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery)
                 ?: throw DownloadFailure(
-                    if (target.root is ContentRoot.Ens) DownloadNote.of(R.string.library_download_ens_unresolved, target.root.name)
+                    if (target.root is ContentRoot.Ens) DownloadNote.of(
+                        R.string.library_download_ens_unresolved,
+                        // As the row's address shows it (#490 R2-M1).
+                        EnsNormalize.tezosDisplay(target.root.name),
+                    )
                     else DownloadNote.of(R.string.library_download_node_not_running),
                     retriable = true,
                 )

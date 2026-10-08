@@ -252,7 +252,7 @@ object VirtualOrigin {
             is ContentRoot.Ipfs -> "ipfs://${root.cid}$tail"
             is ContentRoot.IpnsKey -> "ipns://${root.key}$tail"
             is ContentRoot.IpnsName -> "ipns://${root.name}$tail"
-            // Lookalike `.tez` names as `xn--` (#465).
+            // Lookalike `.tez` names `%XX`-escaped (#465).
             is ContentRoot.Ens -> "${EnsNormalize.tezosDisplay(root.name)}$tail"
         }
     }

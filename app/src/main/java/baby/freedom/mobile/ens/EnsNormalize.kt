@@ -2,7 +2,6 @@ package baby.freedom.mobile.ens
 
 import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.BidiControls
-import baby.freedom.mobile.browser.Punycode
 import baby.freedom.mobile.browser.WhatwgHost
 import baby.freedom.mobile.l10n.Strings
 import io.github.adraffy.ens.ENSNormalize
@@ -81,23 +80,21 @@ object EnsNormalize {
      * typed (less any U+FE0F) — either way the registry answers "not
      * found".
      *
-     * An `xn--` label is ToUnicode'd too, as the registry's rule has it:
-     * `xn--pypal-4ve.tez` is `pаypal.tez`. That is the form [tezosDisplay]
-     * shows a lookalike name in, so the address bar's text reloads, edits
-     * and copies as the same name.
+     * A `%XX`-escaped name is read as its UTF-8 bytes first: that is how
+     * [tezosDisplay] spells a lookalike (`p%D0%B0ypal.tez` is
+     * `pаypal.tez`), so the shown form reloads, edits and copies as the
+     * same name. `%` is never part of a registrable label, so this can't
+     * take a name from anyone. An ASCII `xn--` label is *not* mapped
+     * (#490 R2-F1): the registry keys the literal ASCII name
+     * (`xn--rh8hs4h.tez`) apart from its Unicode reading (`🌮🥷.tez`),
+     * and either can be registered on its own.
      */
-    fun tezosForm(name: String): String? {
+    fun tezosForm(name: String): String? =
+        tezosFormOf(if (name.lowercase().endsWith(TEZ)) percentDecoded(name) ?: name else name)
+
+    private fun tezosFormOf(name: String): String? {
         val lower = name.lowercase()
-        if (lower.all { it.code < 0x80 }) {
-            if (!lower.endsWith(TEZ)) return null
-            if (lower.split('.').none { it.startsWith("xn--") }) return lower
-            val mapped = try {
-                WhatwgHost.uts46.map(lower)
-            } catch (_: RuntimeException) {
-                null
-            }
-            return mapped?.takeIf { it.endsWith(TEZ) } ?: lower
-        }
+        if (lower.all { it.code < 0x80 }) return lower.takeIf { it.endsWith(TEZ) }
         val mapped = try {
             WhatwgHost.uts46.map(name)
         } catch (_: RuntimeException) {
@@ -107,11 +104,45 @@ object EnsNormalize {
             ?: lower.replace("\uFE0F", "").takeIf { it.endsWith(TEZ) }
     }
 
+    /**
+     * [name] with its `%XX` escapes read as UTF-8, or `null` if it has
+     * none, an escape is malformed, or the bytes aren't valid UTF-8.
+     */
+    private fun percentDecoded(name: String): String? {
+        if ('%' !in name) return null
+        val bytes = java.io.ByteArrayOutputStream(name.length)
+        var i = 0
+        while (i < name.length) {
+            val c = name[i]
+            if (c == '%') {
+                if (i + 2 >= name.length) return null
+                val hi = Character.digit(name[i + 1], 16)
+                val lo = Character.digit(name[i + 2], 16)
+                if (hi < 0 || lo < 0) return null
+                bytes.write(hi * 16 + lo)
+                i += 3
+            } else {
+                if (c.code >= 0x80) return null
+                bytes.write(c.code)
+                i++
+            }
+        }
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray()))
+                .toString()
+        } catch (_: java.nio.charset.CharacterCodingException) {
+            null
+        }
+    }
+
     private const val TEZ = ".tez"
 
     /**
      * How [name] may be *shown* (#465): a `.tez` name with a non-ASCII
-     * label in `xn--` Punycode unless ENSIP-15 accepts it unchanged.
+     * label `%XX`-escaped unless ENSIP-15 accepts it unchanged.
      *
      * Tezos Domains registers any IDNA2008 name ([tezosForm] never
      * refuses), so `pаypal.tez` (Cyrillic а) is a real, resolvable name
@@ -122,27 +153,62 @@ object EnsNormalize {
      * a name ENSIP-15 leaves as it is (U+FE0F aside, which [tezosForm]
      * drops) is shown in Unicode (`café.tez`, `❤.tez`, `σοφος.tez`); any
      * other — refused, or one ENSIP-15 would spell differently — shows
-     * its non-ASCII labels as `xn--`, the way Chromium shows a DNS host
-     * that fails its IDN spoof check. [tezosForm] maps that back, so
-     * the shown form is still the name.
+     * each non-ASCII character as its UTF-8 `%XX` bytes
+     * (`p%D0%B0ypal.tez`), the way a browser shows a non-ASCII URL path.
+     *
+     * Not `xn--` Punycode, as Chromium shows a DNS host that fails its
+     * IDN spoof check (#490 R2-F1): in Tezos Domains the ASCII
+     * `xn--pypal-4ve.tez` is a separate name anyone can register, so
+     * that spelling would name — and send a reload, copy or bookmark
+     * to — someone else. A `%` is never part of a registrable label,
+     * and [tezosForm] reads the escapes back, so the shown form is still
+     * this name and no other.
      *
      * Fails closed: before [warm] has decoded the spec tables (never
      * decoded here, on what is often the main thread) the name is shown
-     * as Punycode. Anything that isn't a non-ASCII `.tez` name comes back
+     * escaped. Anything that isn't a non-ASCII `.tez` name comes back
      * unchanged.
      */
     fun tezosDisplay(name: String): String {
         if (name.all { it.code < 0x80 } || tezosForm(name) == null) return name
-        val clean = isWarm && try {
+        if (!isWarm) return escaped(name)
+        // Memoized (#490 R2-M2): the capsule asks again on every
+        // recomposition, and ENSIP-15 isn't free.
+        synchronized(shownCache) { shownCache[name] }?.let { return it }
+        val clean = try {
             normalize(name).replace("\uFE0F", "") == name.replace("\uFE0F", "")
         } catch (_: InvalidNameException) {
             false
         } catch (_: RuntimeException) {
             false
         }
-        if (clean) return name
-        return name.split('.').joinToString(".") { label ->
-            if (label.all { it.code < 0x80 }) label else "xn--" + Punycode.encode(label)
+        val shown = if (clean) name else escaped(name)
+        synchronized(shownCache) { shownCache[name] = shown }
+        return shown
+    }
+
+    /** [tezosDisplay]'s answers once warm, the most recent [SHOWN_CACHE_SIZE]. */
+    private val shownCache = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) =
+            size > SHOWN_CACHE_SIZE
+    }
+    private const val SHOWN_CACHE_SIZE = 64
+
+    /** [name] with each non-ASCII code point as its UTF-8 bytes, `%XX` (upper-case hex). */
+    private fun escaped(name: String): String = buildString {
+        var i = 0
+        while (i < name.length) {
+            val cp = name.codePointAt(i)
+            if (cp < 0x80) {
+                append(cp.toChar())
+            } else {
+                // A lone surrogate has no UTF-8; U+FFFD stands in for it.
+                val ch = if (cp in 0xD800..0xDFFF) "\uFFFD" else String(Character.toChars(cp))
+                for (b in ch.toByteArray(Charsets.UTF_8)) {
+                    append('%').append("%02X".format(b.toInt() and 0xFF))
+                }
+            }
+            i += Character.charCount(cp)
         }
     }
 

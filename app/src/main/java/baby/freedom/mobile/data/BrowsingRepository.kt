@@ -90,7 +90,7 @@ class BrowsingRepository internal constructor(
         scope.launch {
             db.history().insert(
                 HistoryEntry(
-                    // Not the startup-only `xn--` spelling of a `.tez` name (#490 R1-M2).
+                    // Not the startup-only `%XX` spelling of a `.tez` name (#490 R1-M2).
                     url = DisplayUrl.settledName(url),
                     title = title,
                     visitedAt = System.currentTimeMillis(),

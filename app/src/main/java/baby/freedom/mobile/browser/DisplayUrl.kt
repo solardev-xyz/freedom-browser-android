@@ -97,7 +97,7 @@ object DisplayUrl {
     /**
      * [display] with the name it shows in its safe display form
      * ([EnsNormalize.tezosDisplay], #465): `pаypal.tez/x` →
-     * `xn--pypal-4ve.tez/x`, so a lookalike `.tez` name reads as one
+     * `p%D0%B0ypal.tez/x`, so a lookalike `.tez` name reads as one
      * in the capsule, the edit field and everything else built from the
      * display URL. Parsing the result ([EnsInput.parse]) gives back the
      * same name. Anything else comes back unchanged.
@@ -109,9 +109,9 @@ object DisplayUrl {
      * tables are decoded, whatever it was spelled with before (#490
      * R1-M2). [shownName] fails closed while the tables are still
      * decoding at startup, so an honest `café.tez` reads
-     * `xn--caf-dma.tez` for that moment; anything saved from then
+     * `caf%C3%A9.tez` for that moment; anything saved from then
      * (a bookmark, a history row, a download) would keep that spelling
-     * for good. This maps a `.tez` name's `xn--` labels back
+     * for good. This maps a `.tez` name's `%XX` escapes back
      * ([EnsNormalize.tezosForm]) and shows it again with the tables
      * warm, so what is saved doesn't depend on when it was saved.
      *
@@ -120,7 +120,7 @@ object DisplayUrl {
      */
     fun settledName(display: String): String = respellName(display) { name ->
         if (!name.lowercase().endsWith(".tez")) return@respellName name
-        if (name.all { it.code < 0x80 } && name.split('.').none { it.lowercase().startsWith("xn--") }) {
+        if (name.all { it.code < 0x80 } && '%' !in name) {
             return@respellName name
         }
         val unicode = EnsNormalize.tezosForm(name) ?: return@respellName name

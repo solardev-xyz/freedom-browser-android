@@ -128,7 +128,7 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
 
     /**
      * [name] as these sentences print it: a lookalike `.tez` name as
-     * `xn--`, the way the address bar shows it (#465).
+     * `%XX`-escaped, the way the address bar shows it (#465).
      */
     val shown: String get() = EnsNormalize.tezosDisplay(name)
 
