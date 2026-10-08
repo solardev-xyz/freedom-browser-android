@@ -229,7 +229,8 @@ object AddressLabel {
     }
 
     /**
-     * [label] shortened, if it has to be, so that its `@` stays on screen.
+     * [label] shortened, if it has to be, so that its userinfo `@` stays
+     * on screen.
      *
      * A label shown as typed because it carries userinfo
      * (`aaaa…aaaa@vitalik.eth`, from `ens://<64 a's>@vitalik.eth`) is only
@@ -238,43 +239,58 @@ object AddressLabel {
      * the capsule rests on `aaaaaaa…italik.eth`, with the `@` gone and
      * the name after it reading like the name being visited.
      *
-     * So for a label that carries an `@` (literal or `%40`, the last one,
-     * which is where a userinfo strip would cut) and doesn't [fit], the
-     * shortening is done here, around that `@`: first the part before it
-     * keeps a shorter and shorter head (`ens://aaaa…@vitalik.eth`), and
-     * only once that is down to one character does the part after it
-     * give up its middle, keeping its tail (`e…@…lik.eth`). The result is
-     * the longest such candidate that fits, so the capsule's own
-     * ellipsis never runs on it. No cut splits a surrogate pair (a
-     * "character" here is a whole code point when it is a pair), and a
-     * `…` marks only a part that actually lost something (`x@…yyyy`, not
-     * `x…@…yyyy`). A label without an `@`, or one that
-     * fits as it is, is returned unchanged. Tapping the pill still shows
-     * the whole address.
+     * The `@` kept is the last one (literal or `%40`) *in the label's
+     * authority* — where a userinfo strip would cut — never one in the
+     * path: `ens://<64 a's>@vitalik.eth/@paypal.com` must not rest on
+     * `ens://aa…@paypal.com`, which drops both the real `@` and the name
+     * after it and reads as a visit to `paypal.com`. The authority is
+     * split the way [restingUnmarked] splits it (after `scheme://`, up
+     * to the first `/`, `?` or `#`, or `\` for a special scheme or the
+     * bare-name form).
+     *
+     * For such a label that doesn't [fits], the shortening is done here,
+     * around that `@`: first the part before it keeps a shorter and
+     * shorter head (`ens://aaaa…@vitalik.eth`); then whatever follows
+     * the authority (the path, query, fragment) keeps a shorter and
+     * shorter head, down to a bare `…` (`e…@vitalik.eth…`); and only
+     * then does the rest of the authority give up its middle, keeping
+     * its tail (`e…@…lik.eth`). The result is the longest such
+     * candidate that fits, so the capsule's own ellipsis never runs on
+     * it. No cut splits a surrogate pair (a "character" here is a whole
+     * code point when it is a pair), and a `…` marks only a part that
+     * actually lost something (`x@…yyyy`, not `x…@…yyyy`). A label with
+     * no `@` in its authority, or one that fits as it is, is returned
+     * unchanged. Tapping the pill still shows the whole address.
      *
      * [fits] must be monotone in length (a shorter candidate never fits
      * worse), which a width measurement is.
      */
     fun keepingAt(label: String, fits: (String) -> Boolean): String {
-        val at = maxOf(label.lastIndexOf('@'), label.lastIndexOf("%40", ignoreCase = true))
-        if (at < 0 || fits(label)) return label
+        val (authStart, authEnd) = authorityRange(label)
+        val authority = label.substring(authStart, authEnd)
+        val atInAuthority = maxOf(authority.lastIndexOf('@'), authority.lastIndexOf("%40", ignoreCase = true))
+        if (atInAuthority < 0 || fits(label)) return label
+        val at = authStart + atInAuthority
         val marker = if (label[at] == '@') "@" else label.substring(at, at + 3)
         val before = label.substring(0, at)
-        val after = label.substring(at + marker.length)
+        val host = label.substring(at + marker.length, authEnd)
+        val path = label.substring(authEnd)
 
-        // A head of [before] (or tail of [after]) only gets its `…` when
-        // something was actually cut from it: `x@y` keeps its `x`, it
-        // doesn't become `x…@y`.
+        // A head of [before] (or of [path], or tail of [host]) only gets
+        // its `…` when something was actually cut from it: `x@y` keeps
+        // its `x`, it doesn't become `x…@y`.
         fun headOf(k: Int): String {
             val cut = cutBefore(before, k)
             return before.take(cut) + if (cut < before.length) "…" else ""
         }
+        fun pathHeadOf(p: Int): String =
+            if (p <= 0) "…" else path.take(cutBefore(path, p)) + "…"
         fun tailOf(m: Int): String {
-            val start = cutAfter(after, m)
-            return (if (start > 0) "…" else "") + after.substring(start)
+            val start = cutAfter(host, m)
+            return (if (start > 0) "…" else "") + host.substring(start)
         }
-        fun headed(k: Int) = headOf(k) + marker + after
-        // Largest head of [before] at which the whole [after] still fits.
+        fun headed(k: Int) = headOf(k) + marker + host + path
+        // Largest head of [before] at which the rest still fits whole.
         if (before.isNotEmpty()) {
             var lo = 1
             var hi = before.length - 1
@@ -286,15 +302,45 @@ object AddressLabel {
             if (best > 0) return headed(best)
         }
         val head = if (before.isEmpty()) "" else headOf(1)
-        fun tailed(m: Int) = head + marker + tailOf(m)
+        // Then the path gives way, keeping its head, before the name does.
+        val pathTail = if (path.isEmpty()) "" else "…"
+        if (path.isNotEmpty()) {
+            fun pathed(p: Int) = head + marker + host + pathHeadOf(p)
+            var lo = 0
+            var hi = path.length - 1
+            var best = -1
+            while (lo <= hi) {
+                val mid = (lo + hi) / 2
+                if (fits(pathed(mid))) { best = mid; lo = mid + 1 } else hi = mid - 1
+            }
+            if (best >= 0) return pathed(best)
+        }
+        fun tailed(m: Int) = head + marker + tailOf(m) + pathTail
         var lo = 1
-        var hi = after.length - 1
+        var hi = host.length - 1
         var best = 1
         while (lo <= hi) {
             val mid = (lo + hi) / 2
             if (fits(tailed(mid))) { best = mid; lo = mid + 1 } else hi = mid - 1
         }
-        return if (after.isEmpty()) head + marker else tailed(best)
+        return if (host.isEmpty()) head + marker + pathTail else tailed(best)
+    }
+
+    /**
+     * Start and end of [label]'s authority, split as [restingUnmarked]
+     * splits a display URL: after a leading `scheme://` (a scheme being
+     * a letter then letters, digits, `+`, `-`, `.`), else from the
+     * start (the bare-name form); up to the first `/`, `?` or `#`, or
+     * `\` when the scheme is special or there is none.
+     */
+    private fun authorityRange(label: String): Pair<Int, Int> {
+        val sep = label.indexOf("://")
+        val scheme = if (sep > 0) label.substring(0, sep) else null
+        val validScheme = scheme != null && scheme[0].isLetter() &&
+            scheme.all { it.isLetterOrDigit() || it == '+' || it == '-' || it == '.' }
+        val start = if (validScheme) sep + 3 else 0
+        val backslashSeparates = !validScheme || scheme!!.lowercase() in SPECIAL_SCHEMES
+        return start to start + authorityOf(label.substring(start), backslashSeparates).length
     }
 
     /**

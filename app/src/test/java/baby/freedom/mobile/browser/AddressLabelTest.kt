@@ -172,6 +172,36 @@ class AddressLabelTest {
     }
 
     @Test
+    fun `the at sign kept is the authority's, never one in the path`() {
+        fun within(n: Int): (String) -> Boolean = { it.length <= n }
+        val a64 = "a".repeat(64)
+        val label = "ens://$a64@vitalik.eth/@paypal.com"
+        // The userinfo gives way first, the name and path kept whole.
+        assertEquals("ens://a…@vitalik.eth/@paypal.com", AddressLabel.keepingAt(label, within(32)))
+        // Then the path keeps its head, down to a bare `…`.
+        assertEquals("e…@vitalik.eth/@pa…", AddressLabel.keepingAt(label, within(19)))
+        assertEquals("e…@vitalik.eth…", AddressLabel.keepingAt(label, within(15)))
+        // Only then does the name give up its middle.
+        assertEquals("e…@…lik.eth…", AddressLabel.keepingAt(label, within(12)))
+        // At no width does it rest on the path's `@paypal.com`.
+        for (n in 1..label.length) {
+            val s = AddressLabel.keepingAt(label, within(n))
+            assertTrue(s, '@' in s)
+            assertTrue(s, "@paypal.com" !in s || "@vitalik.eth/" in s)
+        }
+        // The bare-name form and `%40` split the authority the same way.
+        assertEquals("a…@vitalik.eth…", AddressLabel.keepingAt("$a64@vitalik.eth/@paypal.com", within(15)))
+        assertEquals("e…%40vitalik.eth…", AddressLabel.keepingAt("ens://$a64%40vitalik.eth/%40paypal.com", within(17)))
+        // An `@` only in the path is no userinfo: left to the capsule.
+        val pathOnly = "ens://vitalik.eth/" + a64 + "@paypal.com"
+        assertEquals(pathOnly, AddressLabel.keepingAt(pathOnly, within(20)))
+        // A special scheme's authority ends at a backslash; a content one's doesn't.
+        val bs = "https://$a64\\@paypal.com"
+        assertEquals(bs, AddressLabel.keepingAt(bs, within(20)))
+        assertEquals("bzz://swa…@bank.com", AddressLabel.keepingAt("bzz://swarm.eth\\@bank.com", within(19)))
+    }
+
+    @Test
     fun `ens subnames are never collapsed into their parent`() {
         // Each ENS label is its own name with its own owner and
         // resolver, so `pay.vitalik.eth` must not rest on the name
