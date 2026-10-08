@@ -127,7 +127,9 @@ abstract class AppDatabase : RoomDatabase() {
          * refuses to write from now on. A row near 2 MB doesn't fit the
          * window Android reads results through, so before this, one such
          * visit made the Home page and History crash on every open; the
-         * statements here never read it into one. No schema change.
+         * statements here never read it into one. A download's row keeps
+         * no address that long either: its retry address is blanked and
+         * its listed one cut (R1-M3). No schema change.
          */
         internal val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -137,6 +139,15 @@ abstract class AppDatabase : RoomDatabase() {
                     db.execSQL("DELETE FROM `$table` WHERE length(`url`) > $url")
                     db.execSQL("UPDATE `$table` SET `title` = substr(`title`, 1, $title) WHERE length(`title`) > $title")
                 }
+                // A download's row (#461 R1-M3): an address too long to
+                // keep can't be retried (blank), and the listed one is cut
+                // with `…`, as new rows are (`storedSourceUrl`,
+                // `storedDisplayUrl`). The row itself stays: it's the file.
+                db.execSQL("UPDATE `downloads` SET `sourceUrl` = '' WHERE length(`sourceUrl`) > $url")
+                db.execSQL(
+                    "UPDATE `downloads` SET `displayUrl` = substr(`displayUrl`, 1, ${url - 1}) || '…' " +
+                        "WHERE length(`displayUrl`) > $url",
+                )
             }
         }
 

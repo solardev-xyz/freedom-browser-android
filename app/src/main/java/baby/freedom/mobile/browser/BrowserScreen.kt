@@ -2530,7 +2530,21 @@ fun BrowserScreen(
                             val added = repo.bookmark(url, state.title)
                             val private = state.private
                             scope.launch {
-                                val saved = added.await() ?: return@launch
+                                val saved = added.await() ?: run {
+                                    // Say why nothing happened: an address
+                                    // history and bookmarks never keep (over
+                                    // 8 KiB, `about:`, `data:`…, #461), or a
+                                    // failed write.
+                                    snackbarHostState.showSnackbar(
+                                        if (BrowsingRepository.isBookmarkable(url)) {
+                                            Strings.get(R.string.browser_bookmark_failed)
+                                        } else {
+                                            Strings.get(R.string.library_bookmark_cannot_bookmark)
+                                        },
+                                        duration = SnackbarDuration.Short,
+                                    )
+                                    return@launch
+                                }
                                 val id = saved.id
                                 // The star can still show the last page's
                                 // state for a moment; a page that turns out

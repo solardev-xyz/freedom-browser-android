@@ -171,8 +171,8 @@ class BrowsingRepository internal constructor(
      */
     fun bookmark(address: String, title: String): Deferred<Bookmarked?> = scope.async {
         // `page#` is saved as `page` (#418): the `#` names no place.
+        if (!isBookmarkable(address)) return@async null
         val url = PageVisits.withoutEmptyFragment(address)
-        if (!isRecordable(url)) return@async null
         try {
             db.withTransaction {
                 bookmarkFor(url)?.let { Bookmarked(it.id, added = false) }
@@ -406,6 +406,14 @@ class BrowsingRepository internal constructor(
                 !lower.startsWith("javascript:") &&
                 !lower.startsWith("blob:")
         }
+
+        /**
+         * Whether [bookmark] saves [address] (null from it otherwise): the
+         * address it stores ([PageVisits.withoutEmptyFragment]) is
+         * [isRecordable]. The star asks this to say why nothing was added.
+         */
+        fun isBookmarkable(address: String): Boolean =
+            isRecordable(PageVisits.withoutEmptyFragment(address))
 
         /**
          * [title] as history and bookmarks store it: at most

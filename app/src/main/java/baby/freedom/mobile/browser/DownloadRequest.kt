@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.R
+import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.wallet.MessageSigning
 import java.math.RoundingMode
@@ -54,6 +55,39 @@ internal sealed class DownloadTarget {
 
     /** Anything we can't fetch from native code (`file:`, `filesystem:`, …). */
     data class Unsupported(val scheme: String, override val displayUrl: String) : DownloadTarget()
+}
+
+/**
+ * The longest address a download's row keeps (#461 R1-M3), the 8 KiB
+ * history and bookmarks keep ([BrowsingRepository.MAX_URL_CHARS]). A
+ * `https://host/x?` plus megabytes of query would otherwise be a row too
+ * big for the 2 MB window Android reads query results through, and the
+ * Downloads list could never be read back (`SQLiteBlobTooBigException`).
+ */
+internal const val MAX_STORED_DOWNLOAD_URL = BrowsingRepository.MAX_URL_CHARS
+
+/**
+ * [url] as a download's row keeps it to retry, resume or pause it: blank
+ * (the row's "can't be retried") for a `data:` or `blob:` download, and
+ * for an address over [MAX_STORED_DOWNLOAD_URL], since a cut-off address
+ * would fetch something else. The download itself still runs.
+ */
+internal fun storedSourceUrl(target: DownloadTarget, url: String): String = when {
+    target is DownloadTarget.Data || target is DownloadTarget.Blob -> ""
+    url.length > MAX_STORED_DOWNLOAD_URL -> ""
+    else -> url
+}
+
+/**
+ * [display] as a download's row lists it: whole up to
+ * [MAX_STORED_DOWNLOAD_URL], else its start and `…` (never cut inside a
+ * surrogate pair). It is only shown and searched, never fetched.
+ */
+internal fun storedDisplayUrl(display: String): String {
+    if (display.length <= MAX_STORED_DOWNLOAD_URL) return display
+    var end = MAX_STORED_DOWNLOAD_URL - 1
+    if (Character.isHighSurrogate(display[end - 1])) end--
+    return display.substring(0, end) + "…"
 }
 
 /** Longest `data:` prefix kept for display — the payload is the file, not a URL. */

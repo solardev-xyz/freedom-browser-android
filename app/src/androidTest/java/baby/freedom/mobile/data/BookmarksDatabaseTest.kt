@@ -231,6 +231,11 @@ class BookmarksDatabaseTest {
             )
             execSQL("INSERT INTO bookmarks (id, url, title, createdAt, position) VALUES (1, 'vitalik.eth', 'V', 1, 0)")
             execSQL("INSERT INTO bookmarks (id, url, title, createdAt, position) VALUES (2, $huge, 'big', 2, 1)")
+            // R1-M3: a download of a ~2 MB address, and an ordinary one.
+            val download = "INSERT INTO downloads (id, fileName, displayUrl, sourceUrl, mimeType, status, " +
+                "totalBytes, receivedBytes, startedAt) VALUES "
+            execSQL(download + "(1, 'x.bin', $huge, $huge, 'application/octet-stream', 'COMPLETED', 1, 1, 1)")
+            execSQL(download + "(2, 'y.bin', 'https://d.example/y', 'https://d.example/y', 'text/plain', 'COMPLETED', 1, 1, 2)")
             close()
         }
         val db = Room.databaseBuilder(context, AppDatabase::class.java, name)
@@ -245,6 +250,13 @@ class BookmarksDatabaseTest {
                 assertEquals(BrowsingRepository.MAX_TITLE_CHARS, history.single { it.id == 5L }.title.length)
                 assertEquals("Ok", history.single { it.id == 1L }.title)
                 assertEquals(listOf("vitalik.eth"), db.bookmarks().all().first().map { it.url })
+                val downloads = db.downloads().all().first()
+                assertEquals(listOf(2L, 1L), downloads.map { it.id })
+                val big = downloads.single { it.id == 1L }
+                assertEquals("", big.sourceUrl)
+                assertEquals(BrowsingRepository.MAX_URL_CHARS, big.displayUrl.length)
+                assertTrue(big.displayUrl.startsWith("https://e.example/#aa") && big.displayUrl.endsWith("…"))
+                assertEquals("https://d.example/y", downloads.single { it.id == 2L }.sourceUrl)
             }
         } finally {
             db.close()

@@ -69,6 +69,19 @@ class BookmarkAddressTest {
     }
 
     @Test
+    fun `the limit is judged on the spelling saved, not the one typed`() {
+        // #461 R1-M2: a CIDv0 is saved as its longer base36 form, so an
+        // address at the limit as typed is over it as saved — refused here
+        // with the dialog's own reason, not later as a failed save.
+        val head = "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/"
+        val atLimit = head + "a".repeat(8 * 1024 - head.length)
+        assertEquals(8 * 1024, atLimit.length)
+        assertTrue(bookmarkAddress(atLimit) is BookmarkAddress.Invalid)
+        val saved = ok(head + "a".repeat(8000 - head.length))
+        assertTrue(saved, saved.startsWith("ipfs://k") && saved.length <= 8 * 1024)
+    }
+
+    @Test
     fun `names are one trimmed line`() {
         assertEquals("My site", bookmarkTitle("  My site "))
         assertEquals("a b c", bookmarkTitle("a\nb \tc"))

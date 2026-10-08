@@ -112,6 +112,7 @@
     <string name="browser_opened_switch">Switch</string>
     <string name="browser_bookmark_added">Bookmark added</string>
     <string name="browser_bookmark_already">Already bookmarked</string>
+    <string name="browser_bookmark_failed">Couldn\'t add bookmark</string>
     <string name="browser_image_loading">Loading image…</string>
     <string name="browser_image_copy_failed">Couldn\'t copy image</string>
     <string name="browser_image_saved">Image saved</string>
