@@ -241,4 +241,32 @@ class VisitRecordingTest {
         // The streaming second finish: committed, but spent.
         assertFalse(gate.recordOnce(visit.display))
     }
+
+    @Test
+    fun `a document's own row carries the ticket from its load start`() {
+        // #480 R2-M1: the load started (ticket 1), Delete browsing data
+        // ran (now 2), then the page painted and finished. Its row must
+        // carry 1, so the delete drops it, as it drops the page's icon.
+        val gate = CommittedVisitGate()
+        gate.startNavigation()
+        gate.commit()
+        assertEquals(1L, gate.ticketFor(documentTicket = 1L) { 2L })
+        assertTrue(gate.recordOnce(visit.display))
+    }
+
+    @Test
+    fun `a same-document step after the first row is asked for now`() {
+        // A pushState step made after the delete is a visit the user made
+        // after it: it carries a fresh ticket, not the document's.
+        val gate = CommittedVisitGate()
+        gate.startNavigation()
+        gate.commit()
+        assertTrue(gate.recordOnce(visit.display))
+        assertEquals(2L, gate.ticketFor(documentTicket = 1L) { 2L })
+        assertTrue(gate.recordOnce("https://example.com/next"))
+        // The next document is back on its own load-start ticket.
+        gate.startNavigation()
+        gate.commit()
+        assertEquals(3L, gate.ticketFor(documentTicket = 3L) { 4L })
+    }
 }

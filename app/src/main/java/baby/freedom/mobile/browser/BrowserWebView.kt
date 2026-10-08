@@ -786,6 +786,18 @@ internal class CommittedVisitGate {
         recordedDisplay = display
         return true
     }
+
+    /**
+     * The [BrowsingRepository.historyTicket] the next row's write
+     * carries (#480 R2-M1): the document's own row was asked for when
+     * its load started ([documentTicket], the same ticket its icon
+     * carries), so a page whose load began before Delete browsing data
+     * doesn't come back into History when it finishes after it. A later
+     * row of the same document — a `pushState`/hash step — is asked for
+     * by that step itself, now ([now]). Call before [recordOnce].
+     */
+    fun ticketFor(documentTicket: Long, now: () -> Long): Long =
+        if (recordedDisplay == null) documentTicket else now()
 }
 
 /**
@@ -1734,6 +1746,11 @@ private fun buildRefreshableWebView(
     // we still want to attribute the icon to the page it actually
     // belongs to.
     var lastLoadedDisplayUrl: String? = null
+
+    // [BrowsingRepository.historyTicket] from when that page's load
+    // started: an icon it reports after a Delete browsing data asked
+    // for since is dropped, not stored (#480 R1-M1).
+    var lastLoadedTicket: Long = repo.historyTicket()
 
     // The ENS roots this tab's documents were served from, so their
     // subresources don't follow another tab's newer answer (#99).
@@ -3351,6 +3368,7 @@ private fun buildRefreshableWebView(
                     val uiDisplay = ErrorPage.displayUrlFor(url) ?: display
                     state.url = uiDisplay
                     lastLoadedDisplayUrl = display
+                    lastLoadedTicket = repo.historyTicket()
                     // Commit the address *here*, at navigation commit —
                     // not in `onPageFinished`. The new document starts
                     // painting long before its load event fires, and a
@@ -3414,8 +3432,12 @@ private fun buildRefreshableWebView(
                 // the same visit again.
                 val flushed = pendingVisit.flush(url)
                 // A private tab (#86) claims the slot and writes nothing.
-                if (flushed != null && visitGate.recordOnce(flushed.display) && !state.private) {
-                    repo.recordVisit(flushed.display, flushed.title)
+                if (flushed != null) {
+                    // Asked for when this document's load started (#480 R2-M1).
+                    val ticket = visitGate.ticketFor(lastLoadedTicket, repo::historyTicket)
+                    if (visitGate.recordOnce(flushed.display) && !state.private) {
+                        repo.recordVisit(flushed.display, flushed.title, ticket)
+                    }
                 }
             }
 
@@ -3631,8 +3653,11 @@ private fun buildRefreshableWebView(
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
+                        // The document's own row carries the ticket from
+                        // its load start, as its icon does (#480 R2-M1).
+                        val ticket = visitGate.ticketFor(lastLoadedTicket, repo::historyTicket)
                         if (visitGate.recordOnce(display) && !state.private) {
-                            repo.recordVisit(display, state.title)
+                            repo.recordVisit(display, state.title, ticket)
                         }
                     } else if (url != null) {
                         pendingVisit.park(PendingVisit(url, display, state.title))
@@ -4583,7 +4608,7 @@ private fun buildRefreshableWebView(
                 // cache is a list of sites visited.
                 if (state.private) return
                 val bytes = encodePngBytes(icon) ?: return
-                repo.storeFavicon(display, bytes)
+                repo.storeFavicon(display, bytes, lastLoadedTicket)
             }
         }
     }

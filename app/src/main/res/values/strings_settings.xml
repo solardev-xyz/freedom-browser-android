@@ -190,6 +190,7 @@
         <item quantity="other">%d visits, plus closed tabs and tabs waiting to be restored</item>
     </plurals>
     <string name="delete_data_history_none">No visits in this range, plus closed tabs and tabs waiting to be restored</string>
+    <string name="delete_data_history_detail">Also the site icons saved for those visits. Bookmarked sites, and sites with older visits left, keep theirs.</string>
     <string name="delete_data_cookies">Cookies and site data</string>
     <string name="delete_data_cookies_subtitle">Signs you out of every site</string>
     <string name="delete_data_cookies_detail">Also site storage, form autofill, remembered zoom levels, desktop-site choices, client certificates picked for sites this session, open tabs\' back and forward pages and the nodes\' recent logs. Unfinished downloads are cancelled.</string>
