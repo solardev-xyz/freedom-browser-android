@@ -407,6 +407,13 @@ class RadicleProviderTest {
             assertNull(providerOriginKey("http://127.0.0.1:1700"))
             assertNull(providerOriginKey("http://localhost:8080"))
             assertNull(providerOriginKey("http://127.0.0.1:58312"))
+            // An https one on this device too (R1-M2): its origin is just as shared.
+            Gateways.setExternalEndpoints("https://localhost:8443", "https://127.0.0.1")
+            assertNull(providerOriginKey("https://localhost:8443"))
+            assertNull(providerOriginKey("https://127.0.0.1:8443"))
+            assertNull(providerOriginKey("https://[::1]"))
+            assertNull(providerOriginKey("https://127.0.0.1:443/"))
+            assertEquals("https://example.com:8443", providerOriginKey("https://example.com:8443"))
             // A remote one shares no port on this device.
             Gateways.setExternalEndpoints("http://192.168.1.20:1800", "https://ipfs.example")
             assertEquals("http://localhost:1800", providerOriginKey("http://localhost:1800"))

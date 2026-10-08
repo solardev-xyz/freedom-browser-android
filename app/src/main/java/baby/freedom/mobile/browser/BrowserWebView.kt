@@ -2845,7 +2845,7 @@ private fun buildRefreshableWebView(
                 }
                 return
             }
-            val origin = permissionOriginKey(pageUrl)
+            val origin = sitePermissionOriginKey(pageUrl)
             val launch = externalAppLaunch(url, view.context.packageName)
             if (origin == null || launch == null) {
                 Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(url)}")
@@ -4417,7 +4417,7 @@ private fun buildRefreshableWebView(
                 deferredPopups.post {
                     val opener = view
                     if (opener == null || opener.isDestroyed) return@post
-                    val origin = permissionOriginKey(committedPageUrl)
+                    val origin = sitePermissionOriginKey(committedPageUrl)
                     if (popupOpens(isUserGesture = false, siteAllowed = popupsAllowed(origin))) {
                         transport.webView = onCreateWindow(false)
                         resultMsg.sendToTarget()

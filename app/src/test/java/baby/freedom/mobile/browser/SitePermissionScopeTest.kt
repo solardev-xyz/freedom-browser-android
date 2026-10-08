@@ -75,6 +75,42 @@ class SitePermissionScopeTest {
     }
 
     @Test
+    fun `issue 457 - a content gateway's own origin holds no site permission`() = runBlocking {
+        try {
+            Gateways.setIpfsBase("http://127.0.0.1:58312")
+            Gateways.setExternalEndpoints("https://localhost:8443", "")
+            val gateway = "http://127.0.0.1:1633"
+            // The page every raw-gateway root shares has no site to decide anything under…
+            assertNull(documentPermissionOrigin("$gateway/bzz/aaaa/"))
+            assertNull(documentPermissionOrigin("http://localhost:1633/bzz/aaaa/"))
+            assertNull(documentPermissionOrigin("blob:http://127.0.0.1:1633/6f1c2d3e"))
+            assertNull(documentPermissionOrigin("http://[::1]:58312/ipfs/bafy/"))
+            assertNull(documentPermissionOrigin("https://localhost:8443/bzz/aaaa/"))
+            assertNull(sitePermissionOriginKey("http://app.localhost:1633/"))
+            // …so even an "Always allow" stored under it before is never read: no scope, no prompt.
+            val store = SitePermissionStore(MemoryStore())
+            store.set(gateway, SitePermission.CAMERA.key, PermissionDecision.ALLOW.stored)
+            assertNull(permissionScopeFor("$gateway/", gateway))
+            assertNull(plan(store, PermissionSession(), "$gateway/", gateway))
+            // Neither as a frame in another site, nor as the site a frame asks in.
+            assertNull(permissionScopeFor("$gateway/", meet))
+            assertNull(permissionScopeFor("https://meet.example/", gateway))
+            // A dev server on another loopback port, and every other site, are as before.
+            assertEquals("http://localhost:8730", documentPermissionOrigin("http://localhost:8730/"))
+            assertEquals(PermissionScope("http://localhost:8730"), permissionScopeFor("http://localhost:8730/", "http://localhost:8730"))
+            assertEquals(meet, sitePermissionOriginKey("https://meet.example/room"))
+            // What an earlier release left under such an origin is what the sweep takes.
+            assertEquals(
+                listOf(gateway, "https://localhost:8443"),
+                GatewayOriginSweep.gatewayOrigins(listOf(gateway, meet, "http://localhost:8730", gateway, "https://localhost:8443")),
+            )
+        } finally {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+        }
+    }
+
+    @Test
     fun `issue 363 - a remembered top-level grant does not answer the same site framed by another`() = runBlocking {
         val store = SitePermissionStore(MemoryStore())
         val session = PermissionSession()

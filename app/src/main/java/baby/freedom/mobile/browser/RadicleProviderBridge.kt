@@ -435,38 +435,68 @@ private const val MAX_REQUEST_CHARS = 512 * 1024
  * for a secure origin — https, or http on a loopback host — and null for
  * anything else, including the repository browser's own origin.
  *
- * Also null for a content gateway's own origin on the device (#457): a
- * loopback host on the port of the embedded Swarm or IPFS gateway, or of
- * an external endpoint the user pointed at this device
- * ([Gateways.loopbackGatewayPorts]). Every Swarm or IPFS root loaded as
+ * Also null for a content gateway's own origin on the device (#457,
+ * [isLoopbackGatewayOrigin]): every Swarm or IPFS root loaded as
  * `http://127.0.0.1:1633/bzz/<ref>/` shares that one origin, so a grant
  * given to one of them would be every root's, and any page could
  * navigate there with an attacker's hash. Content gets its provider on
- * its own per-root virtual origin ([VirtualOrigin]) instead. Matched by
- * port on any loopback host, since every loopback name reaches the
- * gateway.
+ * its own per-root virtual origin ([VirtualOrigin]) instead.
  */
 internal fun providerOriginKey(raw: String?): String? {
     val key = permissionOriginKey(raw) ?: return null
     if (key == RadUrl.ORIGIN) return null
+    if (isLoopbackGatewayOrigin(key)) return null
     if (key.startsWith("https://")) return key
-    val port = loopbackHttpPort(key) ?: return null
-    return key.takeUnless { port in Gateways.loopbackGatewayPorts() }
+    return key.takeIf { loopbackHttpPort(key) != null }
+}
+
+/**
+ * Whether [originKey] (a [permissionOriginKey]) is a content gateway's
+ * own origin on the device (#457): a loopback host, `http` or `https`,
+ * on the port of the embedded Swarm or IPFS gateway, or of an external
+ * endpoint the user pointed at this device
+ * ([Gateways.loopbackGatewayPorts]). Such an origin holds no provider
+ * ([providerOriginKey]) and no site permission ([sitePermissionOriginKey]).
+ *
+ * Matched by port on any loopback name (`127.0.0.0/8`, `localhost`,
+ * `*.localhost`, `[::1]`), since every one of them reaches the gateway.
+ * That includes a subdomain gateway's per-root host
+ * (`http://<cid>.ipfs.localhost:8080`, what Kubo redirects a path
+ * request to): it is one root's origin, but nothing here can tell a
+ * gateway that keys content by `Host` from one that serves
+ * `/ipfs/<any>` on every name, so it gets no provider or permission
+ * either; content keeps both on its virtual origin.
+ */
+internal fun isLoopbackGatewayOrigin(originKey: String): Boolean {
+    val port = loopbackPort(originKey) ?: return false
+    return port in Gateways.loopbackGatewayPorts()
 }
 
 /**
  * The port of [originKey] (a [permissionOriginKey]) if it's `http://` on
  * a loopback host ([isLoopbackHost]), else null.
  */
-internal fun loopbackHttpPort(originKey: String): Int? {
-    if (!originKey.startsWith("http://")) return null
-    val hostPort = originKey.removePrefix("http://")
+internal fun loopbackHttpPort(originKey: String): Int? =
+    if (originKey.startsWith("http://")) loopbackPort(originKey) else null
+
+/**
+ * The port of [originKey] (a [permissionOriginKey]) if it's `http://` or
+ * `https://` on a loopback host ([isLoopbackHost]), the scheme's default
+ * when it names none; else null.
+ */
+internal fun loopbackPort(originKey: String): Int? {
+    val (prefix, defaultPort) = when {
+        originKey.startsWith("http://") -> "http://" to "80"
+        originKey.startsWith("https://") -> "https://" to "443"
+        else -> return null
+    }
+    val hostPort = originKey.removePrefix(prefix)
     val host = (
         if (hostPort.startsWith("[")) hostPort.substringAfter('[').substringBefore(']')
         else hostPort.substringBefore(':')
     ).trimEnd('.')
     if (!isLoopbackHost(host)) return null
-    return hostPort.substringAfterLast(']').substringAfter(':', "80").toIntOrNull()
+    return hostPort.substringAfterLast(']').substringAfter(':', defaultPort).toIntOrNull()
 }
 
 /**

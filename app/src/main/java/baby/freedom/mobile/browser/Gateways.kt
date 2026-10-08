@@ -15,9 +15,12 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -57,8 +60,8 @@ object Gateways {
      * thread) and the readers (webview interceptors, suspend navigation
      * gates on the UI and IO threads) are all on different threads.
      */
-    @Volatile
-    private var embeddedIpfsBase: String = ""
+    private val embeddedIpfs = MutableStateFlow("")
+    private val embeddedIpfsBase: String get() = embeddedIpfs.value
 
     private val externalSwarm = MutableStateFlow("")
     private val externalIpfs = MutableStateFlow("")
@@ -98,7 +101,7 @@ object Gateways {
 
     /** The embedded IPFS gateway's base, `""` while it isn't running. */
     fun setIpfsBase(base: String) {
-        embeddedIpfsBase = base
+        embeddedIpfs.value = base
     }
 
     /**
@@ -460,14 +463,22 @@ object Gateways {
 
     /**
      * The ports a content gateway answers on at a loopback host, so
-     * every `http://<loopback>:<port>` on them is a gateway's own origin
-     * ([providerOriginKey], #457): the embedded Swarm gateway's, the
-     * embedded IPFS gateway's while it runs, and an external endpoint's
-     * when the user set one on this device.
+     * every `http(s)://<loopback>:<port>` on them is a gateway's own
+     * origin ([isLoopbackGatewayOrigin], #457): the embedded Swarm
+     * gateway's, the embedded IPFS gateway's while it runs, and an
+     * external endpoint's (`http` or `https`) when the user set one on
+     * this device.
      */
     fun loopbackGatewayPorts(): Set<Int> =
-        listOf(EMBEDDED_SWARM_BASE, embeddedIpfsBase, externalSwarmBase, externalIpfsBase)
-            .mapNotNullTo(mutableSetOf()) { base -> permissionOriginKey(base)?.let(::loopbackHttpPort) }
+        loopbackGatewayPorts(embeddedIpfsBase, externalSwarmBase, externalIpfsBase)
+
+    private fun loopbackGatewayPorts(embeddedIpfs: String, externalSwarm: String, externalIpfs: String): Set<Int> =
+        listOf(EMBEDDED_SWARM_BASE, embeddedIpfs, externalSwarm, externalIpfs)
+            .mapNotNullTo(mutableSetOf()) { base -> permissionOriginKey(base)?.let(::loopbackPort) }
+
+    /** [loopbackGatewayPorts] as a flow, for the sweep of grants left on them ([GatewayOriginSweep]). */
+    val loopbackGatewayPortsFlow: Flow<Set<Int>> =
+        combine(embeddedIpfs, externalSwarm, externalIpfs, ::loopbackGatewayPorts).distinctUntilChanged()
 
     /**
      * The external IPFS gateway [gatewayUrl] (a [gatewayUrlFor] answer)
