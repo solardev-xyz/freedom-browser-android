@@ -53,6 +53,17 @@ interface INodeService {
     void stopIpfs();
 
     /**
+     * The IPFS node's start-time settings (#475): `lowPower` and
+     * `routingMode` (one of NodeSettings.IPFS_ROUTING_MODES). They live in
+     * the UI process's DataStore, which `:node`'s own copy of the file
+     * doesn't see change, so the UI relays them on every bind and every
+     * change. The next [ensureIpfsStarted] boots with them; a running node
+     * keeps what it started with (freedom-ipfs has no live reconfig).
+     * Not oneway, so it lands before an [ensureIpfsStarted] sent after it.
+     */
+    void setIpfsConfig(boolean lowPower, String routingMode);
+
+    /**
      * The UI came to the foreground. Re-warms the Swarm peer
      * connections and resumes IPFS discovery — after Android froze
      * the process or the network flipped, the nodes otherwise sit on

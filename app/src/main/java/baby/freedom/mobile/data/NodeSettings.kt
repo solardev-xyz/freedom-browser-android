@@ -302,6 +302,9 @@ class NodeSettings private constructor(
      * `delegated`, `light_dht`, `offline`. Default `auto` — delegated
      * routing for lookups with a client-only light-DHT fallback, the
      * cheapest mode that still resolves arbitrary CIDs on mobile.
+     * `MainActivity` relays it, with [ipfsLowPower], to the `:node`
+     * process ([baby.freedom.mobile.node.INodeService.setIpfsConfig],
+     * #475), whose own copy of this file doesn't see it change.
      */
     val ipfsRoutingMode: Flow<String> = store.data.map { prefs ->
         prefs[Keys.IPFS_ROUTING_MODE] ?: DEFAULT_IPFS_ROUTING_MODE

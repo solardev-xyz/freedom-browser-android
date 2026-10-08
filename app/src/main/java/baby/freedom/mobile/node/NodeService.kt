@@ -124,6 +124,14 @@ class NodeService : Service() {
     @Volatile
     private var relayedGnosis: Chain? = null
 
+    /**
+     * The IPFS start settings as the UI last relayed them with
+     * [INodeService.setIpfsConfig] (#475); null until it has, when
+     * [maybeStartIpfs] reads this process's own copy of the file.
+     */
+    @Volatile
+    private var relayedIpfsConfig: IpfsConfig? = null
+
     @Volatile
     private var storedGnosis: Chain? = null
 
@@ -240,6 +248,10 @@ class NodeService : Service() {
 
         override fun stopIpfs() {
             scope.launch { maybeStopIpfs() }
+        }
+
+        override fun setIpfsConfig(lowPower: Boolean, routingMode: String?) {
+            IpfsConfig.relayed(lowPower, routingMode)?.let { relayedIpfsConfig = it }
         }
 
         override fun onAppForeground() {
@@ -929,13 +941,16 @@ class NodeService : Service() {
      * `ipfs_low_power` and `ipfs_routing_mode` are snapshotted here
      * and applied on node init; the freedom-ipfs wrapper
      * has no live-reconfig path, so changing them in Settings only
-     * takes effect on the next start cycle (off → on).
+     * takes effect on the next start cycle (off → on). They come from
+     * the UI's relay ([relayedIpfsConfig], #475): this process's own
+     * DataStore read the file once and never sees it change.
      */
     private suspend fun maybeStartIpfs(): Unit = ipfsLifecycle.withLock {
         if (ipfsNode != null) return@withLock
-        val settings = NodeSettings.get(this)
-        val lowPower = settings.ipfsLowPower.first()
-        val routingMode = settings.ipfsRoutingMode.first()
+        val (lowPower, routingMode) = IpfsConfig.forStart(relayedIpfsConfig) {
+            val settings = NodeSettings.get(this)
+            IpfsConfig(settings.ipfsLowPower.first(), settings.ipfsRoutingMode.first())
+        }
 
         val node = IpfsNode(
             IpfsNode.Config(
