@@ -40,8 +40,11 @@ internal object DocumentClock {
 internal class TabDocuments {
     private val origins = ConcurrentHashMap<String, Long>()
 
-    /** A main-frame answer not yet committed: its URL, tick and [ipfsGateway]. */
-    private class Answer(val url: String, val tick: Long, val ipfsGateway: String?)
+    /**
+     * A main-frame answer not yet committed: its URL (as [documentKey], the
+     * same key [starts] and the commit are matched by), tick and [ipfsGateway].
+     */
+    private class Answer(val key: String, val tick: Long, val ipfsGateway: String?)
 
     /** Main-frame answers not yet committed, oldest first. */
     private val answers = ArrayDeque<Answer>()
@@ -80,9 +83,10 @@ internal class TabDocuments {
      * (#125), null for anything else.
      */
     fun mainFrameAnswered(url: String, ipfsGateway: String? = null) {
+        val key = documentKey(url)
         val tick = DocumentClock.next()
         synchronized(answers) {
-            answers.addLast(Answer(url, tick, ipfsGateway))
+            answers.addLast(Answer(key, tick, ipfsGateway))
             while (answers.size > MAX_PENDING_ANSWERS) answers.removeFirst()
         }
     }
@@ -104,7 +108,9 @@ internal class TabDocuments {
 
     /**
      * A main-frame document for [url] committed ([origin]: its virtual
-     * origin, if any). Its answer is the latest one for that URL; with
+     * origin, if any). Its answer is the latest one for that URL — matched
+     * by [documentKey], like a start, so a commit reported with a fragment
+     * or a differently-cased host still finds it (#511 R2-F1); with
      * none (a page a service worker answered), the start of the latest
      * navigation to it; with neither — redirected on the network, where
      * the interceptor sees no new request — the latest answer of all.
@@ -112,7 +118,7 @@ internal class TabDocuments {
     fun committed(url: String?, origin: String?) {
         val since = synchronized(answers) {
             val key = url?.let(::documentKey)
-            val answer = answers.lastOrNull { it.url == url }
+            val answer = key?.let { k -> answers.lastOrNull { it.key == k } }
             val start = if (answer == null) starts.lastOrNull { it.first == key }?.second else null
             val committedAnswer = answer ?: if (start == null) answers.lastOrNull() else null
             val tick = committedAnswer?.tick ?: start
