@@ -48,6 +48,40 @@ class TezLookalikeDisplayTest {
     }
 
     @Test
+    fun `a bookmark key read at startup matches one read once warm`() {
+        // #490 R4-M1: the star keys the page once and the bookmarks on
+        // every change, so a key worked out before the ENSIP-15 tables
+        // were decoded has to be the one worked out after.
+        val honest = "caf\u00E9.tez"
+        val warmKey = BookmarkUrls.key(honest)
+        try {
+            EnsNormalize.warmed = false
+            val coldKey = BookmarkUrls.key("caf%C3%A9.tez")
+            assertEquals(warmKey, coldKey)
+            assertEquals(true, EnsNormalize.isWarm)
+            EnsNormalize.warmed = false
+            assertEquals(warmKey, BookmarkUrls.key(honest))
+            assertEquals(warmKey, BookmarkUrls.key("caf%C3%A9.tez"))
+        } finally {
+            EnsNormalize.warm()
+        }
+        // A lookalike keeps one key too, escaped or not.
+        assertEquals(BookmarkUrls.key(spoof), BookmarkUrls.key(spoofShown))
+    }
+
+    @Test
+    fun `the end of the private session forgets the names shown`() {
+        // #490 R4-M2: the memo holds a private tab's `.tez` names.
+        EnsNormalize.tezosDisplay(spoof)
+        EnsNormalize.tezosDisplay("caf\u00E9.tez")
+        assertEquals(true, EnsNormalize.shownCount > 0)
+        EnsNormalize.forgetShown()
+        assertEquals(0, EnsNormalize.shownCount)
+        // Still the same answers afterwards.
+        assertEquals(spoofShown, EnsNormalize.tezosDisplay(spoof))
+    }
+
+    @Test
     fun `an honest unicode tez name stays readable`() {
         for (name in listOf("caf\u00E9.tez", "\u2764.tez", "\u03C3\u03BF\u03C6\u03BF\u03C2.tez", "alice.tez")) {
             assertEquals(name, EnsNormalize.tezosDisplay(name))

@@ -213,6 +213,19 @@ object EnsNormalize {
     }
     private const val SHOWN_CACHE_SIZE = 64
 
+    /**
+     * Drop [tezosDisplay]'s memo (#490 R4-M2): it holds the names it was
+     * asked about, private tabs' included, so the private session's end
+     * clears it like the app's other in-memory traces of those tabs.
+     * Only a memo — the next ask works the answer out again.
+     */
+    fun forgetShown() {
+        synchronized(shownCache) { shownCache.clear() }
+    }
+
+    /** How many names [tezosDisplay]'s memo holds (for tests). */
+    internal val shownCount: Int get() = synchronized(shownCache) { shownCache.size }
+
     /** [name] with each non-ASCII code point as its UTF-8 bytes, `%XX` (upper-case hex). */
     private fun escaped(name: String): String = buildString {
         var i = 0
@@ -248,8 +261,9 @@ object EnsNormalize {
     fun isFastPath(name: String): Boolean =
         pureAsciiHost.matches(name.lowercase()) || !appliesTo(name)
 
+    /** Set by [warm]; tests put it back to `false` to act out startup. */
     @Volatile
-    private var warmed = false
+    internal var warmed = false
 
     /** Have the spec tables been decoded ([warm] has returned)? */
     val isWarm: Boolean get() = warmed

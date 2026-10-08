@@ -929,7 +929,8 @@ fun BrowserWebViewHost(
      * what the app itself kept for the session in memory: its
      * site-permission answers, zoom levels, downloads list (a private
      * download still running is cancelled, as in Chrome) and the
-     * onchain apps let through despite a warning (#123). Then
+     * onchain apps let through despite a warning (#123), and the
+     * `.tez` names [EnsNormalize.tezosDisplay] memoized. Then
      * [onPrivateSessionEnded]: the node processes' logs go too (#276,
      * R3-M3) — scrubbed, but the timing and volume of what the private
      * tabs fetched is in them, and a line can't be told apart by tab, so
@@ -946,6 +947,8 @@ fun BrowserWebViewHost(
         desktopSites.clearPrivate()
         DownloadManager.get(context).endPrivateSession()
         OnchainApps.onPrivateSessionEnded()
+        // The `.tez` names a private tab showed (#490 R4-M2).
+        EnsNormalize.forgetShown()
         privateSessionEnded.value()
     }
 
