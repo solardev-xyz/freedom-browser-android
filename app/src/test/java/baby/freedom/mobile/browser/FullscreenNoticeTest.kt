@@ -35,6 +35,29 @@ class FullscreenNoticeTest {
     }
 
     @Test
+    fun `a page on the content gateway's own origin is named by the root it shows`() {
+        // No permission site there by design (#457), but the notice must
+        // still name what's on screen, not read "This page is full screen".
+        val ref = "a".repeat(64)
+        val tabs = TabsState(homepage = "ens://freedom.eth")
+        tabs.active.permissionOrigin = null
+        tabs.active.siteOrigin = "http://127.0.0.1:1633"
+        tabs.active.url = "bzz://$ref/play/index.html?x=1#y"
+        tabs.enterFullscreen(tabs.active, View(null), null)
+        assertEquals("bzz://$ref", tabs.fullscreen?.site)
+    }
+
+    @Test
+    fun `a gateway page whose address has no scheme is named by its origin`() {
+        val tabs = TabsState(homepage = "ens://freedom.eth")
+        tabs.active.permissionOrigin = null
+        tabs.active.siteOrigin = "http://127.0.0.1:1633"
+        tabs.active.url = ""
+        tabs.enterFullscreen(tabs.active, View(null), null)
+        assertEquals("http://127.0.0.1:1633", tabs.fullscreen?.site)
+    }
+
+    @Test
     fun `the site is the one fullscreen started on, not where the tab goes next`() {
         val tabs = TabsState(homepage = "ens://freedom.eth")
         tabs.active.permissionOrigin = "https://video.example"
