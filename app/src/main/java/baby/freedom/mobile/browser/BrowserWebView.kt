@@ -2845,7 +2845,7 @@ private fun buildRefreshableWebView(
                 }
                 return
             }
-            val origin = permissionOriginKey(pageUrl)
+            val origin = sitePermissionOriginKey(pageUrl)
             val launch = externalAppLaunch(url, view.context.packageName)
             if (origin == null || launch == null) {
                 Log.i(LOG_TAG, "external link refused: ${externalUrlForLog(url)}")
@@ -3161,6 +3161,7 @@ private fun buildRefreshableWebView(
                 state.zoomSite = zoomSite
                 state.providerOrigin = providerOriginKey(url)
                 state.permissionOrigin = documentPermissionOrigin(url)
+                state.siteOrigin = documentOrigin(url)
                 // …with the user agent it was fetched with (#180). One
                 // that crossed the desktop/mobile line was corrected
                 // before its request went out, where it could be (see
@@ -3389,6 +3390,7 @@ private fun buildRefreshableWebView(
                     state.showsErrorPage = false
                     state.providerOrigin = null
                     state.permissionOrigin = null
+                    state.siteOrigin = null
                     // …and no page colour behind the status bar (#92) —
                     // unless the blank document is a popup's page, whose
                     // colour is its own.
@@ -4417,7 +4419,7 @@ private fun buildRefreshableWebView(
                 deferredPopups.post {
                     val opener = view
                     if (opener == null || opener.isDestroyed) return@post
-                    val origin = permissionOriginKey(committedPageUrl)
+                    val origin = sitePermissionOriginKey(committedPageUrl)
                     if (popupOpens(isUserGesture = false, siteAllowed = popupsAllowed(origin))) {
                         transport.webView = onCreateWindow(false)
                         resultMsg.sendToTarget()

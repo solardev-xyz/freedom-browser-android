@@ -8,6 +8,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import baby.freedom.mobile.data.SitePermissionStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -72,6 +74,83 @@ class SitePermissionScopeTest {
         assertNull(documentPermissionOrigin("data:text/html,hi"))
         assertNull(documentPermissionOrigin("about:blank"))
         assertEquals(meet, documentPermissionOrigin("https://meet.example/room"))
+    }
+
+    @Test
+    fun `issue 457 - a content gateway's own origin holds no site permission`() = runBlocking {
+        try {
+            Gateways.setIpfsBase("http://127.0.0.1:58312")
+            Gateways.setExternalEndpoints("https://localhost:8443", "")
+            val gateway = "http://127.0.0.1:1633"
+            // The page every raw-gateway root shares has no site to decide anything under…
+            assertNull(documentPermissionOrigin("$gateway/bzz/aaaa/"))
+            assertNull(documentPermissionOrigin("http://localhost:1633/bzz/aaaa/"))
+            assertNull(documentPermissionOrigin("blob:http://127.0.0.1:1633/6f1c2d3e"))
+            assertNull(documentPermissionOrigin("http://[::1]:58312/ipfs/bafy/"))
+            assertNull(documentPermissionOrigin("https://localhost:8443/bzz/aaaa/"))
+            assertNull(sitePermissionOriginKey("http://app.localhost:1633/"))
+            // …so even an "Always allow" stored under it before is never read: no scope, no prompt.
+            val store = SitePermissionStore(MemoryStore())
+            store.set(gateway, SitePermission.CAMERA.key, PermissionDecision.ALLOW.stored)
+            assertNull(permissionScopeFor("$gateway/", gateway))
+            assertNull(plan(store, PermissionSession(), "$gateway/", gateway))
+            // Neither as a frame in another site, nor as the site a frame asks in.
+            assertNull(permissionScopeFor("$gateway/", meet))
+            assertNull(permissionScopeFor("https://meet.example/", gateway))
+            // A dev server on another loopback port, and every other site, are as before.
+            assertEquals("http://localhost:8730", documentPermissionOrigin("http://localhost:8730/"))
+            assertEquals(PermissionScope("http://localhost:8730"), permissionScopeFor("http://localhost:8730/", "http://localhost:8730"))
+            assertEquals(meet, sitePermissionOriginKey("https://meet.example/room"))
+            // The sweep takes only the embedded Swarm gateway's fixed port (R2-M1/M2): the
+            // IPFS gateway's ephemeral port and a user-set endpoint's may be a dev server's
+            // grant (connected while it ran there), which it mustn't take away for good.
+            assertEquals(
+                listOf(gateway, "http://localhost:1633", "https://[::1]:1633"),
+                GatewayOriginSweep.gatewayOrigins(
+                    listOf(
+                        gateway, meet, "http://localhost:8730", gateway, "https://localhost:8443",
+                        "http://127.0.0.1:58312", "http://localhost:1633", "https://[::1]:1633",
+                    ),
+                ),
+            )
+            // …and they stay refused while a gateway holds their port, and the same
+            // stored grant reads again once it doesn't.
+            assertNull(sitePermissionOriginKey("http://127.0.0.1:58312/"))
+            Gateways.setIpfsBase("http://127.0.0.1:41234")
+            assertEquals("http://127.0.0.1:58312", sitePermissionOriginKey("http://127.0.0.1:58312/"))
+            assertNull(sitePermissionOriginKey("http://127.0.0.1:41234/"))
+            assertFalse(GatewayOriginSweep.isSweptOrigin("http://127.0.0.1:41234"))
+            assertFalse(GatewayOriginSweep.isSweptOrigin("https://example.com:1633"))
+            // Names that reach the device without being loopback (R3-M2): no site
+            // permission there, and an earlier grant on the Swarm port is swept.
+            assertNull(sitePermissionOriginKey("http://[::ffff:7f00:1]:1633/bzz/a/"))
+            assertNull(sitePermissionOriginKey("http://0.0.0.0:1633/bzz/a/"))
+            assertTrue(GatewayOriginSweep.isSweptOrigin("http://[::ffff:7f00:1]:1633"))
+            assertTrue(GatewayOriginSweep.isSweptOrigin("http://0.0.0.0:1633"))
+            assertFalse(GatewayOriginSweep.isSweptOrigin("http://[::ffff:c0a8:114]:1633"))
+        } finally {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+        }
+    }
+
+    @Test
+    fun `the gateway origin sweep runs once per process however often an Activity starts it`() = runBlocking {
+        // R3-M1: every Activity creation calls it; only a cancelled run is retried.
+        val gate = OnceGate()
+        var runs = 0
+        val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val first = launch {
+            gate.run { runs++; started.complete(Unit); kotlinx.coroutines.awaitCancellation() }
+        }
+        started.await()
+        val second = async { gate.run { runs++ } }
+        first.cancel()
+        second.await()
+        assertEquals(2, runs)
+        gate.run { runs++ }
+        gate.run { runs++ }
+        assertEquals(2, runs)
     }
 
     @Test

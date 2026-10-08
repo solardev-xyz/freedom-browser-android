@@ -56,6 +56,12 @@
     <string name="page_info_delete_confirm_body">Its cookies and the data it stored on this phone are removed, so you\'ll be signed out of it. The page reloads.</string>
     <string name="page_info_delete_confirm_body_private">Its cookies and the data it stored in this private session are removed, so you\'ll be signed out of it. The page reloads.</string>
     <string name="page_info_delete_confirm">Delete</string>
+    <!-- A content gateway's own origin (#457 R6-M1): every Swarm/IPFS root loaded through
+         http://127.0.0.1:1633/bzz/<ref>/ shares its cookies and storage. %1$s is "127.0.0.1:1633". -->
+    <string name="page_info_site_data_gateway">Shared by every page opened through %1$s</string>
+    <string name="page_info_delete_gateway_data">Delete data for this gateway</string>
+    <string name="page_info_delete_confirm_body_gateway">Every page opened through this gateway shares these cookies and this stored data, so it\'s removed for all of them, not only this one. The page reloads.</string>
+    <string name="page_info_delete_confirm_body_gateway_private">Every page opened through this gateway in this private session shares these cookies and this stored data, so it\'s removed for all of them, not only this one. The page reloads.</string>
 
     <string name="page_info_expanded">Shown</string>
     <string name="page_info_collapsed">Hidden</string>

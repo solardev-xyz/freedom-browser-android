@@ -258,6 +258,15 @@ internal data class SiteDataCount(val cookies: Int, val bytes: Long?)
 internal fun cookieEntries(header: String?): List<String> =
     header.orEmpty().split(';').map { it.trim() }.filter { it.isNotEmpty() }
 
+/**
+ * How Page info names [origin]'s data when it's a content gateway's own
+ * origin on the device ([isLoopbackGatewayOrigin]), shared by every root
+ * loaded through it: the bare `host:port` (`127.0.0.1:1633`). Null for
+ * any other origin, whose data is the one site's own (#457 R6-M1).
+ */
+internal fun siteDataGatewayLabel(origin: String?): String? =
+    origin?.takeIf(::isLoopbackGatewayOrigin)?.substringAfter("://")
+
 /** "3 cookies · 1.2 MB stored", "No cookies", or "Counting…" while [count] is null. */
 internal fun siteDataLine(count: SiteDataCount?, formatBytes: (Long) -> String): String {
     count ?: return Strings.get(R.string.page_info_site_data_counting)
@@ -540,7 +549,7 @@ internal object SiteData {
 
     private const val CLEANUP_POLL_MS = 100L
 
-    /** Tab id → the origin ([documentPermissionOrigin]) of the document it last committed. */
+    /** Tab id → the origin ([documentOrigin]) of the document it last committed. */
     private val committedOrigins = ConcurrentHashMap<Long, String>()
 
     /**
@@ -551,9 +560,11 @@ internal object SiteData {
     fun committed(tabId: Long, url: String?) {
         cleanups.remove(tabId)?.outcome = Outcome.COMMITTED
         // A blob: document's is its creator's, as the page's own
-        // [BrowserState.permissionOrigin] is, so a Delete from one still
-        // finds the tab on the site and reloads it (R1-M3).
-        val origin = documentPermissionOrigin(url)
+        // [BrowserState.siteOrigin] is, so a Delete from one still
+        // finds the tab on the site and reloads it (R1-M3). A content
+        // gateway's own origin is kept: it holds no permission, but its
+        // data is there to delete (#457 R5-M1).
+        val origin = documentOrigin(url)
         if (origin == null) committedOrigins.remove(tabId) else committedOrigins[tabId] = origin
     }
 
@@ -712,6 +723,13 @@ internal fun PageInfoSheet(
     siteDataOrigin: String?,
     /** The URL whose cookies are counted and deleted (the page's own, on [siteDataOrigin]). */
     siteDataUrl: String?,
+    /**
+     * Set when [siteDataOrigin] is a content gateway's own origin
+     * ([isLoopbackGatewayOrigin]): its data is shared by every root loaded
+     * through that gateway, so the row and the Delete confirm name the
+     * gateway (`127.0.0.1:1633`), not this one root ([site]) (#457 R6-M1).
+     */
+    siteDataGateway: String? = null,
     onDeleteSiteData: () -> Unit,
     onReload: () -> Unit,
     onDismiss: () -> Unit,
@@ -851,12 +869,18 @@ internal fun PageInfoSheet(
                     InfoRow(
                         icon = { Icon(Icons.Filled.Cookie, contentDescription = null) },
                         title = siteDataLine(count) { android.text.format.Formatter.formatShortFileSize(context, it) },
-                        body = null,
+                        body = siteDataGateway?.let { stringResource(R.string.page_info_site_data_gateway, it) },
                     )
                     OutlinedButton(
                         onClick = { confirmDelete = true },
                         modifier = Modifier.heightIn(min = 48.dp),
-                    ) { Text(stringResource(R.string.page_info_delete_data)) }
+                    ) {
+                        Text(
+                            stringResource(
+                                if (siteDataGateway != null) R.string.page_info_delete_gateway_data else R.string.page_info_delete_data,
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -864,11 +888,16 @@ internal fun PageInfoSheet(
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text(stringResource(R.string.page_info_delete_confirm_title, site)) },
+            title = { Text(stringResource(R.string.page_info_delete_confirm_title, siteDataGateway ?: site)) },
             text = {
                 Text(
                     stringResource(
-                        if (private) R.string.page_info_delete_confirm_body_private else R.string.page_info_delete_confirm_body,
+                        when {
+                            siteDataGateway != null && private -> R.string.page_info_delete_confirm_body_gateway_private
+                            siteDataGateway != null -> R.string.page_info_delete_confirm_body_gateway
+                            private -> R.string.page_info_delete_confirm_body_private
+                            else -> R.string.page_info_delete_confirm_body
+                        },
                     ),
                 )
             },

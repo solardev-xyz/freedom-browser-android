@@ -77,6 +77,16 @@ internal fun addressBarEthereumLink(input: String, source: SubmitSource, private
 }
 
 /**
+ * The site a payment link from [pageUrl] is opened in the name of: its
+ * [sitePermissionOriginKey], so null for a content gateway's own origin on
+ * the device (#457) as well as for a page with no web origin. Every Swarm
+ * or IPFS root loaded as `http://127.0.0.1:1633/bzz/<ref>/` shares that
+ * origin, which holds no provider and no site permission, so it isn't
+ * named as asking for a payment either.
+ */
+internal fun paymentLinkAsker(pageUrl: String?): String? = sitePermissionOriginKey(pageUrl)
+
+/**
  * Where the `ethereum:` link [url] goes (#317), for a tab that is
  * [private] or not, with the wallet [walletReady] (created or imported,
  * locked or not) or not, from [origin] (null: the address bar).
@@ -176,10 +186,11 @@ object EthereumLinks {
      * Main thread.
      */
     fun fromPage(context: Context, tab: BrowserState, pageUrl: String?, doc: Int, url: String) {
-        val origin = permissionOriginKey(pageUrl)
+        val origin = paymentLinkAsker(pageUrl)
         if (origin == null) {
             // As for an app link: a page with no web origin (a file, an
-            // error page) has nobody to name as asking.
+            // error page), or on a content gateway's own origin, has
+            // nobody to name as asking.
             Log.i(TAG, "payment link refused: no origin")
             return
         }
@@ -208,7 +219,7 @@ object EthereumLinks {
      * never asked, and nothing to pause if it's left. Main thread.
      */
     fun fromUserNamed(context: Context, tab: BrowserState, askerUrl: String?, url: String) {
-        val origin = permissionOriginKey(askerUrl)
+        val origin = paymentLinkAsker(askerUrl)
         when (val route = ethereumLinkRoute(url, tab.private, walletReady(context), origin)) {
             is EthereumLinkRoute.Refuse -> onNotice?.invoke(route.reason)
             EthereumLinkRoute.Drop -> Unit

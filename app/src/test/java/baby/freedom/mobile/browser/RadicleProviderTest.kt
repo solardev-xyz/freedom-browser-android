@@ -397,6 +397,81 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `a content gateway's own origin on the device gets no provider`() {
+        // #457: every root loaded as http://127.0.0.1:1633/bzz/<ref>/ shares
+        // one origin, so it must not be a provider origin on any loopback name.
+        try {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+            assertNull(providerOriginKey(Gateways.EMBEDDED_SWARM_BASE))
+            assertNull(providerOriginKey("http://127.0.0.1:1633"))
+            assertNull(providerOriginKey("http://localhost:1633"))
+            assertNull(providerOriginKey("http://app.localhost:1633"))
+            assertNull(providerOriginKey("http://127.0.0.2:1633"))
+            assertNull(providerOriginKey("http://[::1]:1633"))
+            // The embedded IPFS gateway's port, once it's running.
+            assertEquals("http://127.0.0.1:58312", providerOriginKey("http://127.0.0.1:58312"))
+            Gateways.setIpfsBase("http://127.0.0.1:58312")
+            assertNull(providerOriginKey("http://127.0.0.1:58312"))
+            assertNull(providerOriginKey("http://localhost:58312"))
+            // An external endpoint the user set on this device.
+            Gateways.setExternalEndpoints("http://localhost:1700", "http://127.0.0.1:8080")
+            assertNull(providerOriginKey("http://127.0.0.1:1700"))
+            assertNull(providerOriginKey("http://localhost:8080"))
+            assertNull(providerOriginKey("http://127.0.0.1:58312"))
+            // An https one on this device too (R1-M2): its origin is just as shared.
+            Gateways.setExternalEndpoints("https://localhost:8443", "https://127.0.0.1")
+            assertNull(providerOriginKey("https://localhost:8443"))
+            assertNull(providerOriginKey("https://127.0.0.1:8443"))
+            assertNull(providerOriginKey("https://[::1]"))
+            assertNull(providerOriginKey("https://127.0.0.1:443/"))
+            assertEquals("https://example.com:8443", providerOriginKey("https://example.com:8443"))
+            // A remote one shares no port on this device.
+            Gateways.setExternalEndpoints("http://192.168.1.20:1800", "https://ipfs.example")
+            assertEquals("http://localhost:1800", providerOriginKey("http://localhost:1800"))
+            // Other loopback ports — a dapp's dev server — still do.
+            assertEquals("http://localhost:8700", providerOriginKey("http://localhost:8700"))
+            assertEquals("http://127.0.0.1", providerOriginKey("http://127.0.0.1/"))
+        } finally {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+        }
+    }
+
+    @Test
+    fun `a host that reaches the device is the gateway's origin even when it isn't loopback`() {
+        // R3-M2: the kernel routes the unspecified and IPv4-mapped literals to the
+        // device too, so they reach the gateway on its port.
+        for (host in listOf("0.0.0.0", "::", "::ffff:7f00:1", "::ffff:127.0.0.1", "::ffff:7f12:3456",
+            "0:0:0:0:0:ffff:7f00:1", "::ffff:0:0", "::ffff:0.0.0.0", "::1", "0:0:0:0:0:0:0:1", "127.0.0.1", "localhost")) {
+            assertTrue(host, reachesThisDevice(host))
+        }
+        for (host in listOf("::ffff:c0a8:114", "::ffff:192.168.1.20", "::2", "1::", "::7f00:1", "0.0.0.1",
+            "127.example", "::ffff:7f00:1:2:3:4:5", "::ffff:127.0.0.1.1", "::ffff:256.0.0.1", ":::1", "fe80::1", "")) {
+            assertFalse(host, reachesThisDevice(host))
+        }
+        try {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+            assertTrue(isLoopbackGatewayOrigin("http://0.0.0.0:1633"))
+            assertTrue(isLoopbackGatewayOrigin("http://[::ffff:7f00:1]:1633"))
+            assertTrue(isLoopbackGatewayOrigin("https://[::]:1633"))
+            assertFalse(isLoopbackGatewayOrigin("http://0.0.0.0:8700"))
+            assertFalse(isLoopbackGatewayOrigin("http://[::ffff:c0a8:114]:1633"))
+            // Still no provider there, and the http exemption itself stays Chromium's loopback set.
+            assertNull(providerOriginKey("http://[::ffff:7f00:1]:1633"))
+            assertNull(providerOriginKey("http://0.0.0.0:8700"))
+            assertNull(loopbackHttpPort("http://0.0.0.0:8700"))
+            // An external endpoint set on such a literal holds its port too.
+            Gateways.setExternalEndpoints("http://0.0.0.0:1700", "")
+            assertTrue(isLoopbackGatewayOrigin("http://127.0.0.1:1700"))
+        } finally {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+        }
+    }
+
+    @Test
     fun `a late message from the outgoing document is not the new page's`() {
         assertEquals(3, radicleDocumentFor(3, site, providerOriginKey("$site/next")))
         assertEquals(STALE_DOCUMENT, radicleDocumentFor(3, site, providerOriginKey("https://other.example/")))

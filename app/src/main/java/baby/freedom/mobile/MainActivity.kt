@@ -48,6 +48,7 @@ import baby.freedom.mobile.browser.keyboardShortcutGroups
 import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
 import baby.freedom.mobile.browser.Gateways
+import baby.freedom.mobile.browser.GatewayOriginSweep
 import baby.freedom.mobile.browser.Adblock
 import baby.freedom.mobile.browser.AppUpdates
 import baby.freedom.mobile.browser.PublicSuffixList
@@ -675,6 +676,12 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 )
             }
         }
+        // A content gateway's own origin holds no grant or site
+        // permission any more (#457): what an earlier release let the
+        // embedded Swarm gateway's fixed-port origin keep is disconnected
+        // once per process ([GatewayOriginSweep] says why only that port;
+        // a recreated Activity's call returns once it has run).
+        lifecycleScope.launch { GatewayOriginSweep.run(this@MainActivity) }
 
         // The address label's resting form needs the vendored Public
         // Suffix List, and the first label that asks for it is composed

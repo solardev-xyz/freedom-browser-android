@@ -57,8 +57,8 @@ object Gateways {
      * thread) and the readers (webview interceptors, suspend navigation
      * gates on the UI and IO threads) are all on different threads.
      */
-    @Volatile
-    private var embeddedIpfsBase: String = ""
+    private val embeddedIpfs = MutableStateFlow("")
+    private val embeddedIpfsBase: String get() = embeddedIpfs.value
 
     private val externalSwarm = MutableStateFlow("")
     private val externalIpfs = MutableStateFlow("")
@@ -98,7 +98,7 @@ object Gateways {
 
     /** The embedded IPFS gateway's base, `""` while it isn't running. */
     fun setIpfsBase(base: String) {
-        embeddedIpfsBase = base
+        embeddedIpfs.value = base
     }
 
     /**
@@ -457,6 +457,27 @@ object Gateways {
         val ipfs = embeddedIpfsBase
         return ipfs.isNotEmpty() && url.startsWith("$ipfs/")
     }
+
+    /**
+     * The ports a content gateway answers on at a host reaching this
+     * device ([reachesThisDevice]), so every `http(s)://<that host>:<port>`
+     * on them is a gateway's own origin ([isLoopbackGatewayOrigin],
+     * #457): the embedded Swarm gateway's, the embedded IPFS gateway's
+     * while it runs, and an external endpoint's (`http` or `https`) when
+     * the user set one on this device.
+     *
+     * A remote external endpoint's raw origin
+     * (`https://<endpoint>/bzz/<ref>/`) is just as shared by every root,
+     * but it's out of scope here: it's a public path gateway's origin
+     * like any other site's (`https://gateway.example/ipfs/<cid>/`), and
+     * keeps its provider and permissions the way those do.
+     */
+    fun loopbackGatewayPorts(): Set<Int> =
+        loopbackGatewayPorts(embeddedIpfsBase, externalSwarmBase, externalIpfsBase)
+
+    private fun loopbackGatewayPorts(embeddedIpfs: String, externalSwarm: String, externalIpfs: String): Set<Int> =
+        listOf(EMBEDDED_SWARM_BASE, embeddedIpfs, externalSwarm, externalIpfs)
+            .mapNotNullTo(mutableSetOf()) { base -> permissionOriginKey(base)?.let(::deviceOriginPort) }
 
     /**
      * The external IPFS gateway [gatewayUrl] (a [gatewayUrlFor] answer)

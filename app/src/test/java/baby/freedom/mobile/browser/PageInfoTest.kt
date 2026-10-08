@@ -181,6 +181,37 @@ class PageInfoTest {
     }
 
     @Test
+    fun `R5-M1 - a content gateway's own origin still has site data to count and delete`() {
+        // No permission origin (#457), but its pages' cookies and storage are there…
+        val gateway = "http://127.0.0.1:1633"
+        assertNull(documentPermissionOrigin("$gateway/bzz/aaaa/"))
+        assertEquals(gateway, documentOrigin("$gateway/bzz/aaaa/"))
+        assertEquals(gateway, documentOrigin("blob:$gateway/6f1c2d3e"))
+        assertEquals("http://localhost:1633", documentOrigin("http://localhost:1633/bzz/aaaa/"))
+        // …so a Delete there finds the tab still on it and reloads it.
+        SiteData.committed(17L, "$gateway/bzz/aaaa/")
+        assertEquals(gateway, SiteData.committedOrigin(17L))
+        SiteData.markCleanup(17L, gateway)
+        assertEquals(true, SiteData.takeCleanup(17L, "$gateway/bzz/aaaa/", "GET"))
+        // Every other page is as before.
+        assertEquals("https://example.org", documentOrigin("https://example.org/a"))
+        assertNull(documentOrigin("data:text/html,hi"))
+        assertNull(documentOrigin("blob:null/6f1c2d3e"))
+        SiteData.tabClosed(17L)
+        assertNull(SiteData.committedOrigin(17L))
+    }
+
+    @Test
+    fun `R5-M1 - Page info's site data follows the document's own origin on a gateway page`() {
+        val tab = BrowserState(id = 18L)
+        tab.siteOrigin = "http://127.0.0.1:1633"
+        assertNull(tab.permissionTop)
+        assertEquals("http://127.0.0.1:1633", tab.siteDataOrigin)
+        tab.siteOrigin = null
+        assertNull(tab.siteDataOrigin)
+    }
+
+    @Test
     fun `dropping a mark leaves a later Delete's mark alone`() {
         val first = SiteData.markCleanup(11L, "https://example.org")
         val second = SiteData.markCleanup(11L, "https://example.org")
@@ -531,5 +562,23 @@ class PageInfoTest {
         assertTrue("document.title = 'wiped-1'" in html)
         assertFalse("location.replace" in html)
         assertTrue("location.replace(location.href)" in SITE_DATA_CLEANUP_HTML)
+    }
+
+    @Test
+    fun `a content gateway's own origin is named as the gateway, any other site as itself`() {
+        // #457 R6-M1: Delete on a raw gateway page clears data every root loaded
+        // through the gateway shares, so the sheet names the gateway, not the root.
+        try {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+            assertEquals("127.0.0.1:1633", siteDataGatewayLabel("http://127.0.0.1:1633"))
+            assertEquals("localhost:1633", siteDataGatewayLabel("http://localhost:1633"))
+            assertNull(siteDataGatewayLabel("http://127.0.0.1:8700"))
+            assertNull(siteDataGatewayLabel("https://example.org"))
+            assertNull(siteDataGatewayLabel(null))
+        } finally {
+            Gateways.setIpfsBase("")
+            Gateways.setExternalEndpoints("", "")
+        }
     }
 }

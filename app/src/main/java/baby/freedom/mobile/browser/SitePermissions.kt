@@ -217,13 +217,41 @@ fun permissionOriginKey(raw: String?): String? {
  * that opens or navigates to a generated page) has the origin of the
  * page that minted it, the way its `location.origin` does: it asks in
  * that site's name, not in no one's (#445 R3-F1). A `blob:null/…` URL,
- * minted by an opaque origin, still has none.
+ * minted by an opaque origin, still has none, and nor does a content
+ * gateway's own origin ([sitePermissionOriginKey]).
  */
-fun documentPermissionOrigin(url: String?): String? {
+fun documentPermissionOrigin(url: String?): String? =
+    documentOrigin(url)?.takeUnless(::isLoopbackGatewayOrigin)
+
+/**
+ * The origin of a top-level document at [url] as its storage is keyed:
+ * [permissionOriginKey], with a `blob:` document taking its creator's
+ * origin ([documentPermissionOrigin]). Unlike that, a content gateway's
+ * own origin ([isLoopbackGatewayOrigin]) is kept: it can't hold a
+ * permission or a provider, but its pages still write cookies and
+ * storage there, so Page info's **Site data** has to count and delete
+ * them (#457 R5-M1). That data is shared by every root loaded through
+ * the gateway, the way its origin is.
+ */
+fun documentOrigin(url: String?): String? {
     val s = url?.trim().orEmpty()
     val inner = if (s.startsWith("blob:", ignoreCase = true)) s.substring(5) else s
     return permissionOriginKey(inner)
 }
+
+/**
+ * The key a site permission (camera, microphone, location, pop-ups, app
+ * links) is asked, decided and remembered under for [raw]: its
+ * [permissionOriginKey], except null (nothing to ask in the name of,
+ * denied without a prompt) for a content gateway's own origin on the
+ * device ([isLoopbackGatewayOrigin], #457). Every Swarm or IPFS root
+ * loaded as `http://127.0.0.1:1633/bzz/<ref>/` shares that one origin,
+ * so an "Always allow" given to one root would answer every other's,
+ * including one any page navigates to with an attacker's hash. Content
+ * holds its permissions on its own per-root virtual origin instead.
+ */
+fun sitePermissionOriginKey(raw: String?): String? =
+    permissionOriginKey(raw)?.takeUnless(::isLoopbackGatewayOrigin)
 
 /**
  * Who a site-permission decision is about (#363): the [origin] that asks
@@ -249,11 +277,13 @@ data class PermissionScope(val origin: String, val top: String = origin) {
  * `about:blank` document a script wrote into has its opener's site
  * ([BrowserState.blankOpenerOrigin]); a frame in a page with no site at
  * all (a `data:` page, say) has no top-level site to ask in the name of,
- * so it gets nothing.
+ * so it gets nothing. Nor does a content gateway's own origin, as the
+ * frame that asks or as the page it asks in ([sitePermissionOriginKey],
+ * #457).
  */
 fun permissionScopeFor(requesting: String?, page: String?): PermissionScope? {
-    val origin = permissionOriginKey(requesting) ?: return null
-    val top = page ?: return null
+    val origin = sitePermissionOriginKey(requesting) ?: return null
+    val top = page?.takeUnless(::isLoopbackGatewayOrigin) ?: return null
     return PermissionScope(origin, top)
 }
 
