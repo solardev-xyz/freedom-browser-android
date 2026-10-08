@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import android.webkit.WebView
@@ -468,6 +469,8 @@ object EthereumProviders {
         reply: JavaScriptReplyProxy,
     ) {
         val tab = bridge.tab
+        // A request's sheets wait at most [SHEET_WAIT_MS] from here, its arrival (#463).
+        val deadline = SystemClock.elapsedRealtime() + SHEET_WAIT_MS
         if (message.type != WebMessageCompat.TYPE_STRING) return
         val data = message.data ?: return
         // Too long ever to be accepted: refused as such, not as "try again" (which a client retries).
@@ -520,7 +523,7 @@ object EthereumProviders {
                 val p = provider ?: throw IllegalStateException("provider not ready")
                 val ps = params!!
                 params = null
-                p.request(origin, method, ps) { ask -> askOnTab(tab, doc, ask) }
+                p.request(origin, method, ps) { ask -> askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime()) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -554,15 +557,25 @@ object EthereumProviders {
     /**
      * Put [ask] up on [tab] and wait for the answer — rejected at once if
      * the tab is blocked from prompting, the document that asked ([doc])
-     * is no longer the tab's, or the tab moves on or closes while it waits.
+     * is no longer the tab's, or the tab moves on or closes while it waits;
+     * and rejected once [waitMs] runs out, counted through the wait for the
+     * tab's line as well as the sheet (#463). A page request's sheets get
+     * what's left of [SHEET_WAIT_MS] from its arrival: the page's own timer
+     * gives up after ten minutes, so an Approve tapped after that would carry
+     * out something it stopped listening for — and a background tab asking
+     * in a loop would otherwise pile up waiting asks, and a chain of stale
+     * sheets, until it's next shown. Running out doesn't pause the tab: the
+     * user turned nothing down.
      */
-    private suspend fun askOnTab(tab: BrowserState, doc: Int, ask: EthAsk): EthAnswer {
+    private suspend fun askOnTab(tab: BrowserState, doc: Int, ask: EthAsk, waitMs: Long = Long.MAX_VALUE): EthAnswer {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
         if (tab.id in blockedTabs && (documents[tab.id] ?: 0) == doc) return EthAnswer.Paused
-        if (!live()) return EthAnswer.Rejected
+        if (!live() || waitMs <= 0) return EthAnswer.Rejected
         if (ask is EthAsk.CantSend && tab.id in cantSendClosed) return EthAnswer.Unseen
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
-        if (ask is EthAsk.SwitchNotice) return switchTurn(tab, doc, ask, lock)
+        // switchTurn takes the lock outside its try, and hands it on only after its last
+        // suspension, so a timeout never unlocks a line it doesn't hold or drops a handed-on one.
+        if (ask is EthAsk.SwitchNotice) return withTimeoutOrNull(waitMs) { switchTurn(tab, doc, ask, lock) } ?: EthAnswer.Rejected
         // A sheet takes the turn from a "switched to" notice holding it: the page's sign or
         // send right after its switch comes up at once, not once the notice has timed out
         // (#446 R4-F1). The notice's hold is only there to space out no-sheet switches; a
@@ -570,7 +583,7 @@ object EthereumProviders {
         sheetsWaiting[tab.id] = (sheetsWaiting[tab.id] ?: 0) + 1
         notices[tab.id]?.hold?.complete(Unit)
         try {
-            return sheetTurn(tab, ask, lock, ::live)
+            return withTimeoutOrNull(waitMs) { sheetTurn(tab, ask, lock, ::live) } ?: EthAnswer.Rejected
         } finally {
             val left = (sheetsWaiting[tab.id] ?: 1) - 1
             if (left > 0) sheetsWaiting[tab.id] = left else sheetsWaiting.remove(tab.id)
@@ -732,7 +745,8 @@ object EthereumProviders {
      * the x402 payment sheet (#140). Rejected at once if [doc] isn't the
      * tab's any more or the tab's sheets are paused.
      */
-    internal suspend fun askOnDocument(tab: BrowserState, doc: Int, ask: EthAsk): EthAnswer = askOnTab(tab, doc, ask)
+    internal suspend fun askOnDocument(tab: BrowserState, doc: Int, ask: EthAsk, waitMs: Long = Long.MAX_VALUE): EthAnswer =
+        askOnTab(tab, doc, ask, waitMs)
 
     /** The tab started (committed) a new document on [url] — null when it's being torn down: what the old one asked is rejected. */
     fun onDocumentStarted(tab: BrowserState, url: String?) {
@@ -788,6 +802,13 @@ object EthereumProviders {
      * ([SwitchNotice.awaitClosed]), so no Undo outlives the turn it holds.
      */
     private const val NOTICE_MAX_MS = 150_000L
+
+    /**
+     * How long a page request's sheets may wait, from its arrival (#463):
+     * short of the page's own timer for a prompting method (600 s in
+     * [ethereumProviderJs]), leaving time for the work after an Approve.
+     */
+    internal const val SHEET_WAIT_MS = 570_000L
 
     /** The longest an Add network sheet waits for the chain catalog. */
     private const val CATALOG_WAIT_MS = 4_000L
