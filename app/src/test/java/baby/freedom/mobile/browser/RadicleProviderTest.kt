@@ -372,6 +372,18 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `a request whose parse would cost far more than its length is refused before parsing (#459)`() {
+        val head = """{"id":5,"method":"radicle_requestAccess","params":{"x":["""
+        val objects = head + (1..150_000).joinToString(",") { "{}" } + "]}}"
+        assertTrue(objects.length <= 512 * 1024)
+        assertNull(parseRadicleRequest(objects))
+        assertEquals(5L, unparsedRequestId(objects))
+        assertTrue(tooComplexMessage(objects, MAX_RADICLE_REQUEST_VALUES, MAX_RADICLE_REQUEST_CONTAINERS) != null)
+        val body = """{"id":6,"method":"radicle_openIssue","params":{"title":"t","body":"${"x".repeat(65_536)}","labels":["a","b"]}}"""
+        assertEquals("radicle_openIssue", parseRadicleRequest(body)!!.method)
+    }
+
+    @Test
     fun `only secure origins get the provider, never the repository browser`() {
         assertEquals("https://app.example", providerOriginKey("https://App.Example:443/"))
         assertEquals("http://localhost:8700", providerOriginKey("http://localhost:8700"))

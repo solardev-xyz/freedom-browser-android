@@ -96,6 +96,9 @@ object EthereumProviders {
 
     private val scope = MainScope()
 
+    /** What each tab may have in flight (#459): plenty for a dApp's parallel reads, not a heap's worth. */
+    private val budget = BridgeRequestBudget(maxRequests = 256, smallChars = 2L * 1024 * 1024, largeAbove = 128 * 1024)
+
     /** Live bridges, one per WebView; main thread only. */
     private val bridges = WeakHashMap<WebView, Bridge>()
 
@@ -458,9 +461,26 @@ object EthereumProviders {
     ) {
         val tab = bridge.tab
         if (message.type != WebMessageCompat.TYPE_STRING) return
-        val request = parseEthereumRequest(message.data) ?: return
+        val data = message.data ?: return
+        // Counted before it's parsed, and answered at once over the tab's share (#459).
+        val ticket = budget.reserve(tab.id, data.length) ?: run {
+            unparsedRequestId(data)?.let {
+                answer(reply, it, EthereumProvider.Reply.Err(BridgeRequestBudget.LIMIT_EXCEEDED, BridgeRequestBudget.LIMIT_MESSAGE))
+            }
+            return
+        }
+        val request = parseEthereumRequest(data) ?: run {
+            ticket.release()
+            // Readable enough to answer: the page learns now, not when its own timer runs out.
+            unparsedRequestId(data)?.let {
+                val why = tooComplexMessage(data, MAX_ETH_REQUEST_VALUES, MAX_ETH_REQUEST_CONTAINERS) ?: "Invalid request"
+                answer(reply, it, EthereumProvider.Reply.Err(EthereumProvider.INVALID_PARAMS, why))
+            }
+            return
+        }
         val origin = providerOriginKey(sourceOrigin)
         if (!isMainFrame || origin == null) {
+            ticket.release()
             val why = if (!isMainFrame) "window.ethereum is only available to the top-level page" else "Origin not permitted"
             answer(reply, request.id, EthereumProvider.Reply.Err(EthereumProvider.UNAUTHORIZED, why))
             return
@@ -478,17 +498,25 @@ object EthereumProviders {
             bridge.origin = origin
             bridge.reply = reply
         }
+        // Only the id and method outlive the call: the params go with it.
+        val id = request.id
+        val method = request.method
+        var params: JSONArray? = request.params
         scope.launch {
             val result = try {
                 val p = provider ?: throw IllegalStateException("provider not ready")
-                p.request(origin, request.method, request.params) { ask -> askOnTab(tab, doc, ask) }
+                val ps = params!!
+                params = null
+                p.request(origin, method, ps) { ask -> askOnTab(tab, doc, ask) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                Log.w(TAG, "ethereum request ${request.method} failed: ${e.javaClass.simpleName}")
+                Log.w(TAG, "ethereum request $method failed: ${e.javaClass.simpleName}")
                 EthereumProvider.Reply.Err(EthereumProvider.INTERNAL, "Internal error")
+            } finally {
+                ticket.release()
             }
-            answer(reply, request.id, result)
+            answer(reply, id, result)
         }
     }
 
@@ -758,6 +786,10 @@ internal data class EthereumRequest(val id: Long, val method: String, val params
 /** Parse `{"id": n, "method": "eth_…", "params": […]}`, or null if it isn't one. */
 internal fun parseEthereumRequest(data: String?): EthereumRequest? {
     if (data == null || data.length > MAX_ETH_REQUEST_CHARS) return null
+    // Parsed on the main thread, before any origin or grant check: JSON
+    // whose parse costs far more memory than its length (330K empty
+    // objects in a megabyte) would take the whole browser down (#459).
+    if (!jsonShapeWithin(data, MAX_ETH_REQUEST_VALUES, MAX_ETH_REQUEST_CONTAINERS)) return null
     val json = try {
         JSONObject(data)
     } catch (e: Exception) {
@@ -779,6 +811,15 @@ internal fun parseEthereumRequest(data: String?): EthereumRequest? {
 
 /** Bigger than any sensible request: a large typed-data payload or contract call, JSON-escaped. */
 private const val MAX_ETH_REQUEST_CHARS = 1024 * 1024
+
+/**
+ * Values in one request, at most: a typed-data payload at its own limit
+ * ([baby.freedom.mobile.wallet.Eip712.MAX_JSON]) has far fewer.
+ */
+internal const val MAX_ETH_REQUEST_VALUES = 100_000
+
+/** Arrays and objects in one request, at most. */
+internal const val MAX_ETH_REQUEST_CONTAINERS = 10_000
 
 /**
  * The page side of [EthereumProviders]: `window.ethereum` (EIP-1193:

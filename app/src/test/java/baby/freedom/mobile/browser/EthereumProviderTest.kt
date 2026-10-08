@@ -1903,6 +1903,26 @@ class EthereumProviderTest {
         assertNull(parseEthereumRequest("[".repeat(100_000)))
     }
 
+    @Test
+    fun `a request whose parse would cost far more than its length is refused before parsing (#459)`() {
+        // #459's payload: a megabyte of empty objects, ~330K of them, ~25 MB of heap once parsed.
+        val head = """{"id":5,"method":"eth_requestAccounts","params":["""
+        val objects = head + (1..330_000).joinToString(",") { "{}" } + "]}"
+        assertTrue(objects.length <= 1024 * 1024)
+        assertNull(parseEthereumRequest(objects))
+        assertEquals("answered, not left to time out", 5L, unparsedRequestId(objects))
+        assertTrue(tooComplexMessage(objects, MAX_ETH_REQUEST_VALUES, MAX_ETH_REQUEST_CONTAINERS)!!.contains("arrays and objects"))
+        val numbers = head + (1..200_000).joinToString(",") { "1" } + "]}"
+        assertNull(parseEthereumRequest(numbers))
+        // At the caps it still parses (the request's own object and array count too).
+        val atCaps = head + (1..MAX_ETH_REQUEST_CONTAINERS - 2).joinToString(",") { "{}" } + "]}"
+        assertEquals(MAX_ETH_REQUEST_CONTAINERS - 2, parseEthereumRequest(atCaps)!!.params.length())
+        assertNull(parseEthereumRequest(atCaps.replace("[{}", "[{},{}")))
+        // A big contract call is a single value, however long.
+        val data = """{"id":6,"method":"eth_sendTransaction","params":[{"data":"0x${"ab".repeat(400_000)}"}]}"""
+        assertEquals("eth_sendTransaction", parseEthereumRequest(data)!!.method)
+    }
+
     // ---- #423: checked RPCs for a known chain, rules offered only for named functions, Undo ----
 
     private val polygonParams = JSONObject().put("chainId", "0x89").put("chainName", "Polygon by the site")

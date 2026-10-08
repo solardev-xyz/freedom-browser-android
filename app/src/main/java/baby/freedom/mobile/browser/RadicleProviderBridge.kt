@@ -65,6 +65,9 @@ object RadicleProviders {
 
     private val scope = MainScope()
 
+    /** What each tab may have in flight (#459). */
+    private val budget = BridgeRequestBudget(maxRequests = 64, smallChars = 512 * 1024, largeAbove = 64 * 1024)
+
     /** Live bridges, one per WebView; main thread only. */
     private val bridges = WeakHashMap<WebView, Bridge>()
 
@@ -237,22 +240,34 @@ object RadicleProviders {
         if (message.type != WebMessageCompat.TYPE_STRING) return
         // The prompt's deadline runs from the request's arrival ([PROMPT_WAIT_MS]).
         val deadline = SystemClock.elapsedRealtime() + PROMPT_WAIT_MS
-        val request = parseRadicleRequest(message.data) ?: run {
+        val data = message.data ?: return
+        // Counted before it's parsed, and answered at once over the tab's share (#459).
+        val ticket = budget.reserve(tab.id, data.length) ?: run {
+            unparsedRequestId(data)?.let {
+                answer(reply, it, RadicleProvider.Reply.Err(BridgeRequestBudget.LIMIT_EXCEEDED, BridgeRequestBudget.LIMIT_MESSAGE))
+            }
+            return
+        }
+        val request = parseRadicleRequest(data) ?: run {
+            ticket.release()
             // Readable enough to answer (`params` not an object, say): the
             // page learns now, not after its five-minute timer.
-            unparsedRequestId(message.data)?.let {
-                answer(reply, it, RadicleProvider.Reply.Err(RadicleProvider.INVALID_PARAMS, "Invalid request"))
+            unparsedRequestId(data)?.let {
+                val why = tooComplexMessage(data, MAX_RADICLE_REQUEST_VALUES, MAX_RADICLE_REQUEST_CONTAINERS) ?: "Invalid request"
+                answer(reply, it, RadicleProvider.Reply.Err(RadicleProvider.INVALID_PARAMS, why))
             }
             return
         }
         val origin = providerOriginKey(sourceOrigin)
         if (!isMainFrame || origin == null) {
+            ticket.release()
             val why = if (!isMainFrame) "window.radicle is only available to the top-level page" else "Origin not permitted"
             answer(reply, request.id, RadicleProvider.Reply.Err(RadicleProvider.UNAUTHORIZED, why))
             return
         }
         // A page from before Radicle was turned off (#201 R2-F1).
         if (!enabled) {
+            ticket.release()
             answer(
                 reply,
                 request.id,
@@ -276,19 +291,27 @@ object RadicleProviders {
             bridge.origin = origin
             bridge.reply = reply
         }
+        // Only the id and method outlive the call: the params go with it.
+        val id = request.id
+        val method = request.method
+        var params: JSONObject? = request.params
         scope.launch {
             val result = try {
                 val p = provider ?: throw IllegalStateException("provider not ready")
-                p.request(origin, request.method, request.params) { ask ->
+                val ps = params!!
+                params = null
+                p.request(origin, method, ps) { ask ->
                     askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime())
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                Log.w(TAG, "radicle request ${request.method} failed", e)
+                Log.w(TAG, "radicle request $method failed", e)
                 RadicleProvider.Reply.Err(RadicleProvider.INTERNAL, "Internal error")
+            } finally {
+                ticket.release()
             }
-            answer(reply, request.id, result)
+            answer(reply, id, result)
         }
     }
 
@@ -408,6 +431,10 @@ internal data class RadicleRequest(val id: Long, val method: String, val params:
 /** Parse `{"id": n, "method": "radicle_…", "params": {…}}`, or null if it isn't one. */
 internal fun parseRadicleRequest(data: String?): RadicleRequest? {
     if (data == null || data.length > MAX_REQUEST_CHARS) return null
+    // Parsed on the main thread, before any origin or grant check: JSON
+    // whose parse costs far more memory than its length would take the
+    // whole browser down (#459).
+    if (!jsonShapeWithin(data, MAX_RADICLE_REQUEST_VALUES, MAX_RADICLE_REQUEST_CONTAINERS)) return null
     val json = try {
         JSONObject(data)
     } catch (e: Exception) {
@@ -428,6 +455,12 @@ internal fun parseRadicleRequest(data: String?): RadicleRequest? {
 
 /** Bigger than any valid request (a 64 KiB body, JSON-escaped). */
 private const val MAX_REQUEST_CHARS = 512 * 1024
+
+/** Values in one request, at most: a few strings and labels each, many times over. */
+internal const val MAX_RADICLE_REQUEST_VALUES = 10_000
+
+/** Arrays and objects in one request, at most. */
+internal const val MAX_RADICLE_REQUEST_CONTAINERS = 1_000
 
 /**
  * The provider's key for a document on [raw] (the platform's
