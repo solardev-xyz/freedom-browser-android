@@ -91,6 +91,42 @@ class AddressFieldTextTest {
     }
 
     @Test
+    fun `a keystroke at or after a shortened field's ellipsis is dropped, not submitted`() {
+        val field = AddressFieldText.shown(huge)
+        // Typed at the end, after the ellipsis: cut straight back, so dropped.
+        assertTrue(AddressFieldText.swallowed(field, field + "x"))
+        // Typed just before the ellipsis: cut back the same way.
+        val beforeEllipsis = field.dropLast(1) + "x…"
+        assertTrue(AddressFieldText.swallowed(field, beforeEllipsis))
+        // A paste after the ellipsis too.
+        assertTrue(AddressFieldText.swallowed(field, field + "https://other.example/"))
+        // Dropped, the field still stands for the whole address, so Go still
+        // submits it rather than the cut, a literal ellipsis and the "x".
+        assertEquals(huge, AddressFieldText.submitted(field, huge))
+    }
+
+    @Test
+    fun `edits that change what the field shows are not dropped`() {
+        val field = AddressFieldText.shown(huge)
+        // Typing earlier in the shortened text changes what it shows.
+        val mid = field.substring(0, 10) + "x" + field.substring(10)
+        assertTrue(!AddressFieldText.swallowed(field, mid))
+        // Deleting the ellipsis, or any shrink, stays within the bound.
+        assertTrue(!AddressFieldText.swallowed(field, field.dropLast(1)))
+        // A whole-field paste with the same head but no ellipsis of its own
+        // stands for itself, even though the field looks the same.
+        val samehead = field.dropLast(1) + "b".repeat(100)
+        assertEquals(field, AddressFieldText.shown(samehead))
+        assertTrue(!AddressFieldText.swallowed(field, samehead))
+        // A field that isn't shortened never drops an edit: typing at the
+        // bound of a full-length, unshortened field is cut like a paste.
+        val full = "a".repeat(max)
+        assertTrue(!AddressFieldText.swallowed(full, full + "…x"))
+        // Nor does an ordinary field.
+        assertTrue(!AddressFieldText.swallowed("example.com", "example.com…"))
+    }
+
+    @Test
     fun `the Go to address row for a shortened field submits the whole text`() {
         val goRow = addressActions(AddressFieldText.shown(huge), "https://s.example/?q=%s")
             .filterIsInstance<AddressAction.Go>().single().submitText

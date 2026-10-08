@@ -59,6 +59,25 @@ internal object AddressFieldText {
     }
 
     /**
+     * Whether [edit] of the field's [current] text is lost to the cut: the
+     * field already holds a shortened form (its head and the ellipsis, at the
+     * bound), the edit keeps that ellipsis and grows the text past the
+     * bound, and [capped] would cut it straight back to [current] — a
+     * character typed or pasted at the ellipsis or after it. Such an edit
+     * changes nothing on screen, so it must change nothing behind it either:
+     * the caller drops it whole and keeps the text the field stands for, or
+     * Go would submit the cut, a literal ellipsis and the typed character
+     * instead of the whole address (#517 R4-F1). A paste that replaces the
+     * whole field is not caught by this even if it happens to begin with
+     * the same head, unless it carries an ellipsis of its own past the cut.
+     */
+    fun swallowed(current: String, edit: String): Boolean =
+        edit.length > MAX_CHARS &&
+            current.length == MAX_CHARS && current.endsWith(ELLIPSIS) &&
+            edit.indexOf(ELLIPSIS, MAX_CHARS - 1) >= 0 &&
+            shown(edit) == current
+
+    /**
      * What a suggestion row's [pick] submits while the field stands for
      * [fullText]: the whole text when the pick is the "Go to address" row
      * for the field's shortened form (which the row trims), else the pick.
