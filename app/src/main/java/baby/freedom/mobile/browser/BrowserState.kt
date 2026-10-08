@@ -512,6 +512,9 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     internal var jsDialog: JsDialogRequest? by mutableStateOf<JsDialogRequest?>(null)
 
+    /** Whether this tab's pages may still show dialogs ([JsDialogGate], #466). */
+    internal val jsDialogGate = JsDialogGate()
+
     var canGoBack by mutableStateOf(false)
         internal set
     var canGoForward by mutableStateOf(false)
