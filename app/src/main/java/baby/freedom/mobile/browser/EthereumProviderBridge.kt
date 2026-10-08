@@ -806,7 +806,13 @@ object EthereumProviders {
     /**
      * How long a page request's sheets may wait, from its arrival (#463):
      * short of the page's own timer for a prompting method (600 s in
-     * [ethereumProviderJs]), leaving time for the work after an Approve.
+     * [ethereumProviderJs]), so a sheet nobody answers is withdrawn before
+     * the page gives up on it. The 30 s margin covers quick work after an
+     * Approve (a connect, a software-key signature); it does not bound it.
+     * A Ledger signature (BLE connect up to 90 s plus the on-device review)
+     * approved late can still outlast the page's timer, so the page sees
+     * `-32603` while the transaction still goes out, as it could before
+     * this cap existed.
      */
     internal const val SHEET_WAIT_MS = 570_000L
 
