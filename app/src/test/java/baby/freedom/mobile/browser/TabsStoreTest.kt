@@ -387,6 +387,74 @@ class TabsStoreTest {
         assertEquals(listOf("a", "b", "c"), next.heldTabs!!.group.tabs.map { it.title })
     }
 
+    /**
+     * Move the virtual clock a second at a time until the restore [mark]
+     * is settled (deleted), and return how far it moved.
+     *
+     * Not one jump past [TabsStore.CRASH_WINDOW_MS] (#518). Under the
+     * test's unconfined Main, the settle coroutine is resumed from the
+     * mark's disk write on an IO thread, and only once the launch that
+     * completes [TabsSession.ready] has finished; so it may not have
+     * scheduled its crash-window delay yet when the test moves the clock,
+     * and a delay scheduled after a single jump never fires. (On a device
+     * all of it runs on the main thread, one step after another.)
+     *
+     * The clock moves only here, so the delay is scheduled no earlier than
+     * the call: a restore that settled before the window had passed shows
+     * as less than [TabsStore.CRASH_WINDOW_MS], one that never settles
+     * times out. For a test that hasn't moved the clock since the change
+     * that starts the window (the mark itself, or the tab state after it).
+     *
+     * [nudge] runs before each step, for a test that changed the tabs
+     * after the mark was written: that IO-thread start can still be in
+     * the settle coroutine's first snapshot read while the test thread
+     * applies its change, and a change that lands under a read in flight
+     * isn't reported to it. One applied after the read always is.
+     */
+    private suspend fun advanceUntilSettled(mark: File, nudge: () -> Unit = {}): Long {
+        val from = main.scheduler.currentTime
+        withTimeout(10_000) {
+            while (mark.exists()) {
+                nudge()
+                androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+                main.scheduler.advanceTimeBy(1_000)
+                kotlinx.coroutines.delay(10)
+            }
+        }
+        return main.scheduler.currentTime - from
+    }
+
+    /**
+     * A [nudge] for [advanceUntilSettled]: the user glances at the first
+     * tab (restored, still pending, so it never starts the window) and
+     * comes back to the one on screen.
+     */
+    private fun TabsSession.glanceAway() {
+        val back = tabs.activeIndex
+        assertTrue(back != 0)
+        tabs.switchTo(0)
+        tabs.switchTo(back)
+    }
+
+    /**
+     * Wait for the held-tabs offer to end, through the session's watch on
+     * the reopen stack, after a change the test made to it. That watch
+     * starts like the restore's settle (see [advanceUntilSettled]): its
+     * first snapshot read can still be running on an IO thread when the
+     * change is applied, and miss it. So until the offer is over, [nudge]
+     * makes another change to the stack that leaves the same outcome, and
+     * applies it.
+     */
+    private fun TabsSession.awaitOfferOver(nudge: () -> Unit) = runBlocking {
+        withTimeout(5_000) {
+            while (heldTabs != null) {
+                nudge()
+                androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+                kotlinx.coroutines.delay(10)
+            }
+        }
+    }
+
     /** The held-tabs file is gone, once the store's background release has run. */
     private fun awaitHeldGone() = runBlocking {
         withTimeout(5_000) { while (File(dir, TabsStore.HELD).exists()) kotlinx.coroutines.delay(10) }
@@ -439,7 +507,14 @@ class TabsStoreTest {
             // Applied at once, as the main thread would: the watcher sees the whole group back.
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot { assertNotNull(tabs.reopenClosedTab()) }
             androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-            runBlocking { withTimeout(5_000) { while (heldTabs != null) kotlinx.coroutines.delay(10) } }
+            // Should the watcher have missed it, the user closes a tab and
+            // reopens it (see [awaitOfferOver]).
+            awaitOfferOver {
+                androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                    tabs.closeTab(tabs.tabs.lastIndex)
+                    assertNotNull(tabs.reopenClosedTab())
+                }
+            }
             assertEquals(3, tabs.tabs.size)
             awaitHeldGone()
             // Open tabs now, saved and marked like the offer's Restore (R4-M1).
@@ -451,7 +526,8 @@ class TabsStoreTest {
         crashedRestoreSession().apply {
             tabs.forgetClosedTabs()
             androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-            runBlocking { withTimeout(5_000) { while (heldTabs != null) kotlinx.coroutines.delay(10) } }
+            // …or deletes it again, should the watcher have missed it.
+            awaitOfferOver { tabs.forgetClosedTabs() }
             awaitHeldGone()
         }
     }
@@ -538,13 +614,9 @@ class TabsStoreTest {
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
         session.tabs.active.progress = -1
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        // …and a crash within the window after that still counts…
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
-        kotlinx.coroutines.delay(50)
-        assertTrue(mark.exists())
-        // …but not once it has passed.
-        main.scheduler.advanceTimeBy(2_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        // …and a crash within the window after that still counts, but not
+        // once it has passed.
+        assertTrue(advanceUntilSettled(mark) { session.glanceAway() } >= TabsStore.CRASH_WINDOW_MS)
     }
 
     /** A session relaunched from saved instance state (a process killed in the background). */
@@ -594,10 +666,8 @@ class TabsStoreTest {
         val mark = File(dir, TabsStore.RESTORE_MARK)
         // The old mark is gone, replaced by this run's own…
         withTimeout(5_000) { while (mark.takeIf { it.exists() }?.readText()?.trim() != now.toString()) kotlinx.coroutines.delay(10) }
-        kotlinx.coroutines.delay(50)
         // …which settles like any restore's (home on screen: nothing to load).
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS + 1_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        assertTrue(advanceUntilSettled(mark) >= TabsStore.CRASH_WINDOW_MS)
         // An unrelated crash now doesn't hold the tabs back next time.
         session.viewModelScope.cancel()
         store().save(threeTabs().saveForProcessDeath())
@@ -615,12 +685,8 @@ class TabsStoreTest {
         assertTrue(session.tabs.active.isHome)
         val mark = File(dir, TabsStore.RESTORE_MARK)
         withTimeout(5_000) { while (!mark.exists()) kotlinx.coroutines.delay(10) }
-        kotlinx.coroutines.delay(50)
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
-        kotlinx.coroutines.delay(50)
-        assertTrue(mark.exists())
-        main.scheduler.advanceTimeBy(2_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        // Not a moment before the window has passed.
+        assertTrue(advanceUntilSettled(mark) >= TabsStore.CRASH_WINDOW_MS)
     }
 
     @Test
@@ -652,9 +718,7 @@ class TabsStoreTest {
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
         session.tabs.active.progress = -1
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        kotlinx.coroutines.delay(50)
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS + 1_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        assertTrue(advanceUntilSettled(mark) { session.glanceAway() } >= TabsStore.CRASH_WINDOW_MS)
     }
 
     @Test
@@ -708,12 +772,7 @@ class TabsStoreTest {
         // It finishes off screen: the window starts from there.
         restored.progress = -1
         androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
-        kotlinx.coroutines.delay(50)
-        main.scheduler.advanceTimeBy(TabsStore.CRASH_WINDOW_MS - 1_000)
-        kotlinx.coroutines.delay(50)
-        assertTrue(mark.exists())
-        main.scheduler.advanceTimeBy(2_000)
-        withTimeout(5_000) { while (mark.exists()) kotlinx.coroutines.delay(10) }
+        assertTrue(advanceUntilSettled(mark) { session.glanceAway() } >= TabsStore.CRASH_WINDOW_MS)
     }
 
     @Test
