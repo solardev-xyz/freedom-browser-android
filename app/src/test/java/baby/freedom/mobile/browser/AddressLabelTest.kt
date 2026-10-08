@@ -93,9 +93,13 @@ class AddressLabelTest {
     fun `backslashes are kept inside non-special authorities`() {
         // `bzz:` is not a special scheme, so its authority is not split
         // on `\` — but a backslash means it is not a host either, so it
-        // is elided as an id rather than re-read as `bank.com`.
-        assertEquals("bzz://swarm.….com", AddressLabel.resting("bzz://swarm.eth\\@bank.com/x"))
-        assertEquals("bzz://a\\@b.co", AddressLabel.resting("bzz://a\\@b.co/x"))
+        // is never re-read as `bank.com`; and as it carries an `@`, it
+        // is shown as typed rather than elided into `swarm.….com`.
+        assertEquals("bzz://swarm.eth\\@bank.com/x", AddressLabel.resting("bzz://swarm.eth\\@bank.com/x"))
+        assertEquals("bzz://a\\@b.co/x", AddressLabel.resting("bzz://a\\@b.co/x"))
+        assertEquals("bzz://paypal\\@aaaaaaaaaaaa.com", AddressLabel.resting("bzz://paypal\\@aaaaaaaaaaaa.com"))
+        // Without an `@`, a backslashed id is still elided.
+        assertEquals("bzz://swarm.….com", AddressLabel.resting("bzz://swarm.eth\\bank.com/x"))
     }
 
     @Test
@@ -117,6 +121,9 @@ class AddressLabelTest {
         assertEquals("ens://evil@vitalik.eth", AddressLabel.resting("ens://evil@vitalik.eth"))
         assertEquals("bzz://a:b@swarm.eth/x", AddressLabel.resting("bzz://a:b@swarm.eth/x"))
         assertEquals("ipfs://evilevil@vitalik.eth", AddressLabel.resting("ipfs://evilevil@vitalik.eth"))
+        // A percent-encoded `@` is not elided into a name either.
+        assertEquals("ipfs://evil%40vitalik.eth", AddressLabel.resting("ipfs://evil%40vitalik.eth"))
+        assertEquals("ens://evil%40vitalik.eth", AddressLabel.resting("ens://evil%40vitalik.eth"))
         // Web URLs keep the userinfo strip: that is the host that loads.
         assertEquals("example.com", AddressLabel.resting("https://evil@www.example.com/x"))
     }

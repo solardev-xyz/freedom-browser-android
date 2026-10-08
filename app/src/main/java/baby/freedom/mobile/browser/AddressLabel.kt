@@ -107,9 +107,12 @@ object AddressLabel {
                 looksLikeHost(authority) -> hostLabel(authority)
                 // Userinfo is never part of a name or a content id: show
                 // it as typed rather than elide it into one (see
-                // [looksLikeHost]). A backslash already makes it an
-                // elided id, which can't read as a domain either.
-                authority.contains('@') && !authority.contains('\\') -> raw
+                // [looksLikeHost]). Eliding would hide the `@` and leave
+                // something domain-shaped — `paypal…com` from
+                // `paypal\\@aaaaaaaaaaaa.com`, `evil%4….eth` from
+                // `evil%40vitalik.eth` — so this holds with a backslash
+                // and for a percent-encoded `@` too.
+                hasAt(authority) -> raw
                 else -> "$scheme://${elideId(authority)}"
             }
             else -> raw
@@ -202,8 +205,9 @@ object AddressLabel {
         // userinfo strip, which would otherwise turn the non-special
         // `bzz://swarm.eth\@bank.com` into the label `bank.com`. Special
         // schemes never get here with a backslash ([authorityOf] has cut
-        // the authority at it already); the rest fall through to the
-        // elided-id form, which cannot be mistaken for a domain.
+        // the authority at it already); the rest are shown as typed when
+        // they carry an `@` (see [restingUnmarked]) and elided as an id
+        // otherwise.
         if (authority.contains('\\')) return false
         // Nor is one carrying an `@`. A name or a content id has no
         // userinfo, so `ens://evil@vitalik.eth` (from another app's link
@@ -223,6 +227,10 @@ object AddressLabel {
                 label.all { it.isLetterOrDigit() || it == '-' || it == '_' || (escapedTez && it == '%') }
         }
     }
+
+    /** [authority] carries an `@`, literally or as `%40`. */
+    private fun hasAt(authority: String): Boolean =
+        authority.contains('@') || authority.contains("%40")
 
     private fun elideId(id: String): String =
         if (id.length <= MAX_ID_CHARS) id
