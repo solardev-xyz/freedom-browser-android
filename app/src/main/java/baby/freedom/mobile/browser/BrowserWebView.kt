@@ -1105,6 +1105,7 @@ fun BrowserWebViewHost(
             onRenderProcessGone = { crashed -> webViewGone(tab, crashed) },
         )
         webViews[tab.id] = wv
+        WebViewTimers.created(wv)
         if (tab.private) privateIds += tab.id
         refreshLayouts[tab.id] = layout
         frame.addView(layout)
@@ -1248,8 +1249,9 @@ fun BrowserWebViewHost(
     }
 
     // Pausing (#470): a tab not on screen, or every tab while the app is
-    // in the background, is paused — unless it's playing ([tabWebViewPaused]).
-    // WebView can't say whether it's paused, so what was last set is kept.
+    // in the background, is paused ([tabWebViewPaused]); that leaves its
+    // JavaScript and media running. WebView can't say whether it's paused,
+    // so what was last set is kept.
     val pausedViews = remember { java.util.WeakHashMap<WebView, Boolean>() }
     for (tab in tabs.tabs) {
         val wv = webViews[tab.id] ?: continue
@@ -1259,10 +1261,12 @@ fun BrowserWebViewHost(
             if (pause) wv.onPause() else wv.onResume()
         }
     }
-    // And every WebView's timers while the app is in the background
-    // ([webViewTimersPaused]). An OpenLV session is read as the app
+    // And every WebView's timers while the app is in the background and
+    // nothing has played for a while ([webViewTimersPaused],
+    // [TIMERS_PAUSE_GRACE_MS]). An OpenLV session is read as the app
     // stops: none can begin while it's away.
     LaunchedEffect(lifecycleOwner) {
+        val deviceAudio = deviceAudioActive(context)
         lifecycleOwner.lifecycle.currentStateFlow
             .map { it.isAtLeast(Lifecycle.State.STARTED) }
             .distinctUntilChanged()
@@ -1274,10 +1278,13 @@ fun BrowserWebViewHost(
                         snapshotFlow { tabs.tabs.any { it.playingAudio } },
                         OpenLvSession.peek()?.status?.map { it == OpenLvSession.Status.Connecting || it == OpenLvSession.Status.Connected }
                             ?: flowOf(false),
-                    ) { audio, openLv -> webViewTimersPaused(appStarted = false, anyAudio = audio, openLvLive = openLv) }
+                        deviceAudio,
+                    ) { audio, openLv, device ->
+                        webViewTimersPaused(appStarted = false, anyAudio = audio, openLvLive = openLv, deviceAudio = device)
+                    }
                 }
             }
-            .distinctUntilChanged()
+            .pausedAfterGrace(TIMERS_PAUSE_GRACE_MS)
             .collect { paused -> WebViewTimers.set(paused, webViews.values.firstOrNull(), context) }
     }
 
