@@ -1,5 +1,8 @@
 package baby.freedom.mobile.node
 
+import android.app.ForegroundServiceStartNotAllowedException
+import android.os.Build
+
 /**
  * Whether [NodeService] holds foreground status, and what it does when it
  * can't (#458).
@@ -12,14 +15,30 @@ package baby.freedom.mobile.node
  * restart backoff gives up, with the node down while its setting says on.
  *
  * So a refused promotion only demotes the service, the same as the
- * budget's own `onTimeout`, and the app re-promotes it when it next comes
- * to the foreground. A demoted service stays up only while the UI is bound
- * to it: with nothing bound it is an ordinary background service Android
- * will kill again, and sticky-restarting it would just hit the same
- * refusal, so it stops instead. The app starts it again as it opens, while
- * the setting is on.
+ * budget's own `onTimeout`. The app tries to re-promote it each time it
+ * comes to the foreground: that lifts a background-start refusal, but not
+ * a spent `dataSync` budget. Bringing the app to the front doesn't give
+ * the budget back; re-promotion stays refused ("Time limit already
+ * exhausted"), and so does the `startForeground` of a service the app
+ * starts afresh while on top (seen on an API 36 emulator). Until the
+ * budget refills, the node runs demoted, without its notification, while
+ * the app is open.
+ *
+ * A demoted service stays up only while the UI is bound to it: with
+ * nothing bound it is an ordinary background service Android will kill
+ * again, and sticky-restarting it would just hit the same refusal, so it
+ * stops instead. The app starts it again as it opens, while the setting
+ * is on.
+ *
+ * Only Android's refusal ([isRefusal], by default
+ * [ForegroundServiceStartNotAllowedException]) demotes. Anything else
+ * `startForeground` throws is a bug in the service's own setup (a missing
+ * or invalid foreground service type, a missing permission, a bad
+ * notification) and is rethrown, so it crashes loudly as before.
  */
-internal class ForegroundHold {
+internal class ForegroundHold(
+    private val isRefusal: (RuntimeException) -> Boolean = ::isForegroundRefusal,
+) {
     /** Foreground status was refused or taken away; updates to the notification are skipped. */
     @Volatile
     var demoted = false
@@ -31,19 +50,20 @@ internal class ForegroundHold {
         private set
 
     /**
-     * Runs [startForeground]; true if the service is now in the foreground.
-     * A refusal demotes it rather than throw.
+     * Runs [startForeground]; null if the service is now in the foreground,
+     * else Android's refusal (its message says why: a background start, or
+     * the budget spent), which demotes it rather than throw. Any other
+     * exception is rethrown.
      */
-    fun promote(startForeground: () -> Unit): Boolean =
+    fun promote(startForeground: () -> Unit): RuntimeException? =
         try {
             startForeground()
             demoted = false
-            true
+            null
         } catch (e: RuntimeException) {
-            // ForegroundServiceStartNotAllowedException (an
-            // IllegalStateException), or a SecurityException.
+            if (!isRefusal(e)) throw e
             demoted = true
-            false
+            e
         }
 
     /** The day's foreground budget ran out (`onTimeout`): true to stop now. */
@@ -70,3 +90,12 @@ internal class ForegroundHold {
     /** A demoted service with no UI bound stops rather than wait to be killed. */
     fun shouldStop(): Boolean = demoted && !bound
 }
+
+/**
+ * Android refusing foreground status: a background start on 12+, a spent
+ * time budget on 15+. Not its siblings under
+ * `ServiceStartNotAllowedException` such as
+ * `MissingForegroundServiceTypeException`, which are setup bugs.
+ */
+internal fun isForegroundRefusal(e: RuntimeException): Boolean =
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && e is ForegroundServiceStartNotAllowedException

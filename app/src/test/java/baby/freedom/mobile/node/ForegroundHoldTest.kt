@@ -1,31 +1,51 @@
 package baby.freedom.mobile.node
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ForegroundHoldTest {
-    private val hold = ForegroundHold()
+    /** Stands in for ForegroundServiceStartNotAllowedException, which the JVM's android.jar stub can't build. */
+    private class Refusal(message: String) : IllegalStateException(message)
 
-    /** What `startForeground` throws when Android refuses it (ForegroundServiceStartNotAllowedException's base). */
-    private val refused: () -> Unit = { throw IllegalStateException("startForeground not allowed") }
+    private val hold = ForegroundHold(isRefusal = { it is Refusal })
+
+    /** What `startForeground` throws when Android refuses it. */
+    private val refusal = Refusal("Time limit already exhausted for foreground service type dataSync")
+    private val refused: () -> Unit = { throw refusal }
 
     @Test
-    fun `a refused promotion demotes instead of throwing`() {
-        assertFalse(hold.promote(refused))
+    fun `a refused promotion demotes instead of throwing, and says why`() {
+        val got = hold.promote(refused)
+        assertSame(refusal, got)
+        assertEquals("Time limit already exhausted for foreground service type dataSync", got?.message)
         assertTrue(hold.demoted)
     }
 
     @Test
-    fun `a security exception from startForeground demotes too`() {
-        assertFalse(hold.promote { throw SecurityException("no FOREGROUND_SERVICE_DATA_SYNC") })
-        assertTrue(hold.demoted)
+    fun `a setup bug from startForeground is rethrown, not demoted`() {
+        // MissingForegroundServiceTypeException and friends, a missing
+        // permission, a bad notification: crash loudly as before.
+        assertThrows(IllegalStateException::class.java) {
+            hold.promote { throw IllegalStateException("missing foreground service type") }
+        }
+        assertThrows(SecurityException::class.java) {
+            hold.promote { throw SecurityException("no FOREGROUND_SERVICE_DATA_SYNC") }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            hold.promote { throw IllegalArgumentException("invalid notification") }
+        }
+        assertFalse(hold.demoted)
     }
 
     @Test
     fun `a granted promotion clears the demotion`() {
         hold.promote(refused)
-        assertTrue(hold.promote {})
+        assertNull(hold.promote {})
         assertFalse(hold.demoted)
     }
 
@@ -56,7 +76,7 @@ class ForegroundHoldTest {
 
     @Test
     fun `the budget running out stops an unbound node, keeps a bound one`() {
-        assertTrue(ForegroundHold().timedOut())
+        assertTrue(ForegroundHold(isRefusal = { it is Refusal }).timedOut())
         hold.bind()
         assertFalse(hold.timedOut())
         assertTrue(hold.demoted)

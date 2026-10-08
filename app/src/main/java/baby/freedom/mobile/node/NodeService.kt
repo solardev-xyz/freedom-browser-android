@@ -732,10 +732,10 @@ class NodeService : Service() {
 
     private fun repromoteForegroundIfDemoted() {
         if (!foreground.demoted) return
-        val promoted = foreground.promote {
+        val refusal = foreground.promote {
             startForeground(NOTIFICATION_ID, buildNotification(reportedNodeInfo(swarmNode.state.value, doomed, bootIdentity.owed.value)), foregroundTypeCompat())
         }
-        Log.i(TAG, if (promoted) "re-promoted to foreground service" else "foreground re-promotion refused")
+        Log.i(TAG, if (refusal == null) "re-promoted to foreground service" else "foreground re-promotion refused: ${refusal.message}")
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -834,16 +834,13 @@ class NodeService : Service() {
         // Refused in the background on Android 12+ (a sticky restart) and
         // once the day's dataSync budget is spent on 15+ (#458): demoted
         // then, not crashed; onStartCommand stops it if no app is bound.
-        if (!foreground.promote {
-                startForeground(
-                    NOTIFICATION_ID,
-                    buildNotification(reportedNodeInfo(NodeInfo(), doomed)),
-                    foregroundTypeCompat(),
-                )
-            }
-        ) {
-            Log.w(TAG, "foreground status refused at create; running demoted")
-        }
+        foreground.promote {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(reportedNodeInfo(NodeInfo(), doomed)),
+                foregroundTypeCompat(),
+            )
+        }?.let { Log.w(TAG, "foreground status refused at create; running demoted: ${it.message}") }
 
         swarmObserver = combine(swarmNode.state, bootIdentity.owed, ::Pair)
             .onEach { (raw, owed) ->
