@@ -869,8 +869,12 @@ fun BrowserWebViewHost(
         // A private session a dead process left behind (#86) goes
         // before any page — private or not — can load.
         PrivateProfile.discardLeftovers()
-        // …and so do the images its tabs copied or shared.
-        if (!PrivateProfile.isLive()) discardPrivateImageShares(context)
+        // …and so do the images its tabs copied or shared, and the
+        // photos they took for an upload (#468).
+        if (!PrivateProfile.isLive()) {
+            discardPrivateImageShares(context)
+            fileChooser.discardPrivateCaptures()
+        }
         Unit
     }
 
@@ -932,7 +936,9 @@ fun BrowserWebViewHost(
     /**
      * No private tab is left (#86): wipe the private profile's cookies
      * and site storage (its HTTP cache was cleared through the last
-     * private WebView) and retire it for deletion, and drop
+     * private WebView) and retire it for deletion, delete the images
+     * its tabs copied or shared and the photos they took for an upload
+     * (#468), and drop
      * what the app itself kept for the session in memory: its
      * site-permission answers, zoom levels, downloads list (a private
      * download still running is cancelled, as in Chrome) and the
@@ -947,6 +953,7 @@ fun BrowserWebViewHost(
     fun endPrivateSession() {
         PrivateProfile.discard()
         discardPrivateImageShares(context)
+        fileChooser.discardPrivateCaptures()
         sitePermissions.onPrivateSessionEnded()
         Adblock.onPrivateSessionEnded()
         pageZoom.clearPrivate()
@@ -4398,7 +4405,7 @@ private fun buildRefreshableWebView(
                 fileChooserParams: FileChooserParams?,
             ): Boolean {
                 if (filePathCallback == null || fileChooserParams == null) return false
-                return fileChooser?.show(state.id, filePathCallback, fileChooserParams) ?: false
+                return fileChooser?.show(state.id, state.private, filePathCallback, fileChooserParams) ?: false
             }
 
             // A new window the page asked for (`target=_blank`,
