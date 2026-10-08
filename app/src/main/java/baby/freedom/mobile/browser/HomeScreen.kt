@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import android.content.ComponentCallbacks2
 import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.annotation.StringRes
@@ -668,22 +669,52 @@ internal fun rememberFavicon(repo: BrowsingRepository, url: String): ImageBitmap
     return image
 }
 
-/** Decoded favicons, most recently shown kept (#482). */
+/**
+ * Decoded favicons, most recently shown kept (#482), budgeted by the
+ * bitmaps' own size rather than their count (#516 R1-F1): Chromium
+ * scales an icon to at most 192 px before handing it over, but nothing
+ * here should depend on that, so the cache never holds more than
+ * [MAX_BYTES] of pixels whatever the sites send, and lets go of all of
+ * them when Android asks for memory back ([trimMemory]).
+ */
 internal object FaviconImages {
-    private val cache = DecodeCache(maxEntries = 64) { data ->
+    /** 4 MiB: about thirty 192 px icons, or a thousand 32 px ones. */
+    const val MAX_BYTES = 4 * 1024 * 1024
+
+    private val cache = DecodeCache(
+        maxSize = MAX_BYTES,
+        sizeOf = { image: ImageBitmap -> image.width * image.height * 4 },
+    ) { data ->
         runCatching { BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap() }.getOrNull()
     }
 
     fun get(data: ByteArray): ImageBitmap? = cache.get(data)
+
+    /**
+     * Drop every decoded icon once the UI is hidden or memory runs low:
+     * a row shown again decodes its icon anew, off the main thread.
+     */
+    fun trimMemory(level: Int) {
+        if (clearsOn(level)) cache.clear()
+    }
+
+    @Suppress("DEPRECATION") // The RUNNING_* levels: still sent before API 34.
+    internal fun clearsOn(level: Int): Boolean =
+        level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
+            level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+            level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
 }
 
 /**
  * A small LRU of decoded images keyed by their encoded bytes' content, so
  * the same icon arriving as a fresh array (Room hands out a new one per
- * query) still hits. A failed decode isn't kept.
+ * query) still hits. It holds at most [maxSize] as measured by [sizeOf]
+ * (by default, one per entry); an image bigger than that on its own is
+ * returned but not kept. A failed decode isn't kept either.
  */
 internal class DecodeCache<T : Any>(
-    private val maxEntries: Int,
+    private val maxSize: Int,
+    private val sizeOf: (T) -> Int = { 1 },
     private val decode: (ByteArray) -> T?,
 ) {
     private class Key(val bytes: ByteArray) {
@@ -692,9 +723,8 @@ internal class DecodeCache<T : Any>(
         override fun equals(other: Any?) = other is Key && bytes.contentEquals(other.bytes)
     }
 
-    private val entries = object : LinkedHashMap<Key, T>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, T>?) = size > maxEntries
-    }
+    private val entries = LinkedHashMap<Key, T>(16, 0.75f, true)
+    private var size = 0
 
     fun get(data: ByteArray): T? {
         val key = Key(data)
@@ -702,8 +732,23 @@ internal class DecodeCache<T : Any>(
         // Decoded outside the lock: two rows racing on a new icon may both
         // decode it once, which beats one waiting on the other.
         val image = decode(data) ?: return null
-        synchronized(entries) { entries[key] = image }
+        val cost = sizeOf(image)
+        if (cost > maxSize) return image
+        synchronized(entries) {
+            entries.put(key, image)?.let { size -= sizeOf(it) }
+            size += cost
+            val eldest = entries.entries.iterator()
+            while (size > maxSize && eldest.hasNext()) {
+                size -= sizeOf(eldest.next().value)
+                eldest.remove()
+            }
+        }
         return image
+    }
+
+    fun clear() = synchronized(entries) {
+        entries.clear()
+        size = 0
     }
 }
 

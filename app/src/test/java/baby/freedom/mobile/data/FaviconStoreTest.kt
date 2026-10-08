@@ -6,7 +6,9 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** #482: a favicon that didn't change is neither rewritten nor re-emitted. */
@@ -69,5 +71,18 @@ class FaviconStoreTest {
         assertArrayEquals(byteArrayOf(1, 2), seen[1])
         assertArrayEquals(byteArrayOf(3), seen[2])
         assertNull(seen[3])
+    }
+
+    @Test
+    fun `an icon reported earlier can't land over a later one (#516 R1-F2)`() {
+        val order = FaviconWriteOrder()
+        val big = order.next()   // reported first, encode still running
+        val small = order.next() // reported second, encoded first
+        assertTrue(order.admit("https://a.example", small))
+        assertFalse(order.admit("https://a.example", big))
+        // Another origin isn't held back by it.
+        assertTrue(order.admit("https://b.example", big))
+        // A later icon still replaces it.
+        assertTrue(order.admit("https://a.example", order.next()))
     }
 }

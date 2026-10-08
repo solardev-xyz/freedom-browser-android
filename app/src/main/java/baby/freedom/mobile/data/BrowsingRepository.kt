@@ -50,6 +50,9 @@ class BrowsingRepository internal constructor(
      */
     fun historyTicket(): Long = historyGate.ticket()
 
+    /** Keeps an icon from landing over one reported after it (#516 R1-F2). */
+    private val faviconOrder = FaviconWriteOrder()
+
     init {
         // One-time cleanup for installs that predate [isRecordable]
         // rejecting `about:*` — earlier builds wrote `about:blank`
@@ -418,8 +421,15 @@ class BrowsingRepository internal constructor(
      * icon over on the main thread, and a full-quality PNG encode there
      * costs a frame on every page load. [encode] returning null or an
      * empty array stores nothing.
+     *
+     * Encodes for one origin can finish in any order (a big icon takes
+     * longer than the small one a page swaps in right after it), so the
+     * call is numbered here, in the order the WebView reported the icons,
+     * and a write older than one already stored for its origin is dropped
+     * (#516 R1-F2).
      */
     fun storeFavicon(pageUrl: String, ticket: Long, encode: () -> ByteArray?) {
+        val seq = faviconOrder.next()
         scope.launch {
             // Keyed on the settled spelling, as history rows are
             // (#490 R3-M3): a `café.tez` page shown `caf%C3%A9.tez`
@@ -431,6 +441,7 @@ class BrowsingRepository internal constructor(
             if (data == null || data.isEmpty()) return@launch
             // Not for a page loaded before a history delete (#480 R1-M1).
             historyGate.write(ticket) {
+                if (!faviconOrder.admit(origin, seq)) return@write
                 db.withTransaction {
                     storeFaviconRow(
                         db.favicons(),

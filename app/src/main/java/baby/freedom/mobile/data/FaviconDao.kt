@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 
@@ -70,6 +71,29 @@ internal suspend fun storeFaviconRow(dao: FaviconDao, entry: FaviconEntry) {
  */
 internal fun Flow<ByteArray?>.distinctIcons(): Flow<ByteArray?> =
     distinctUntilChanged { old, new -> old contentEquals new }
+
+/**
+ * Numbers favicon writes in the order they were asked for, so one whose
+ * encode finished late can't overwrite a newer icon for the same origin
+ * (#516 R1-F2). [next] is taken on the caller's thread, when the WebView
+ * reports the icon; [admit] is asked just before the write, under the
+ * repository's write gate.
+ */
+internal class FaviconWriteOrder {
+    private val counter = AtomicLong()
+    private val latest = HashMap<String, Long>()
+
+    fun next(): Long = counter.incrementAndGet()
+
+    /** Whether write [seq] for [origin] is newer than every one let through for it; records it if so. */
+    @Synchronized
+    fun admit(origin: String, seq: Long): Boolean {
+        val newest = latest[origin]
+        if (newest != null && newest > seq) return false
+        latest[origin] = seq
+        return true
+    }
+}
 
 /** A favicon row without its bytes: which origin, stored when. */
 data class FaviconStamp(val origin: String, val updatedAt: Long)
