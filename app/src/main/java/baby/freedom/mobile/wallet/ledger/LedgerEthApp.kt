@@ -171,9 +171,14 @@ internal object LedgerApdus {
      * [signEip712Full] can't stream it (an array over 255, a name over 255
      * bytes, a missing nested struct): the sheet must say so before the
      * user approves, since the Ledger's screen then no longer backs up what
-     * the phone showed (#239). Null when the device shows it field by field
-     * (or it can't be signed on a Ledger at all). [LedgerEthApp.signTypedData]
-     * takes the hashed path on exactly this condition.
+     * the phone showed (#239). Null when [data] *can* be streamed field by
+     * field (or can't be signed on a Ledger at all), which is not a promise
+     * the device will show it that way: an Ethereum app too old for
+     * field-by-field signing answers `0x6D00`, known only once the device
+     * answers, and [LedgerEthApp.signTypedData] then falls back to hashes
+     * too. Without these hashes shown it refuses with
+     * [LedgerException.hashesOnly] carrying them, so a caller must still
+     * handle that and ask again with them shown (#476).
      */
     fun blindHashes(data: Eip712.TypedData): LedgerTypedDataHashes? = if (streamable(data)) null else eip712Hashes(data)
 
