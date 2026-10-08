@@ -2588,11 +2588,12 @@ private fun AddressField(
                     onValueChange = { edit ->
                         // A paste is held to the same bound as the seed,
                         // shortened with an ellipsis; its whole text is
-                        // what Go and the suggestions then stand for. A
-                        // keystroke at or past a shortened field's ellipsis
-                        // would only be cut away again: drop it, so the
-                        // field still stands for its whole text.
-                        if (AddressFieldText.swallowed(fieldValue.text, edit.text)) {
+                        // what Go and the suggestions then stand for. An
+                        // edit inside a shortened field that grows it past
+                        // the bound would only be cut again, losing what
+                        // was typed or the last shown character: the field
+                        // is full, so drop it and keep its whole text.
+                        if (AddressFieldText.swallowed(fieldValue.text, edit.text, seededAddress)) {
                             return@BasicTextField
                         }
                         val newValue = AddressFieldText.capped(edit)

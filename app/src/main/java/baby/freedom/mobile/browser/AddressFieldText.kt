@@ -59,23 +59,42 @@ internal object AddressFieldText {
     }
 
     /**
-     * Whether [edit] of the field's [current] text is lost to the cut: the
-     * field already holds a shortened form (its head and the ellipsis, at the
-     * bound), the edit keeps that ellipsis and grows the text past the
-     * bound, and [capped] would cut it straight back to [current] — a
-     * character typed or pasted at the ellipsis or after it. Such an edit
-     * changes nothing on screen, so it must change nothing behind it either:
-     * the caller drops it whole and keeps the text the field stands for, or
-     * Go would submit the cut, a literal ellipsis and the typed character
-     * instead of the whole address (#517 R4-F1). A paste that replaces the
-     * whole field is not caught by this even if it happens to begin with
-     * the same head, unless it carries an ellipsis of its own past the cut.
+     * Whether [edit] of the field's [current] text is lost to the cut. The
+     * field stems from a shortened form — [standsFor], the whole text it was
+     * seeded from or last pasted / filled with, is past the bound, so the
+     * field holds (or was edited from) its head and the ellipsis — and the
+     * edit works inside that text: it keeps the ellipsis where it was, in
+     * front of or behind what changed, and grows the text past the bound.
+     * [capped] would then cut the edit's tail away again: a character typed
+     * at or after the ellipsis vanishes from the field, and one typed or
+     * pasted earlier pushes the last shown character out, while the caller
+     * would take the edit — dropped characters, a literal ellipsis and all —
+     * as the field's whole text and have Go submit it (#517 R4-F1, R5-F2).
+     * The field is full, as a field with a maximum length is: the caller
+     * drops such an edit whole and keeps the text the field stands for.
+     *
+     * Only the length of the edit counts, not that [current] is exactly
+     * [shown] of [standsFor]: a shortened form one char short of the bound
+     * (its cut backed off a surrogate pair) takes one more keystroke, which
+     * stays on screen and is what Go then submits, and the next one is
+     * dropped like any other (#517 R5-F1). A paste over the whole field
+     * replaces the ellipsis too and is shortened as a paste, not dropped.
      */
-    fun swallowed(current: String, edit: String): Boolean =
-        edit.length > MAX_CHARS &&
-            current.length == MAX_CHARS && current.endsWith(ELLIPSIS) &&
-            edit.indexOf(ELLIPSIS, MAX_CHARS - 1) >= 0 &&
-            shown(edit) == current
+    fun swallowed(current: String, edit: String, standsFor: String): Boolean {
+        if (edit.length <= MAX_CHARS || standsFor.length <= MAX_CHARS) return false
+        val ellipsis = current.lastIndexOf(ELLIPSIS)
+        if (ellipsis < 0) return false
+        // What the edit left of [current]: a common head, then a common tail
+        // that doesn't overlap it.
+        val room = minOf(current.length, edit.length)
+        var head = 0
+        while (head < room && current[head] == edit[head]) head++
+        var tail = 0
+        while (tail < room - head &&
+            current[current.length - 1 - tail] == edit[edit.length - 1 - tail]
+        ) tail++
+        return ellipsis < head || ellipsis >= current.length - tail
+    }
 
     /**
      * What a suggestion row's [pick] submits while the field stands for
