@@ -88,4 +88,21 @@ class EnsInputTest {
         assertNull(EnsInput.parse("alicewei"))
         assertNull(EnsInput.parse("https://alice.wei.example"))
     }
+
+    @Test
+    fun `a name with a backslash is lowercased without asking ENSIP-15, which refuses it anyway`() {
+        // The shortcut in parse() is only sound because ENSIP-15 never
+        // accepts a backslash, in an ASCII name or a non-ASCII one.
+        assertNull(EnsNormalize.normalizeOrNull("paypal.com\\vitalik.eth"))
+        assertNull(EnsNormalize.normalizeOrNull("🦊\\vitalik.eth"))
+        assertNull(EnsNormalize.normalizeOrNull("Ⓥitalik\\x.eth"))
+        assertEquals(
+            EnsInput.Parsed("🦊\\vitalik.eth", "/p"),
+            EnsInput.parse("ens://🦊\\VITALIK.eth/p"),
+        )
+        assertEquals(
+            EnsInput.Parsed("paypal.com\\vitalik.eth", ""),
+            EnsInput.parse("paypal.com\\vitalik.eth"),
+        )
+    }
 }
