@@ -13,16 +13,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * A chequebook deposit whose outcome the node couldn't tell: its transfer
@@ -268,6 +269,14 @@ class SwarmNode internal constructor(
     private var peerPoller: Job? = null
 
     /**
+     * True between [suspend] and [resume]: the app is in the background,
+     * where nobody reads the peer count, so [startPeerPolling] asks ant
+     * for it only every [BACKGROUND_PEER_POLL_MS] (#471). Kept across a
+     * restart, which doesn't bring the app back.
+     */
+    private val backgrounded = MutableStateFlow(false)
+
+    /**
      * Guards [generation], and orders it with the Starting/Stopped/
      * Running transitions and the [handle] hand-off.
      */
@@ -470,13 +479,22 @@ class SwarmNode internal constructor(
      * the fix for the "node says Running, every bzz:// page fails until
      * the node is toggled off and on" wedge — see freedom-hq/ant#12.
      */
-    fun resume() = lifecycle("resume") { h ->
-        ops.resume(h)
-        ops.wake(h)
+    fun resume() {
+        backgrounded.value = false
+        lifecycle("resume") { h ->
+            ops.resume(h)
+            ops.wake(h)
+        }
     }
 
-    /** App went to the background: let uploads checkpoint and quiesce. */
-    fun suspend() = lifecycle("suspend") { h -> ops.suspend(h) }
+    /**
+     * App went to the background: let uploads checkpoint and quiesce, and
+     * count peers only every [BACKGROUND_PEER_POLL_MS] until [resume].
+     */
+    fun suspend() {
+        backgrounded.value = true
+        lifecycle("suspend") { h -> ops.suspend(h) }
+    }
 
     /** Network changed (Wi-Fi ↔ cellular, airplane mode off): redial. */
     fun onNetworkChanged() = lifecycle("network-change") { h -> ops.resume(h) }
@@ -964,12 +982,31 @@ class SwarmNode internal constructor(
                     if (h == 0L) null else runCatching { ops.peerCount(h) }.getOrDefault(-1)
                 } ?: break
                 _state.update { it.copy(connectedPeers = peers.coerceAtLeast(0).toLong()) }
-                delay(if (peers > 100) 5_000L else 1_000L)
+                val wasBackgrounded = backgrounded.value
+                // Coming back to the foreground cuts a background wait
+                // short, so the count is fresh as soon as the app shows it.
+                withTimeoutOrNull(peerPollDelayMs(peers, wasBackgrounded)) {
+                    backgrounded.first { it != wasBackgrounded }
+                }
             }
         }
     }
 
     companion object {
+        /** How often a backgrounded node's peers are counted (#471). */
+        internal const val BACKGROUND_PEER_POLL_MS = 30_000L
+
+        /**
+         * The wait before the next peer count: every second while the app
+         * is in front and the node still has few peers, every 5 s once it
+         * has plenty, and every [BACKGROUND_PEER_POLL_MS] in the background.
+         */
+        internal fun peerPollDelayMs(peers: Int, backgrounded: Boolean): Long = when {
+            backgrounded -> BACKGROUND_PEER_POLL_MS
+            peers > 100 -> 5_000L
+            else -> 1_000L
+        }
+
         /**
          * Listen address handed to `ant_start_gateway`. ant defaults to
          * the same bee-conventional `127.0.0.1:1633`, but we pass it

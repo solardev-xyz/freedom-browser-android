@@ -844,16 +844,25 @@ class NodeService : Service() {
             )
         }?.let { Log.w(TAG, "foreground status refused at create; running demoted: ${it.message}") }
 
-        swarmObserver = combine(swarmNode.state, bootIdentity.owed, ::Pair)
-            .onEach { (raw, owed) ->
-                // In a doomed process, why the node isn't up yet (#116);
-                // and a restart waiting on an unreadable identity (#357).
-                val info = reportedNodeInfo(raw, doomed, owed)
-                updateNotification(info)
-                broadcastState(info)
-                Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
-            }
-            .launchIn(scope)
+        // In a doomed process, why the node isn't up yet (#116);
+        // and a restart waiting on an unreadable identity (#357).
+        val swarmReported = combine(swarmNode.state, bootIdentity.owed) { raw, owed ->
+            reportedNodeInfo(raw, doomed, owed)
+        }
+        // A new peer count alone (every second while it churns) reaches
+        // the app at most every few seconds and the notification at most
+        // twice a minute (#471); anything else goes out at once.
+        swarmObserver = scope.launch {
+            swarmReported.throttlePeerCount(PEER_BROADCAST_MS)
+                .onEach { info ->
+                    broadcastState(info)
+                    Log.i(TAG, "swarm → ${info.status}  peers=${info.connectedPeers}")
+                }
+                .launchIn(this)
+            swarmReported.throttlePeerCount(PEER_NOTIFICATION_MS)
+                .onEach(::updateNotification)
+                .launchIn(this)
+        }
 
         if (doomed) {
             // An earlier instance's exit is pending (#116): starting ant
@@ -1108,6 +1117,12 @@ class NodeService : Service() {
         const val MAX_STAMP_DAYS = 3650L
 
         private const val MAX_RADICLE_CALLS = 4
+
+        /** How often a change in the Swarm peer count alone reaches the app, at most (#471). */
+        private const val PEER_BROADCAST_MS = 5_000L
+
+        /** How often a change in the Swarm peer count alone reposts the notification, at most (#471). */
+        private const val PEER_NOTIFICATION_MS = 30_000L
 
         /**
          * The longest a stop waits for a postage spend still running

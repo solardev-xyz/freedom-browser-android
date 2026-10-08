@@ -768,7 +768,13 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    val info by infoFlow.collectAsState()
+                    // The peer count apart (#471): it changes every few
+                    // seconds while the node runs, and only the pages that
+                    // show it should recompose for it.
+                    val info by remember { infoFlow.map { it.copy(connectedPeers = 0L) } }
+                        .collectAsState(initial = infoFlow.value.copy(connectedPeers = 0L))
+                    val swarmPeers = remember { infoFlow.map { it.connectedPeers } }
+                        .collectAsState(initial = infoFlow.value.connectedPeers)
                     val ipfsInfo by ipfsInfoFlow.collectAsState()
                     val radicleInfo by radicleInfoFlow.collectAsState()
                     val radicleEnabled by settings.radicleEnabled
@@ -786,6 +792,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                     }
                     BrowserScreen(
                         nodeInfo = info,
+                        swarmPeers = swarmPeers,
                         ipfsInfo = ipfsInfo,
                         runNodeEnabled = runNodeEnabled,
                         onToggleRunNode = ::onToggleRunNode,
