@@ -3035,6 +3035,9 @@ private fun buildRefreshableWebView(
                 certRefusal.committed(url)
                 // Page info's cleanup mark (#442) lasts this one load.
                 SiteData.committed(state.id, url)
+                // The user's own navigation landing lifts a JavaScript
+                // dialog block (#466).
+                state.jsDialogGate.committed()
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -4250,7 +4253,10 @@ private fun buildRefreshableWebView(
              * Holds a dialog on the tab for [BrowserScreen] to show in
              * its turn. A page blocks on one dialog at a time, so one
              * already waiting means a second can't be answered by the
-             * user in any sensible order: it's cancelled.
+             * user in any sensible order: it's cancelled. A tab whose
+             * pages showed too many ([JsDialogGate], #466) has the
+             * rest answered unseen: Cancel, or Leave for a
+             * `beforeunload`, as Chrome does.
              */
             private fun queueJsDialog(
                 kind: JsDialogKind,
@@ -4265,6 +4271,14 @@ private fun buildRefreshableWebView(
                     onAnswered(false)
                     return true
                 }
+                val gate = state.jsDialogGate
+                val admit = gate.admit()
+                if (admit !is JsDialogGate.Admit.Show) {
+                    val leave = kind == JsDialogKind.BEFORE_UNLOAD
+                    if (leave) result.confirm() else result.cancel()
+                    onAnswered(leave)
+                    return true
+                }
                 state.jsDialog = JsDialogRequest(
                     kind = kind,
                     url = url,
@@ -4275,7 +4289,12 @@ private fun buildRefreshableWebView(
                         answerJsResult(result, confirmed, text)
                         onAnswered(confirmed)
                     },
-                    onSettled = { if (state.jsDialog === it) state.jsDialog = null },
+                    onSettled = {
+                        gate.settled()
+                        if (state.jsDialog === it) state.jsDialog = null
+                    },
+                    offerBlock = admit.offerBlock && kind != JsDialogKind.BEFORE_UNLOAD,
+                    onBlock = gate::block,
                 )
                 return true
             }
