@@ -51,11 +51,7 @@ class JsDialogGateTest {
         }
         assertTrue(gate.blocked)
 
-        gate.allow()
-        // The looping page is still on screen until the user's load commits.
-        assertTrue(gate.blocked)
-        assertEquals(Admit.Refuse, gate.admit())
-        gate.committed()
+        gate.committed(byUser = true)
         assertFalse(gate.blocked)
         // A fresh start: the first dialog after it is a plain one.
         assertEquals(Admit.Show(offerBlock = false), gate.admit())
@@ -64,14 +60,60 @@ class JsDialogGateTest {
     @Test
     fun aCommitTheUserDidNotStartKeepsTheBlock() {
         gate.block()
-        gate.committed()
+        gate.committed(byUser = false)
         assertTrue(gate.blocked)
-        // Only the commit after the user's own navigation lifts it, once.
-        gate.allow()
-        gate.committed()
+        assertEquals(Admit.Refuse, gate.admit())
+        gate.committed(byUser = true)
         assertFalse(gate.blocked)
+    }
+
+    // R1-F1: a link the user taps on the blocked page lifts the block
+    // when it lands, as their address does.
+    @Test
+    fun aLinkTheUserTappedLiftsTheBlockWhenItCommits() {
+        val chain = UserNamedChain()
         gate.block()
-        gate.committed()
+        chain.started("https://loop.example/next")
+        chain.redirected("https://other.example/")
+        assertTrue(usersOwnCommit(usersOwn = true, chain, "https://other.example/"))
+        gate.committed(usersOwnCommit(usersOwn = true, chain, "https://other.example/"))
+        assertFalse(gate.blocked)
+    }
+
+    @Test
+    fun aCommitIsTheUsersOnlyAtTheAddressTheirNavigationIsAwaitedAt() {
+        val chain = UserNamedChain()
+        chain.started("https://other.example/")
+        // Not the user's (a restore, a detour, a tapless page navigation).
+        assertFalse(usersOwnCommit(usersOwn = false, chain, "https://other.example/"))
+        // The page's own navigation elsewhere, before theirs landed.
+        assertFalse(usersOwnCommit(usersOwn = true, chain, "https://loop.example/"))
+        assertFalse(usersOwnCommit(usersOwn = true, chain, null))
+        assertTrue(usersOwnCommit(usersOwn = true, chain, "https://other.example"))
+    }
+
+    // R1-M1: the user's navigation never commits — a 204, Stop, a
+    // download — and the looping page's own reload commits later.
+    @Test
+    fun aUsersNavigationThatNeverCommitsLeavesNothingForThePagesNextCommit() {
+        val chain = UserNamedChain()
+        gate.block()
+        chain.started("https://loop.example/")
+        // The 204's finish: loading stopped with the old page on screen.
+        chain.loadFinished("https://loop.example/", committedUrl = "https://loop.example/")
+        gate.committed(usersOwnCommit(usersOwn = true, chain, "https://loop.example/"))
+        assertTrue(gate.blocked)
+
+        // Stop (navigationDidNotLeave) or a download ends it the same way.
+        chain.started("https://other.example/file.zip")
+        chain.ended()
+        gate.committed(usersOwnCommit(usersOwn = true, chain, "https://other.example/file.zip"))
+        assertTrue(gate.blocked)
+
+        // The page's own request for another address ends it too.
+        chain.started("https://other.example/")
+        chain.mainFrameRequested("https://loop.example/?again")
+        gate.committed(usersOwnCommit(usersOwn = true, chain, "https://loop.example/?again"))
         assertTrue(gate.blocked)
     }
 

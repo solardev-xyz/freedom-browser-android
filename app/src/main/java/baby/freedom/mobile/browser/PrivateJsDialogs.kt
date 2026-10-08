@@ -57,10 +57,16 @@ internal fun jsDialogTitle(kind: JsDialogKind, url: String?): String {
  *
  * Blocked, every dialog the tab's pages ask for is answered at once,
  * unseen ([Admit.Refuse]), until a navigation the user started
- * themselves ([allow]: an address, a reload, Back/Forward) commits
- * ([committed]): until then the page that looped is still the one on
- * screen, and lifting the block at the tap would hand it its loop back.
- * A page's own navigation doesn't lift it. Main thread only.
+ * themselves commits ([committed] `byUser`): their address, Reload or
+ * Back / Forward, or a link they tapped on a page — as Chrome lifts it
+ * on any navigation with a user gesture, so the site a tapped link leads
+ * to gets its `confirm()` asked (R1-F1). At the commit, not the tap:
+ * until then the page that looped is still the one on screen, and
+ * lifting the block at the tap would hand it its loop back. Which commit
+ * is the user's is the tab's WebView's to say, per navigation
+ * ([PageWebView.commitIsUsersOwn]): one that never commits leaves
+ * nothing armed for the page's own next one (R1-M1). A navigation the
+ * page starts without a tap doesn't lift it. Main thread only.
  */
 internal class JsDialogGate(private val clock: () -> Long = SystemClock::uptimeMillis) {
     sealed interface Admit {
@@ -101,17 +107,13 @@ internal class JsDialogGate(private val clock: () -> Long = SystemClock::uptimeM
         asked.clear()
     }
 
-    private var liftOnCommit = false
-
-    /** The user navigated the tab themselves: once that load [committed], its pages may show dialogs again. */
-    fun allow() {
-        liftOnCommit = true
-    }
-
-    /** A main-frame document committed in the tab. */
-    fun committed() {
-        if (!liftOnCommit) return
-        liftOnCommit = false
+    /**
+     * A main-frame document committed in the tab, [byUser]: from a
+     * navigation the user started themselves. Theirs lifts the block, and
+     * the page they reach starts afresh.
+     */
+    fun committed(byUser: Boolean) {
+        if (!byUser) return
         blocked = false
         lastSettledAt = null
         asked.clear()
@@ -123,6 +125,16 @@ internal class JsDialogGate(private val clock: () -> Long = SystemClock::uptimeM
         const val FLOOD_WINDOW_MS = 2_000L
     }
 }
+
+/**
+ * Whether a main-frame document committing at [url] is the navigation
+ * [chain] follows, hop by hop, when that one is the user's own
+ * ([usersOwn]): what lifts a [JsDialogGate] block (#466). A navigation
+ * that ended without a commit has ended its [chain] too, so it leaves
+ * nothing for a later commit to take (R1-M1).
+ */
+internal fun usersOwnCommit(usersOwn: Boolean, chain: UserNamedChain, url: String?): Boolean =
+    usersOwn && url != null && chain.asker()?.let { sameRequestUrl(it, url) } == true
 
 /**
  * A JavaScript dialog a tab's page has opened and is blocked on (#246).

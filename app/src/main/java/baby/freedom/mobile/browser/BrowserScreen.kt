@@ -1018,8 +1018,6 @@ fun BrowserScreen(
     val goBack: () -> Unit = {
         when (backActionFor(state.canGoBack, state.isHome)) {
             BackAction.History -> {
-                // The user's own: lifts a JavaScript dialog block once it commits (#466).
-                state.jsDialogGate.allow()
                 // A navigation of its own (#94, see [BrowserState.loadGeneration]).
                 state.beginLoad()
                 state.loadUrl(HISTORY_BACK_JS)
@@ -1037,7 +1035,6 @@ fun BrowserScreen(
     // somewhere to go ([navControlsFor]); the key checks the same flag.
     val goForward: () -> Unit = {
         if (state.canGoForward) {
-            state.jsDialogGate.allow()
             state.beginLoad()
             state.loadUrl(HISTORY_FORWARD_JS)
         }
@@ -1357,8 +1354,6 @@ fun BrowserScreen(
         if (source == SubmitSource.User) EthereumProviders.allowPrompts(target.id)
         // And a rejected `window.swarm` sheet's (#120).
         if (source == SubmitSource.User) SwarmProviders.allowPrompts(target.id)
-        // And a JavaScript dialog block (#466), once its load commits.
-        if (source == SubmitSource.User) target.jsDialogGate.allow()
         // Nor is it a load a restore put back over its page (#185 R4-F1).
         if (source == SubmitSource.User) target.userNavigated()
         // And the load it schedules is theirs: its redirects may end in

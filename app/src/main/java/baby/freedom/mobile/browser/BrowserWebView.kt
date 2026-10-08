@@ -3035,9 +3035,11 @@ private fun buildRefreshableWebView(
                 certRefusal.committed(url)
                 // Page info's cleanup mark (#442) lasts this one load.
                 SiteData.committed(state.id, url)
-                // The user's own navigation landing lifts a JavaScript
-                // dialog block (#466).
-                state.jsDialogGate.committed()
+                // The user's own navigation landing — their address,
+                // Reload, Back / Forward, or a link they tapped — lifts a
+                // JavaScript dialog block (#466, R1-F1); any other commit
+                // keeps it.
+                state.jsDialogGate.committed(byUser = (view as? PageWebView)?.commitIsUsersOwn(url) == true)
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -4792,6 +4794,25 @@ internal class PageWebView(context: Context) : WebView(context) {
     // can't: a load would add an entry, and cut off Forward (#149).
     private var usersNavigationIsLoad = false
 
+    // Whether [usersNavigation] is one the user started themselves —
+    // their address, Reload or the bar's Back / Forward, or a link they
+    // tapped — not a load the app makes for its own reasons (a restore, a
+    // retry, a detour of the page's own navigation): what lifts a
+    // JavaScript dialog block once it commits ([commitIsUsersOwn], #466).
+    private var usersNavigationIsUsersOwn = false
+
+    /**
+     * Whether a document committing at [url] is the one the user's own
+     * navigation was awaited at ([usersNavigationIsUsersOwn]): the same
+     * navigation, hop by hop, not just any commit after it. One that
+     * never commits (Stop, a download, a `204`, a same-document step)
+     * has ended [usersNavigation], so a later commit of the page's own —
+     * its `location.reload()` — is never taken for it (R1-M1). Read
+     * before [documentStarted] ends it.
+     */
+    fun commitIsUsersOwn(url: String?): Boolean =
+        usersOwnCommit(usersNavigationIsUsersOwn, usersNavigation, url)
+
     /**
      * The document on screen's channel for re-issuing its own navigation
      * ([PageReissueChannel]); set by the tab. Null: never re-issued.
@@ -4847,6 +4868,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         val reissue = redirectCorrection.isReissue(url)
         redirectCorrection.navigationStarted(url)
         usersNavigationIsLoad = false
+        usersNavigationIsUsersOwn = gesture
         if (gesture) {
             usersNavigation.started(url)
             usersNavigationIsApps = false
@@ -5251,6 +5273,10 @@ internal class PageWebView(context: Context) : WebView(context) {
         // A server this run answered "send none" asks again (#316).
         if (!loadsNothing) ClientCertificates.onBrowserLoad(tabId)
         val usersStep = if (url == null) reloadingByUser else url == HISTORY_BACK_JS || url == HISTORY_FORWARD_JS
+        // A redirect correction's load is a hop of the navigation in
+        // flight: whoever started it still does.
+        val redirectHop = url != null && loadingRedirectCorrection
+        if (!loadsNothing && !redirectHop) usersNavigationIsUsersOwn = (url != null && loadingNamedByUser) || usersStep
         onBrowserInitiatedLoad(url, url != null && loadingNamedByUser, usersStep, url != null && loadingRedirectCorrection)
     }
 
