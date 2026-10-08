@@ -368,6 +368,14 @@ class TabsState(
         val tabId: Long,
         val view: View,
         val callback: WebChromeClient.CustomViewCallback?,
+        /**
+         * The site whose page went fullscreen, as the user reads it
+         * ([permissionOriginDisplay] of the tab's [BrowserState.permissionTop]),
+         * taken when the session starts, so the notice names the page
+         * that asked even if the tab's state moves on (#467). Null for
+         * a page with no site to name (a `data:` page, say).
+         */
+        val site: String? = null,
     )
 
     var fullscreen: Fullscreen? by mutableStateOf(null)
@@ -387,7 +395,7 @@ class TabsState(
             callback?.onCustomViewHidden()
             return
         }
-        fullscreen = Fullscreen(tab.id, view, callback)
+        fullscreen = Fullscreen(tab.id, view, callback, tab.permissionTop?.let(::permissionOriginDisplay))
     }
 
     /**

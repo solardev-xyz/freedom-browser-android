@@ -257,4 +257,8 @@
         <item quantity="one">Tabs, %d open</item>
         <item quantity="other">Tabs, %d open</item>
     </plurals>
+    <!-- HTML5 fullscreen notice (#467): names the page that covered the screen. -->
+    <string name="browser_fullscreen_site">%1$s is full screen</string>
+    <string name="browser_fullscreen_page">This page is full screen</string>
+    <string name="browser_fullscreen_exit">Swipe from the edge or press Back to exit</string>
 </resources>
