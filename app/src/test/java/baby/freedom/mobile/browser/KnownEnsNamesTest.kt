@@ -3,7 +3,9 @@ package baby.freedom.mobile.browser
 import baby.freedom.mobile.ens.EnsTrust
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class KnownEnsNamesTest {
@@ -122,5 +124,40 @@ class KnownEnsNamesTest {
             KnownEnsNames.forgetName(b)
             assertEquals(a, KnownEnsNames.nameFor("aaaa"))
         }
+    }
+
+    @Test
+    fun `a private session's names stay out of the normal registry`() {
+        val private = KnownEnsNames.of(private = true)
+        private.record("bzz://abcdef0123", "secret.eth", EnsTrust.ASSUMED)
+        assertEquals("secret.eth", private.nameFor("abcdef0123"))
+        assertEquals("bzz", private.protocolFor("secret.eth"))
+        assertNull(KnownEnsNames.nameFor("abcdef0123"))
+        assertNull(KnownEnsNames.uriFor("secret.eth"))
+        assertNull(KnownEnsNames.protocolFor("secret.eth"))
+        assertNull(KnownEnsNames.answerFor("secret.eth"))
+        assertSame(KnownEnsNames, KnownEnsNames.of(private = false))
+    }
+
+    @Test
+    fun `a normal name isn't known to a private session either`() {
+        KnownEnsNames.record("bzz://abcdef0123", "public.eth", EnsTrust.ASSUMED)
+        assertNull(KnownEnsNames.of(private = true).nameFor("abcdef0123"))
+        assertNull(KnownEnsNames.of(private = true).uriFor("public.eth"))
+    }
+
+    @Test
+    fun `ending the private session forgets its names, and a late answer lands in the old one`() {
+        val session = KnownEnsNames.of(private = true)
+        session.record("bzz://abcdef0123", "secret.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.privateSessionEnded()
+        val next = KnownEnsNames.of(private = true)
+        assertNotSame(session, next)
+        assertNull(next.uriFor("secret.eth"))
+        assertNull(next.nameFor("abcdef0123"))
+        // A lookup that started in the ended session records into it.
+        session.record("ipfs://bafyold", "late.eth", EnsTrust.ASSUMED)
+        assertNull(next.uriFor("late.eth"))
+        assertNull(KnownEnsNames.uriFor("late.eth"))
     }
 }

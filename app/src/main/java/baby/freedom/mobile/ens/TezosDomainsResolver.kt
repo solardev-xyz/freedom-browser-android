@@ -140,6 +140,14 @@ class TezosDomainsResolver internal constructor(
     private val discoveryCache = ConcurrentHashMap<String, Timed<Discovery>>()
 
     /**
+     * A private session's answers (#464), apart from [resultCache] so a
+     * normal tab's lookup can't tell what a private one asked about;
+     * replaced when the session ends ([privateSessionEnded]).
+     */
+    @Volatile
+    private var privateResults = ConcurrentHashMap<String, Timed<Outcome.Answer>>()
+
+    /**
      * name → resolution in flight, so the submit flow and the request
      * interceptor (and every iframe of a page) asking for the same
      * uncached name share one quorum round. The round runs in its own
@@ -151,14 +159,16 @@ class TezosDomainsResolver internal constructor(
     /**
      * Resolve [rawName] (e.g. `alice.tez`). Throws [CancellationException]
      * if the caller was cancelled, like [EnsResolver.resolveContenthash].
+     * [private]: a private tab's lookup, kept to the private session's
+     * own cache (#464).
      */
-    suspend fun resolve(rawName: String): EnsResult {
+    suspend fun resolve(rawName: String, private: Boolean = false): EnsResult {
         val name = rawName.trim().lowercase()
         if (!isTezosDomainName(name)) {
             // Decided here, no server asked: nothing to cross-check.
             return EnsResult.NotFound(name, "INVALID_NAME", EnsTrust(verified = true))
         }
-        val outcome = resolveOutcome(name)
+        val outcome = if (private) resolvePrivate(name) else resolveOutcome(name)
         return toEnsResult(name, outcome).also { Log.i(TAG, "[$name] → $it") }
     }
 
@@ -176,6 +186,23 @@ class TezosDomainsResolver internal constructor(
         return job.await()
     }
 
+    /**
+     * [resolveOutcome] for a private tab: its own cache, and no sharing a
+     * round with a normal tab's lookup of the name.
+     */
+    private suspend fun resolvePrivate(name: String): Outcome {
+        val cache = privateResults
+        cache[name]?.takeIf { it.fresh(now()) }?.let { return it.value }
+        val outcome = resolveUncached(name, store = false)
+        if (outcome is Outcome.Answer) cache[name] = Timed(outcome, now(), cacheDuration(outcome))
+        return outcome
+    }
+
+    /** The last private tab has closed: forget what its lookups cached (#464). */
+    fun privateSessionEnded() {
+        privateResults = ConcurrentHashMap()
+    }
+
     /** Forget cached answers — one name's, or (with `null`) everything. */
     fun invalidate(name: String? = null) {
         if (name != null) {
@@ -186,7 +213,8 @@ class TezosDomainsResolver internal constructor(
         discoveryCache.clear()
     }
 
-    private suspend fun resolveUncached(name: String): Outcome {
+    /** [store]: keep the answer in [resultCache] (not for a private lookup). */
+    private suspend fun resolveUncached(name: String, store: Boolean = true): Outcome {
         val endpoints = rpcEndpoints.take(3)
         val reachable = settle(endpoints) { fetchHead(it) }
         if (reachable.isEmpty()) return Outcome.Failed(Strings.get(R.string.names_tezos_all_failed))
@@ -329,8 +357,10 @@ class TezosDomainsResolver internal constructor(
             dissentedHosts = legs.filter { it !in winner }.map { hostOf(it.first) } + outliers.map { hostOf(it.endpoint) },
             block = anchorLevel,
         )
-        synchronized(resultCache) {
-            resultCache[name] = Timed(answer, now(), cacheDuration(answer))
+        if (store) {
+            synchronized(resultCache) {
+                resultCache[name] = Timed(answer, now(), cacheDuration(answer))
+            }
         }
         return answer
     }

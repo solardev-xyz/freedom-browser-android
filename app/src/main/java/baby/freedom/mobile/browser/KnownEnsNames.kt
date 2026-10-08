@@ -19,12 +19,21 @@ import java.util.concurrent.ConcurrentHashMap
  * `freedom-browser/src/renderer/lib/state.js`, with the same semantics:
  * in-memory only, session-scoped (cleared when the process dies).
  *
+ * Normal tabs share [KnownEnsNames] itself; private tabs (#86) have a
+ * registry of their own ([of]), dropped when the private session ends
+ * ([privateSessionEnded], #464) — a name a private tab resolved must
+ * not name a hash, badge a page or serve a `<name>.ens.…` origin
+ * instantly in a normal tab afterwards.
+ *
  * TODO (porting §2, IPFS integration): mirror `extractEnsResolutionMetadata`'s
  * CIDv0 → CIDv1 base32 alias so that a subdomain-gateway redirect
  * `http://<Qm…>.ipfs.localhost` → `http://<bafybei…>.ipfs.localhost` still
  * collapses back to `ens://name` in the address bar.
  */
-object KnownEnsNames {
+open class EnsNameRegistry internal constructor(
+    /** A private session's registry (#464): its lookups stay out of the normal session's caches. */
+    val private: Boolean,
+) {
     private val hashToName = ConcurrentHashMap<String, String>()
     private val nameToProtocol = ConcurrentHashMap<String, String>()
     private val nameToUri = ConcurrentHashMap<String, String>()
@@ -176,13 +185,39 @@ object KnownEnsNames {
         releaseStaleRoots(lowerName)
     }
 
-    /** Tests only. */
+    /** Forget every name: a private session ending, or tests. */
     @Synchronized
-    fun clear() {
+    open fun clear() {
         hashToName.clear()
         nameToProtocol.clear()
         nameToUri.clear()
         nameToTrust.clear()
         nameToSeq.clear()
+    }
+}
+
+object KnownEnsNames : EnsNameRegistry(private = false) {
+    /**
+     * The live private session's registry. Replaced, not emptied, when
+     * the session ends: a lookup that was still running then holds the
+     * old one ([of] read when it started) and records into that, never
+     * into the next session's.
+     */
+    @Volatile
+    private var privateSession = EnsNameRegistry(private = true)
+
+    /** The registry a tab's lookups and address bar use: [private] tabs' own, or the normal session's. */
+    fun of(private: Boolean): EnsNameRegistry = if (private) privateSession else this
+
+    /** The last private tab has closed: nothing it resolved is known any more (#464). */
+    fun privateSessionEnded() {
+        privateSession = EnsNameRegistry(private = true)
+    }
+
+    /** Tests only: both sessions. */
+    @Synchronized
+    override fun clear() {
+        super.clear()
+        privateSessionEnded()
     }
 }

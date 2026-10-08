@@ -147,12 +147,7 @@ object Gateways {
     /** A bound on [awaitExternalEndpoints]: a DataStore read takes milliseconds. */
     private const val ENDPOINTS_WAIT_MS = 5_000L
 
-    /**
-     * Shared ENS resolver. One instance so the submit flow and the
-     * request interceptor (which resolves `<name>.ens.…` hosts) share
-     * a cache and never disagree mid-session.
-     */
-    val ensResolver: EnsResolver by lazy {
+    private val ensResolverLazy = lazy {
         // The Myotis light client (#101) is asked first whenever it's
         // ready; its readiness is read per lookup inside the resolver and
         // is deliberately not part of the settings, so a flapping light
@@ -166,6 +161,14 @@ object Gateways {
     }
 
     /**
+     * Shared ENS resolver. One instance so the submit flow and the
+     * request interceptor (which resolves `<name>.ens.…` hosts) share
+     * a cache and never disagree mid-session. Private tabs' lookups
+     * keep to a cache of their own in it (#464).
+     */
+    val ensResolver: EnsResolver by ensResolverLazy
+
+    /**
      * Where the Colibri verifier keeps its sync-committee state (#100).
      * `MainActivity` sets it on start; until then (and in unit tests)
      * the proven tier stays off and names go to the RPC servers.
@@ -177,10 +180,12 @@ object Gateways {
      * Blocking ENS lookup used by the request interceptor. A seam so the
      * instrumented WebView suite can answer for a fixture name without
      * reaching a real RPC; production always goes through [ensResolver].
+     * `private`: a private tab's lookup, kept to its session's own cache
+     * (#464).
      */
     @Volatile
-    internal var ensLookup: (String) -> EnsResult =
-        { name -> runBlocking { ensResolver.resolveContenthash(name) } }
+    internal var ensLookup: (name: String, private: Boolean) -> EnsResult =
+        { name, private -> runBlocking { ensResolver.resolveContenthash(name, private) } }
 
     /**
      * How long a document re-check ([reverifyEnsDocument]) waits for the
@@ -240,11 +245,12 @@ object Gateways {
     /**
      * How long a lookup of a name under these settings may spend on the
      * light client first ([EnsResolver.lightClientWaitFor]); 0 when it
-     * would skip it. A seam for tests.
+     * would skip it. `private`: the lookup is a private tab's (#464). A
+     * seam for tests.
      */
     @Volatile
-    internal var lightClientAllowanceMs: (EnsResolver.Settings, String) -> Long = { settings, name ->
-        ensResolver.lightClientWaitFor(settings, name)
+    internal var lightClientAllowanceMs: (EnsResolver.Settings, String, Boolean) -> Long = { settings, name, private ->
+        ensResolver.lightClientWaitFor(settings, name, private)
     }
 
     /**
@@ -274,8 +280,18 @@ object Gateways {
      * the old endpoints, and pin that answer in its tab and in
      * [KnownEnsNames]. The resolver's own cache is epoch-scoped the same
      * way ([EnsResolver]).
+     *
+     * And by the session's registry [names] (#464): a private tab's
+     * lookup is neither joined by a normal tab's — which would answer it
+     * early — nor does its failure skip a normal tab's wait. A private
+     * session's registry is replaced when the session ends, so the next
+     * one doesn't share with it either.
      */
-    private data class LookupKey(val name: String, val settings: EnsResolver.Settings?)
+    private data class LookupKey(
+        val name: String,
+        val settings: EnsResolver.Settings?,
+        val names: EnsNameRegistry = KnownEnsNames,
+    )
 
     private val lookupsInFlight = ConcurrentHashMap<LookupKey, Deferred<EnsResult>>()
     private val lookupFailedAt = ConcurrentHashMap<LookupKey, Long>()
@@ -315,14 +331,27 @@ object Gateways {
     /** Number of recorded lookup failures (tests). */
     internal fun ensLookupFailureCount(): Int = lookupFailedAt.size
 
-    private fun lookupKey(name: String): LookupKey {
+    private fun lookupKey(name: String, names: EnsNameRegistry): LookupKey {
         val settings = try {
             runBlocking { ensRpcConfig().resolverSettings }
         } catch (e: Exception) {
             null // the resolver will fail the same way; still de-duplicate by name
         }
         latestSettings = settings
-        return LookupKey(name.lowercase(), settings)
+        return LookupKey(name.lowercase(), settings, names)
+    }
+
+    /**
+     * The last private tab has closed (#464): drop every name its
+     * lookups taught the private session — the registry, the resolver's
+     * answers and this side's recent failures — so none of it reaches
+     * the next private session either. Normal tabs never saw any of it.
+     */
+    fun privateSessionEnded() {
+        KnownEnsNames.privateSessionEnded()
+        lookupFailedAt.keys.removeIf { it.names.private }
+        // Not built just to empty: no lookup has run without it.
+        if (ensResolverLazy.isInitialized()) ensResolver.privateSessionEnded()
     }
 
     /**
@@ -345,7 +374,7 @@ object Gateways {
         val job = lookupsInFlight.computeIfAbsent(key) {
             lookupScope.async(start = CoroutineStart.LAZY) {
                 try {
-                    ensLookup(name)
+                    ensLookup(name, key.names.private)
                 } catch (e: Exception) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     EnsResult.Error(name, "PROVIDER_ERROR", e.message.orEmpty(), retryable = true)
@@ -498,15 +527,17 @@ object Gateways {
      *
      * An ENS root is served from the incoming [page]'s pin (a main-frame
      * document that was just checked), then the requesting tab's [pins]
-     * for the page on screen, then the session registry.
+     * for the page on screen, then the session registry — a [private]
+     * tab's own (#464).
      */
     fun gatewayUrlFor(
         root: ContentRoot,
         pathAndQuery: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
+        private: Boolean = false,
     ): String? {
-        val (served, basePath) = servedContentFor(root, pins, page) ?: return null
+        val (served, basePath) = servedContentFor(root, pins, page, private) ?: return null
         // A `.tez` website record may publish a base path
         // (`ipfs://<cid>/site`); ENS contenthashes never carry one.
         val path = if (basePath.isEmpty()) pathAndQuery else basePath.trimEnd('/') + pathAndQuery
@@ -516,7 +547,7 @@ object Gateways {
             is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.key}$path" }
             is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.name}$path" }
             // Only from an ENS [root] whose answer is itself a name.
-            is ContentRoot.Ens -> gatewayUrlFor(served, path)
+            is ContentRoot.Ens -> gatewayUrlFor(served, path, private = private)
         }
     }
 
@@ -527,23 +558,27 @@ object Gateways {
      * none), any other root itself. `null` when the name doesn't resolve.
      * The main-frame IPFS phase line reads it too, so it describes the
      * answer the fetch is actually made from (#179 R5-F1).
+     * [private]: for a private tab, whose session has its own registry
+     * (#464).
      */
     internal fun servedRootFor(
         root: ContentRoot,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
-    ): ContentRoot? = servedContentFor(root, pins, page)?.first
+        private: Boolean = false,
+    ): ContentRoot? = servedContentFor(root, pins, page, private)?.first
 
     /** [servedRootFor] plus the base path its answer carries (`""` but for a `.tez` website record). */
     private fun servedContentFor(
         root: ContentRoot,
         pins: EnsDocumentPins?,
         page: EnsDocumentPins.Page?,
+        private: Boolean,
     ): Pair<ContentRoot, String>? = when (root) {
         is ContentRoot.Ens ->
             (page?.uriFor(root.name) ?: pins?.uriFor(root.name))
                 ?.let { VirtualOrigin.parseContentUrl(it) }
-                ?: resolveEnsContent(root.name)
+                ?: resolveEnsContent(root.name, KnownEnsNames.of(private))
         else -> root to ""
     }
 
@@ -558,19 +593,25 @@ object Gateways {
      * uses the resolver's own TTL cache after the first call. Blocking
      * is fine — the interceptor never runs on the UI thread.
      */
-    internal fun resolveEnsRoot(name: String): ContentRoot? = resolveEnsContent(name)?.first
+    internal fun resolveEnsRoot(name: String, private: Boolean = false): ContentRoot? =
+        resolveEnsContent(name, KnownEnsNames.of(private))?.first
 
-    /** [resolveEnsRoot] plus the base path the resolved URI carries (`""` for ENS). */
-    private fun resolveEnsContent(name: String): Pair<ContentRoot, String>? {
-        KnownEnsNames.uriFor(name)?.let { uri ->
+    /**
+     * [resolveEnsRoot] plus the base path the resolved URI carries (`""` for ENS).
+     * [names]: the session's registry, read before the lookup starts so
+     * a private session ending meanwhile doesn't get its answer recorded
+     * in the next one's (#464).
+     */
+    private fun resolveEnsContent(name: String, names: EnsNameRegistry): Pair<ContentRoot, String>? {
+        names.uriFor(name)?.let { uri ->
             VirtualOrigin.parseContentUrl(uri)?.let { return it }
         }
-        val result = ensLookup(name)
+        val result = ensLookup(name, names.private)
         // One server's word isn't served unasked (#96); the submit flow
         // records what the user let through.
         if (result is EnsResult.Ok && result.trust.verified) {
             val content = VirtualOrigin.parseContentUrl(result.uri) ?: return null
-            KnownEnsNames.record(result.uri, name, result.trust)
+            names.record(result.uri, name, result.trust)
             return content
         }
         return null
@@ -658,24 +699,31 @@ object Gateways {
      * so the caller sends the frame there instead. An unverified one is
      * refused like any other (`ens_unverified`) unless the typed flow
      * already let it through.
+     *
+     * A [private] tab's document reads and updates its private session's
+     * registry and resolver cache, never the normal session's (#464).
      */
     fun reverifyEnsDocument(
         name: String,
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
         assertedProtocol: String? = null,
+        private: Boolean = false,
         onWebRecord: (EnsResult.Ok) -> Unit = {},
     ): String? {
+        // Read once, before the lookup: a private session that ends while
+        // this waits doesn't get the answer recorded in the next one's.
+        val names = KnownEnsNames.of(private)
         // The fallback answer together with how it was checked, from the
         // same source: a document served from it shows *that* check on
         // its shield, not the registry's newer answer's (#97 R3-F1).
         val fallback: Pair<String, EnsTrust?>? =
-            (pins?.lastAnswerWithTrust(name) ?: KnownEnsNames.answerFor(name))
+            (pins?.lastAnswerWithTrust(name) ?: names.answerFor(name))
                 ?.takeIf { VirtualOrigin.parseContentUrl(it.first) != null }
         val last = fallback?.first
         val lastTrust = fallback?.second
         fun lookup(key: LookupKey): EnsResult? {
-            val lightClient = key.settings?.let { lightClientAllowanceMs(it, key.name) } ?: 0L
+            val lightClient = key.settings?.let { lightClientAllowanceMs(it, key.name, private) } ?: 0L
             // With something to fall back on, don't hold the document for
             // the resolver's worst case (see [reverifyDeadlineMs]).
             val deadline = when {
@@ -693,7 +741,7 @@ object Gateways {
             // its own outcome when it ends.
             return lookupWithin(key, name, deadline, recordTimeout = lightClient <= reverifyLightClientShareMs)
         }
-        var key = lookupKey(name)
+        var key = lookupKey(name, names)
         var result = lookup(key)
         // The settings changed while this document waited: that answer
         // came from endpoints the user has since removed (or with
@@ -701,13 +749,13 @@ object Gateways {
         // rather than pin it here and in the registry. Bounded, so a
         // user flipping a switch repeatedly can't hold the document.
         repeat(2) {
-            val now = lookupKey(name)
+            val now = lookupKey(name, names)
             if (now == key) return@repeat
             key = now
             result = lookup(key)
         }
         fun gone(code: String): String {
-            KnownEnsNames.forgetName(name)
+            names.forgetName(name)
             pins?.forgetLastAnswer(name)
             return code
         }
@@ -727,7 +775,7 @@ object Gateways {
                     "ens_wrong_protocol"
                 } else if (!result.trust.verified &&
                     result.uri != pins?.lastAnswerFor(name) &&
-                    result.uri != KnownEnsNames.uriFor(name)
+                    result.uri != names.uriFor(name)
                 ) {
                     // Only one RPC server's word, and not for what this
                     // tab or the session already had — cross-checked
@@ -740,7 +788,7 @@ object Gateways {
                     onWebRecord(result)
                     gone(ENS_WEB_RECORD)
                 } else {
-                    KnownEnsNames.record(result.uri, name, result.trust)
+                    names.record(result.uri, name, result.trust)
                     pins?.pin(name, result.uri, page, result.trust)
                     null
                 }

@@ -1165,13 +1165,13 @@ class DownloadManager private constructor(context: Context) {
         // Only a validator makes a range safe to ask for.
         var offset = if (entry.validator != null) kept else 0L
         var src = openBody(target, userAgent, contentDisposition, refererOrigin, cookies, track,
-            downloadResumeHeaders(offset, entry.validator))
+            downloadResumeHeaders(offset, entry.validator), private = id < 0)
         var answer = resumeAnswer(src.status, offset, src.contentRange, src.length)
         if (answer is ResumeAnswer.AskWhole) {
             // A range it can't use (416, or some other range): the whole file, then.
             src.close()
             offset = 0
-            src = openBody(target, userAgent, contentDisposition, refererOrigin, cookies, track, emptyMap())
+            src = openBody(target, userAgent, contentDisposition, refererOrigin, cookies, track, emptyMap(), private = id < 0)
             answer = resumeAnswer(src.status, 0, src.contentRange, src.length)
             if (answer !is ResumeAnswer.FromStart) {
                 src.close()
@@ -1318,6 +1318,8 @@ class DownloadManager private constructor(context: Context) {
         track: (AutoCloseable) -> Unit,
         /** A resume's `Range` / `If-Range` ([downloadResumeHeaders]); empty for the whole file. */
         rangeHeaders: Map<String, String>,
+        /** A private download (#86): a name resolves in its session's own registry (#464). */
+        private: Boolean = false,
     ): Body = when (target) {
         is DownloadTarget.Data -> {
             // Decoded as it's written: a page's data: URI can be tens of MB.
@@ -1351,7 +1353,7 @@ class DownloadManager private constructor(context: Context) {
             )
         }
         is DownloadTarget.Dweb -> {
-            val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery)
+            val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery, private = private)
                 ?: throw DownloadFailure(
                     if (target.root is ContentRoot.Ens) DownloadNote.of(R.string.library_download_ens_unresolved, target.root.name)
                     else DownloadNote.of(R.string.library_download_node_not_running),

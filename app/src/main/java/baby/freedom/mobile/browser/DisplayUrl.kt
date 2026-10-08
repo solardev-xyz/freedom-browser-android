@@ -42,11 +42,14 @@ object DisplayUrl {
      * by default the session's current answer ([KnownEnsNames]); for
      * the document a tab has on screen, the answer that document was
      * actually served from ([EnsDocumentPins.answerFor], R3-F1).
+     * [names] is the tab's session's registry: a private tab's own
+     * (#464), which is also where a raw hash's name is looked up.
      */
     fun forActualUrl(
         actualUrl: String,
         override: BrowserState.Override?,
         protocolFor: (name: String) -> String? = KnownEnsNames::protocolFor,
+        names: EnsNameRegistry = KnownEnsNames,
     ): String {
         // Only a URL *on* the override's origin: the next character after
         // the base must end it. A bare prefix match would dress a DNS
@@ -60,7 +63,7 @@ object DisplayUrl {
         }
 
         val display = Gateways.toDisplay(actualUrl)
-        return withTransport(applyNamePreservation(display), protocolFor)
+        return withTransport(applyNamePreservation(display, names), protocolFor)
     }
 
     /**
@@ -85,25 +88,25 @@ object DisplayUrl {
         return "$protocol://$display"
     }
 
-    private fun applyNamePreservation(display: String): String {
+    private fun applyNamePreservation(display: String, names: EnsNameRegistry): String {
         bzzRegex.matchEntire(display)?.let { m ->
             val hash = m.groupValues[1]
             val tail = m.groupValues[2]
-            val name = KnownEnsNames.nameFor(hash.lowercase())
+            val name = names.nameFor(hash.lowercase())
             if (name != null) return "bzz://$name$tail"
             return display
         }
         ipfsRegex.matchEntire(display)?.let { m ->
             val cid = m.groupValues[1]
             val tail = m.groupValues[2]
-            val name = KnownEnsNames.nameFor(cid)
+            val name = names.nameFor(cid)
             if (name != null) return "ipfs://$name$tail"
             return display
         }
         ipnsRegex.matchEntire(display)?.let { m ->
             val id = m.groupValues[1]
             val tail = m.groupValues[2]
-            val name = KnownEnsNames.nameFor(id)
+            val name = names.nameFor(id)
             if (name != null) return "ipns://$name$tail"
             return display
         }
