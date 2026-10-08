@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsInput
+import baby.freedom.mobile.ens.EnsNormalize
 
 /**
  * Maps an "actual" URL (the one the WebView physically loaded) to the
@@ -81,11 +82,64 @@ object DisplayUrl {
     fun withTransport(
         display: String,
         protocolFor: (name: String) -> String? = KnownEnsNames::protocolFor,
+    ): String = shownName(withTransportAsGiven(display, protocolFor))
+
+    private fun withTransportAsGiven(
+        display: String,
+        protocolFor: (name: String) -> String?,
     ): String {
         if (display.contains("://")) return display
         val name = EnsInput.parse(display)?.name ?: return display
         val protocol = protocolFor(name) ?: return display
         return "$protocol://$display"
+    }
+
+    /** The schemes a display URL names a name under (`bzz://swarm.eth`). */
+    private val NAME_SCHEMES = setOf("bzz", "ipfs", "ipns", "ens")
+
+    /**
+     * [display] with the name it shows in its safe display form
+     * ([EnsNormalize.tezosDisplay], #465): `pаypal.tez/x` →
+     * `p%D0%B0ypal.tez/x`, so a lookalike `.tez` name reads as one
+     * in the capsule, the edit field and everything else built from the
+     * display URL. Parsing the result ([EnsInput.parse]) gives back the
+     * same name. Anything else comes back unchanged.
+     */
+    fun shownName(display: String): String = respellName(display, EnsNormalize::tezosDisplay)
+
+    /**
+     * [display] spelled the way [shownName] spells it once the ENSIP-15
+     * tables are decoded, whatever it was spelled with before (#490
+     * R1-M2). [shownName] fails closed while the tables are still
+     * decoding at startup, so an honest `café.tez` reads
+     * `caf%C3%A9.tez` for that moment; anything saved from then
+     * (a bookmark, a history row, a download) would keep that spelling
+     * for good. This maps a `.tez` name's `%XX` escapes back
+     * ([EnsNormalize.tezosForm]) and shows it again with the tables
+     * warm, so what is saved doesn't depend on when it was saved.
+     *
+     * Decodes the tables if they aren't yet ([EnsNormalize.warm]): call
+     * it off the main thread, where the address is written to disk.
+     */
+    fun settledName(display: String): String = respellName(display) { name ->
+        if (!name.lowercase().endsWith(".tez")) return@respellName name
+        if (name.all { it.code < 0x80 } && '%' !in name) {
+            return@respellName name
+        }
+        val unicode = EnsNormalize.tezosForm(name) ?: return@respellName name
+        if (!EnsNormalize.isWarm) EnsNormalize.warm()
+        EnsNormalize.tezosDisplay(unicode)
+    }
+
+    /** [display] with the name it names (bare, or after a [NAME_SCHEMES] scheme) passed through [respell]. */
+    private inline fun respellName(display: String, respell: (String) -> String): String {
+        val sep = display.indexOf("://")
+        if (sep >= 0 && display.substring(0, sep).lowercase() !in NAME_SCHEMES) return display
+        val start = if (sep < 0) 0 else sep + 3
+        val end = display.indexOfAny(charArrayOf('/', '?', '#'), start).let { if (it < 0) display.length else it }
+        val name = display.substring(start, end)
+        val shown = respell(name)
+        return if (shown == name) display else display.substring(0, start) + shown + display.substring(end)
     }
 
     private fun applyNamePreservation(display: String, names: EnsNameRegistry): String {

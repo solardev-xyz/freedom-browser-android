@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.ens.EnsInput
+import baby.freedom.mobile.ens.EnsNormalize
 
 /**
  * One spelling per page for bookmarks (#264, #296 R1-F1).
@@ -106,11 +107,24 @@ internal object BookmarkUrls {
         return VirtualOrigin.displayUrlFor(web(virtual) ?: return null)
     }
 
+    /**
+     * Decodes the ENSIP-15 tables first if [url] may name a non-ASCII
+     * `.tez` name (#490 R4-M1): [canonical] spells such a name through
+     * [EnsNormalize.tezosDisplay], which shows it `%XX`-escaped until the
+     * tables are warm, so a key worked out at startup and one worked out
+     * a moment later would differ for the same page. Call it off the
+     * main thread.
+     */
     fun key(url: String): String {
+        if (!EnsNormalize.isWarm && mayNameNonAsciiTez(url)) EnsNormalize.warm()
         val c = canonical(url)
         EnsInput.parseConstrained(c)?.let { return it.name + tail(it.suffix) }
         return c
     }
+
+    /** Could [url] hold a `.tez` name [EnsNormalize.tezosDisplay] spells by the tables' state? */
+    private fun mayNameNonAsciiTez(url: String): Boolean =
+        url.contains(".tez", ignoreCase = true) && url.any { it.code >= 0x80 || it == '%' }
 
     /**
      * A dweb address's path, query and fragment: none for the root, a

@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteException
 import android.util.Log
 import androidx.room.withTransaction
 import baby.freedom.mobile.browser.BookmarkUrls
+import baby.freedom.mobile.browser.DisplayUrl
 import baby.freedom.mobile.browser.typedForm
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -16,6 +17,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -89,9 +92,13 @@ class BrowsingRepository internal constructor(
     fun recordVisit(url: String, title: String) {
         if (!isRecordable(url)) return
         scope.launch {
+            val settled = DisplayUrl.settledName(url)
+            // Settling can respell it longer (`%XX`); keep the table's cap.
+            if (!isRecordable(settled)) return@launch
             db.history().insert(
                 HistoryEntry(
-                    url = url,
+                    // Not the startup-only `%XX` spelling of a `.tez` name (#490 R1-M2).
+                    url = settled,
                     title = storedTitle(title),
                     visitedAt = System.currentTimeMillis(),
                 ),
@@ -174,7 +181,10 @@ class BrowsingRepository internal constructor(
     fun bookmark(address: String, title: String): Deferred<Bookmarked?> = scope.async {
         // `page#` is saved as `page` (#418): the `#` names no place.
         if (!isBookmarkable(address)) return@async null
-        val url = PageVisits.withoutEmptyFragment(address)
+        // Spelled the same whenever it is saved, also right after startup (#490 R1-M2).
+        val url = DisplayUrl.settledName(PageVisits.withoutEmptyFragment(address))
+        // Settling can respell it longer (`%XX`); keep the table's cap (#461).
+        if (!isRecordable(url)) return@async null
         try {
             db.withTransaction {
                 bookmarkFor(url)?.let { Bookmarked(it.id, added = false) }
@@ -212,6 +222,9 @@ class BrowsingRepository internal constructor(
      * the dialog mid-save can't lose it.
      */
     fun editBookmark(id: Long, title: String, url: String): Deferred<BookmarkEditResult> = scope.async {
+        // Spelled the same whenever it is saved (#490 R1-M2).
+        @Suppress("NAME_SHADOWING")
+        val url = DisplayUrl.settledName(url)
         // `bookmarkAddress` already refuses an address this long; this
         // keeps the table safe whoever calls (#461).
         if (url.length > MAX_URL_CHARS) return@async BookmarkEditResult.Failed
@@ -343,9 +356,14 @@ class BrowsingRepository internal constructor(
      * overwrite a real site's icon with an internal page's blank one.
      */
     fun storeFavicon(pageUrl: String, data: ByteArray) {
-        val origin = FaviconOrigin.from(pageUrl) ?: return
         if (data.isEmpty()) return
         scope.launch {
+            // Keyed on the settled spelling, as history rows are
+            // (#490 R3-M3): a `café.tez` page shown `caf%C3%A9.tez`
+            // before warm-up must still file its icon under the name its
+            // history row carries. settledName may decode the ENSIP-15
+            // tables, so off the main thread.
+            val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl)) ?: return@launch
             db.favicons().upsert(
                 FaviconEntry(
                     origin = origin,
@@ -363,8 +381,13 @@ class BrowsingRepository internal constructor(
      * `HomeScreen.kt` for a Compose-side remember/decode pattern.
      */
     fun favicon(pageUrl: String): Flow<ByteArray?> {
-        val origin = FaviconOrigin.from(pageUrl) ?: return flowOf(null)
-        return db.favicons().get(origin)
+        // Settled like [storeFavicon]'s key (#490 R3-M3), so a page read
+        // by its shown spelling finds its icon either side of warm-up.
+        if (FaviconOrigin.from(pageUrl) == null) return flowOf(null)
+        return flow {
+            val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl))
+            if (origin == null) emit(null) else emitAll(db.favicons().get(origin))
+        }.flowOn(Dispatchers.IO)
     }
 
     fun clearFavicons() {

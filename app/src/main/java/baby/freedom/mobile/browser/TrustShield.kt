@@ -35,6 +35,7 @@ import androidx.annotation.StringRes
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.EnsInput
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.ens.EnsTrust
 import baby.freedom.mobile.ens.NameSystem
 import baby.freedom.mobile.l10n.Strings
@@ -125,25 +126,31 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     private val loneServer: String
         get() = trust.shownAgreed.singleOrNull() ?: Strings.get(R.string.names_trust_one_rpc_server)
 
+    /**
+     * [name] as these sentences print it: a lookalike `.tez` name as
+     * `%XX`-escaped, the way the address bar shows it (#465).
+     */
+    val shown: String get() = EnsNormalize.tezosDisplay(name)
+
     /** One sentence on what the tier means for this answer. */
     val summary: String
         get() = when (tier) {
             TrustTier.Proven -> if (trust.lightClient) {
-                Strings.get(R.string.names_summary_light_client, system, name, block)
+                Strings.get(R.string.names_summary_light_client, system, shown, block)
             } else if (trust.offchain) {
-                Strings.get(R.string.names_summary_proven_offchain, name, system, prover, block)
+                Strings.get(R.string.names_summary_proven_offchain, shown, system, prover, block)
             } else {
-                Strings.get(R.string.names_summary_proven, prover, name, system, block)
+                Strings.get(R.string.names_summary_proven, prover, shown, system, block)
             }
             TrustTier.Verified -> {
                 val n = trust.agreed.size
                 if (n >= 2) {
-                    Strings.plural(R.plurals.names_summary_verified, n, n, system, name, block)
+                    Strings.plural(R.plurals.names_summary_verified, n, n, system, shown, block)
                 } else {
-                    Strings.get(R.string.names_summary_verified_servers, system, name, block)
+                    Strings.get(R.string.names_summary_verified_servers, system, shown, block)
                 }
             }
-            TrustTier.Unverified -> Strings.get(R.string.names_summary_unverified, loneServer, name, system)
+            TrustTier.Unverified -> Strings.get(R.string.names_summary_unverified, loneServer, shown, system)
         }
 
     /**
@@ -154,21 +161,21 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     val recipientSummary: String
         get() = when (tier) {
             TrustTier.Proven -> if (trust.lightClient) {
-                Strings.get(R.string.names_recipient_light_client, name, system, block)
+                Strings.get(R.string.names_recipient_light_client, shown, system, block)
             } else if (trust.offchain) {
-                Strings.get(R.string.names_recipient_proven_offchain, name, prover, block)
+                Strings.get(R.string.names_recipient_proven_offchain, shown, prover, block)
             } else {
-                Strings.get(R.string.names_recipient_proven, prover, name, system, block)
+                Strings.get(R.string.names_recipient_proven, prover, shown, system, block)
             }
             TrustTier.Verified -> {
                 val n = trust.agreed.size
                 if (n >= 2) {
-                    Strings.plural(R.plurals.names_recipient_verified, n, n, name, block)
+                    Strings.plural(R.plurals.names_recipient_verified, n, n, shown, block)
                 } else {
-                    Strings.get(R.string.names_recipient_verified_servers, name, block)
+                    Strings.get(R.string.names_recipient_verified_servers, shown, block)
                 }
             }
-            TrustTier.Unverified -> Strings.get(R.string.names_recipient_unverified, loneServer, name)
+            TrustTier.Unverified -> Strings.get(R.string.names_recipient_unverified, loneServer, shown)
         }
 }
 
@@ -303,7 +310,8 @@ internal fun TrustDetailsDialog(
 internal fun TrustFacts(trust: NameTrust) {
     val answer = trust.answer
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        TrustFact(stringResource(R.string.names_fact_name), trust.name)
+        // The shown form, as in the capsule and [NameTrust.summary] (#490 R1-F1).
+        TrustFact(stringResource(R.string.names_fact_name), trust.shown)
         if (answer != null) TrustFact(stringResource(R.string.names_fact_resolves_to), answer)
         TrustFact(
             stringResource(R.string.names_fact_block),
