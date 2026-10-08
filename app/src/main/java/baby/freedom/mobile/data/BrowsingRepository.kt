@@ -38,6 +38,17 @@ class BrowsingRepository internal constructor(
 ) {
     private val scope = writeScope()
 
+    /** Keeps a visit or icon asked for before a history delete from landing after it (#480 R1-M1). */
+    private val historyGate = HistoryWriteGate()
+
+    /**
+     * A ticket for [storeFavicon]/[recordVisit]: a write carrying one
+     * taken before a later history delete is dropped. The browser takes
+     * one when a page's load starts, so an icon that page reports late
+     * can't bring the site back after Delete browsing data.
+     */
+    fun historyTicket(): Long = historyGate.ticket()
+
     init {
         // One-time cleanup for installs that predate [isRecordable]
         // rejecting `about:*` — earlier builds wrote `about:blank`
@@ -88,23 +99,27 @@ class BrowsingRepository internal constructor(
      * Record a page visit. No-ops for empty URLs, `about:*`, `data:*`, and
      * `javascript:*` — we don't want internal bookkeeping noise or script
      * evaluations to show up in the user's history. Keeps only the newest
-     * [MAX_HISTORY_VISITS] visits (#473).
+     * [MAX_HISTORY_VISITS] visits (#473). A visit asked for before a
+     * history delete ([ticket], see [historyTicket]) that hasn't landed
+     * by then is dropped.
      */
-    fun recordVisit(url: String, title: String) {
+    fun recordVisit(url: String, title: String, ticket: Long = historyTicket()) {
         if (!isRecordable(url)) return
         scope.launch {
             val settled = DisplayUrl.settledName(url)
             // Settling can respell it longer (`%XX`); keep the table's cap.
             if (!isRecordable(settled)) return@launch
-            db.history().insertKeeping(
-                HistoryEntry(
-                    // Not the startup-only `%XX` spelling of a `.tez` name (#490 R1-M2).
-                    url = settled,
-                    title = storedTitle(title),
-                    visitedAt = System.currentTimeMillis(),
-                ),
-                keep = MAX_HISTORY_VISITS,
-            )
+            historyGate.write(ticket) {
+                db.history().insertKeeping(
+                    HistoryEntry(
+                        // Not the startup-only `%XX` spelling of a `.tez` name (#490 R1-M2).
+                        url = settled,
+                        title = storedTitle(title),
+                        visitedAt = System.currentTimeMillis(),
+                    ),
+                    keep = MAX_HISTORY_VISITS,
+                )
+            }
         }
     }
 
@@ -294,7 +309,8 @@ class BrowsingRepository internal constructor(
     }
 
     fun clearHistory() {
-        scope.launch { db.history().clear() }
+        historyGate.revoke()
+        scope.launch { historyGate.forget { db.history().clear() } }
     }
 
     /**
@@ -309,27 +325,32 @@ class BrowsingRepository internal constructor(
      * less) deletes every one, as [clearHistory] does. The favicon cache
      * goes with them for the same range ([faviconsToForget], #480): it
      * lists every site visited and when, so it is history too. A
-     * bookmarked site keeps its icon, without the time.
+     * bookmarked site keeps its icon, without the time. A visit or icon
+     * asked for before this call and not yet written is dropped, not
+     * written after it ([HistoryWriteGate], #480 R1-M1).
      */
     fun deleteHistorySince(since: Long) {
-        scope.launch {
-            try {
-                if (since <= 0L) db.history().clear() else db.history().deleteSince(since)
-            } catch (e: SQLiteException) {
-                Log.w(TAG, "deleteHistorySince: ${e.message}")
+        historyGate.revoke()
+        scope.launch { historyGate.forget { forgetHistorySince(since) } }
+    }
+
+    private suspend fun forgetHistorySince(since: Long) {
+        try {
+            if (since <= 0L) db.history().clear() else db.history().deleteSince(since)
+        } catch (e: SQLiteException) {
+            Log.w(TAG, "deleteHistorySince: ${e.message}")
+        }
+        try {
+            db.withTransaction {
+                // Keyed as [favicon] reads a bookmark's icon.
+                val kept = db.bookmarks().allOnce()
+                    .mapNotNullTo(HashSet()) { FaviconOrigin.from(DisplayUrl.settledName(it.url)) }
+                val forget = faviconsToForget(db.favicons().stampsSince(since.coerceAtLeast(0L)), since, kept)
+                forget.delete.forEach { db.favicons().delete(it) }
+                forget.undate.forEach { db.favicons().undate(it) }
             }
-            try {
-                db.withTransaction {
-                    // Keyed as [favicon] reads a bookmark's icon.
-                    val kept = db.bookmarks().allOnce()
-                        .mapNotNullTo(HashSet()) { FaviconOrigin.from(DisplayUrl.settledName(it.url)) }
-                    val forget = faviconsToForget(db.favicons().stampsSince(since.coerceAtLeast(0L)), since, kept)
-                    forget.delete.forEach { db.favicons().delete(it) }
-                    forget.undate.forEach { db.favicons().undate(it) }
-                }
-            } catch (e: SQLiteException) {
-                Log.w(TAG, "deleteHistorySince: ${e.message}")
-            }
+        } catch (e: SQLiteException) {
+            Log.w(TAG, "deleteHistorySince: ${e.message}")
         }
     }
 
@@ -373,7 +394,7 @@ class BrowsingRepository internal constructor(
      * (`about:blank`, `data:`, `javascript:`, etc.) so we don't
      * overwrite a real site's icon with an internal page's blank one.
      */
-    fun storeFavicon(pageUrl: String, data: ByteArray) {
+    fun storeFavicon(pageUrl: String, data: ByteArray, ticket: Long = historyTicket()) {
         if (data.isEmpty()) return
         scope.launch {
             // Keyed on the settled spelling, as history rows are
@@ -382,13 +403,16 @@ class BrowsingRepository internal constructor(
             // history row carries. settledName may decode the ENSIP-15
             // tables, so off the main thread.
             val origin = FaviconOrigin.from(DisplayUrl.settledName(pageUrl)) ?: return@launch
-            db.favicons().upsert(
-                FaviconEntry(
-                    origin = origin,
-                    data = data,
-                    updatedAt = System.currentTimeMillis(),
-                ),
-            )
+            // Not for a page loaded before a history delete (#480 R1-M1).
+            historyGate.write(ticket) {
+                db.favicons().upsert(
+                    FaviconEntry(
+                        origin = origin,
+                        data = data,
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }
         }
     }
 
@@ -409,7 +433,8 @@ class BrowsingRepository internal constructor(
     }
 
     fun clearFavicons() {
-        scope.launch { db.favicons().clear() }
+        historyGate.revoke()
+        scope.launch { historyGate.forget { db.favicons().clear() } }
     }
 
     companion object {

@@ -1731,6 +1731,11 @@ private fun buildRefreshableWebView(
     // belongs to.
     var lastLoadedDisplayUrl: String? = null
 
+    // [BrowsingRepository.historyTicket] from when that page's load
+    // started: an icon it reports after a Delete browsing data asked
+    // for since is dropped, not stored (#480 R1-M1).
+    var lastLoadedTicket: Long = repo.historyTicket()
+
     // The ENS roots this tab's documents were served from, so their
     // subresources don't follow another tab's newer answer (#99).
     val ensPins = EnsDocumentPins()
@@ -3347,6 +3352,7 @@ private fun buildRefreshableWebView(
                     val uiDisplay = ErrorPage.displayUrlFor(url) ?: display
                     state.url = uiDisplay
                     lastLoadedDisplayUrl = display
+                    lastLoadedTicket = repo.historyTicket()
                     // Commit the address *here*, at navigation commit —
                     // not in `onPageFinished`. The new document starts
                     // painting long before its load event fires, and a
@@ -4575,7 +4581,7 @@ private fun buildRefreshableWebView(
                 // cache is a list of sites visited.
                 if (state.private) return
                 val bytes = encodePngBytes(icon) ?: return
-                repo.storeFavicon(display, bytes)
+                repo.storeFavicon(display, bytes, lastLoadedTicket)
             }
         }
     }
