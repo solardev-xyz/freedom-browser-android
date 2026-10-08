@@ -102,4 +102,19 @@ class AddressFieldTextTest {
         // A short query is never swapped.
         assertEquals("example.com", AddressFieldText.picked("example.com", "example.com "))
     }
+
+    @Test
+    fun `a row is laid out with at most its head, ellipsis marking the cut`() {
+        val row = AddressFieldText.row(huge)
+        assertEquals(AddressFieldText.MAX_ROW_CHARS, row.length)
+        assertEquals(huge.take(AddressFieldText.MAX_ROW_CHARS - 1) + "…", row)
+        // Text within the bound is left as it is.
+        val atBound = "a".repeat(AddressFieldText.MAX_ROW_CHARS)
+        assertEquals(atBound, AddressFieldText.row(atBound))
+        assertEquals("", AddressFieldText.row(""))
+        // The cut never splits a surrogate pair.
+        val emoji = "a".repeat(AddressFieldText.MAX_ROW_CHARS - 2) + "😀".repeat(10)
+        val cut = AddressFieldText.row(emoji)
+        assertEquals(false, Character.isHighSurrogate(cut[cut.length - 2]))
+    }
 }

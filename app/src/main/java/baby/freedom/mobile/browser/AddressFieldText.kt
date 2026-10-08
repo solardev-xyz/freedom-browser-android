@@ -66,6 +66,21 @@ internal object AddressFieldText {
     fun picked(pick: String, fullText: String): String =
         if (fullText.length > MAX_CHARS && pick == shown(fullText).trim()) fullText.trim() else pick
 
+    /**
+     * The most a one- or two-line row (a suggestion's title and address,
+     * a tab switcher card's title) is laid out with. Such a row shows its
+     * text's head and ellipsises the rest, but `Text` still breaks the
+     * whole string into lines first: an open tab on a 2 MiB address
+     * blocked the main thread in `LineBreaker` as soon as a typed letter
+     * matched it (#517 R3-F1). 1 KiB is several full lines even on a
+     * landscape tablet, so the ellipsis falls where it would have anyway.
+     */
+    const val MAX_ROW_CHARS = 1024
+
+    /** [text] as a row shows it: its head, within [MAX_ROW_CHARS], ellipsis marking a cut. */
+    fun row(text: String): String =
+        if (text.length <= MAX_ROW_CHARS) text else cut(text, MAX_ROW_CHARS - 1) + ELLIPSIS
+
     /** [text]'s first [max] chars, never ending on half a surrogate pair. */
     private fun cut(text: String, max: Int): String {
         var end = max
