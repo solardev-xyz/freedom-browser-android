@@ -516,6 +516,9 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
+          # GitHub's default shell is `bash -e` without pipefail: a failing
+          # `apksigner verify` piped into grep would otherwise pass.
+          set -o pipefail
           bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
           echo "build-tools: $bt"
           VERSION="${GITHUB_REF_NAME:-manual}"
