@@ -220,10 +220,23 @@ fun permissionOriginKey(raw: String?): String? {
  * minted by an opaque origin, still has none, and nor does a content
  * gateway's own origin ([sitePermissionOriginKey]).
  */
-fun documentPermissionOrigin(url: String?): String? {
+fun documentPermissionOrigin(url: String?): String? =
+    documentOrigin(url)?.takeUnless(::isLoopbackGatewayOrigin)
+
+/**
+ * The origin of a top-level document at [url] as its storage is keyed:
+ * [permissionOriginKey], with a `blob:` document taking its creator's
+ * origin ([documentPermissionOrigin]). Unlike that, a content gateway's
+ * own origin ([isLoopbackGatewayOrigin]) is kept: it can't hold a
+ * permission or a provider, but its pages still write cookies and
+ * storage there, so Page info's **Site data** has to count and delete
+ * them (#457 R5-M1). That data is shared by every root loaded through
+ * the gateway, the way its origin is.
+ */
+fun documentOrigin(url: String?): String? {
     val s = url?.trim().orEmpty()
     val inner = if (s.startsWith("blob:", ignoreCase = true)) s.substring(5) else s
-    return sitePermissionOriginKey(inner)
+    return permissionOriginKey(inner)
 }
 
 /**

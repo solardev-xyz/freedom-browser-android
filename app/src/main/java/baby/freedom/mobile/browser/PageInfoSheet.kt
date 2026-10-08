@@ -540,7 +540,7 @@ internal object SiteData {
 
     private const val CLEANUP_POLL_MS = 100L
 
-    /** Tab id → the origin ([documentPermissionOrigin]) of the document it last committed. */
+    /** Tab id → the origin ([documentOrigin]) of the document it last committed. */
     private val committedOrigins = ConcurrentHashMap<Long, String>()
 
     /**
@@ -551,9 +551,11 @@ internal object SiteData {
     fun committed(tabId: Long, url: String?) {
         cleanups.remove(tabId)?.outcome = Outcome.COMMITTED
         // A blob: document's is its creator's, as the page's own
-        // [BrowserState.permissionOrigin] is, so a Delete from one still
-        // finds the tab on the site and reloads it (R1-M3).
-        val origin = documentPermissionOrigin(url)
+        // [BrowserState.siteOrigin] is, so a Delete from one still
+        // finds the tab on the site and reloads it (R1-M3). A content
+        // gateway's own origin is kept: it holds no permission, but its
+        // data is there to delete (#457 R5-M1).
+        val origin = documentOrigin(url)
         if (origin == null) committedOrigins.remove(tabId) else committedOrigins[tabId] = origin
     }
 

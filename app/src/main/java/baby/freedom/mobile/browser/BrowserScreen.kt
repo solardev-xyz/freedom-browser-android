@@ -920,13 +920,17 @@ fun BrowserScreen(
     val sheetTarget = sitePermissionsSheet?.takeIf { t ->
         t.tabId == state.id && t.origin == pageOrigin && t.doc == pageDocument?.doc
     }
-    // Page info (#442), from the address bar's badge: pinned the same way.
+    // Page info (#442), from the address bar's badge: pinned the same
+    // way, to the site its Site data is about ([BrowserState.siteDataOrigin]):
+    // a content gateway's own origin holds no permission but does hold
+    // data (#457 R5-M1).
+    val pageSiteOrigin = state.siteDataOrigin
     var pageInfoSheet by remember { mutableStateOf<PageSheetTarget?>(null) }
     val openPageInfo: () -> Unit = {
-        pageInfoSheet = PageSheetTarget(state.id, pageOrigin, pageDocument?.doc)
+        pageInfoSheet = PageSheetTarget(state.id, pageSiteOrigin, pageDocument?.doc)
     }
     val pageInfoTarget = pageInfoSheet?.takeIf { t ->
-        t.tabId == state.id && t.origin == pageOrigin && t.doc == pageDocument?.doc
+        t.tabId == state.id && t.origin == pageSiteOrigin && t.doc == pageDocument?.doc
     }
 
     // IPFS load progress (#94): while the active tab is busy on content

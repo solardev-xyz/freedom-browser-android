@@ -892,6 +892,24 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The document on screen's own origin ([documentOrigin]): what Page
+     * info's **Site data** counts and deletes. The same as
+     * [permissionOrigin], except on a content gateway's own origin,
+     * which holds no permission but does hold the data its pages wrote
+     * (#457 R5-M1). Set and cleared with [permissionOrigin].
+     */
+    var siteOrigin: String? by mutableStateOf<String?>(null)
+        internal set
+
+    /**
+     * The site Page info's **Site data** is about: the committed
+     * [siteOrigin], or, for a popup's own blank document, the site it
+     * inherited from its opener ([permissionTop]).
+     */
+    val siteDataOrigin: String?
+        get() = siteOrigin ?: permissionTop
+
+    /**
      * Whether the page area stops above the bottom chrome for the
      * document on screen (#66). Set by the tab's WebView from its page's
      * bottom-nav detector (see [BottomChromeSlot]); back to overlay on
