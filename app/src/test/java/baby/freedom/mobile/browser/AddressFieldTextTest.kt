@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -69,12 +70,36 @@ class AddressFieldTextTest {
     }
 
     @Test
-    fun `a 2 MB paste is cut to the bound with its selection clamped`() {
+    fun `a 2 MB paste is shortened to the bound with an ellipsis, cursor at its end`() {
         val pasted = TextFieldValue(huge, TextRange(huge.length), TextRange(0, huge.length))
         val capped = AddressFieldText.capped(pasted)
         assertEquals(max, capped.text.length)
-        assertEquals(huge.substring(0, max), capped.text)
+        assertEquals(AddressFieldText.shown(huge), capped.text)
+        assertTrue(capped.text.endsWith("…"))
         assertEquals(TextRange(max), capped.selection)
-        assertEquals(TextRange(0, max), capped.composition)
+        assertNull(capped.composition)
+    }
+
+    @Test
+    fun `Go on a shortened paste or fill submits the whole pasted text`() {
+        // The caller keeps the edit's whole text as what the field stands for.
+        val capped = AddressFieldText.capped(TextFieldValue(huge, TextRange(huge.length)))
+        assertEquals(huge, AddressFieldText.submitted(capped.text, huge))
+        // Edited after the paste, Go submits the edit.
+        val edited = capped.text.dropLast(1)
+        assertEquals(edited, AddressFieldText.submitted(edited, huge))
+    }
+
+    @Test
+    fun `the Go to address row for a shortened field submits the whole text`() {
+        val goRow = addressActions(AddressFieldText.shown(huge), "https://s.example/?q=%s")
+            .filterIsInstance<AddressAction.Go>().single().submitText
+        assertEquals(huge, AddressFieldText.picked(goRow, huge))
+        // Leading spaces the row trims are trimmed from the whole text too.
+        assertEquals(huge, AddressFieldText.picked(AddressFieldText.shown("  $huge").trim(), "  $huge"))
+        // Any other row is submitted as it is.
+        assertEquals("https://h.example/", AddressFieldText.picked("https://h.example/", huge))
+        // A short query is never swapped.
+        assertEquals("example.com", AddressFieldText.picked("example.com", "example.com "))
     }
 }

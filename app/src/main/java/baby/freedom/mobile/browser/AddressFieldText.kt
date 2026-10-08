@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 
 /**
@@ -16,8 +17,11 @@ import androidx.compose.ui.text.input.TextFieldValue
  *
  * Nothing is lost by that. Go on the unedited field submits the whole
  * address ([submitted]), and Copy / Share on the capsule act on the tab's
- * address, not on the field. Only an edit works on the shortened text,
- * because that is the text the user is editing.
+ * address, not on the field. A paste or suggestion fill past the bound is
+ * shortened the same way, ellipsis and all ([capped]), and Go — or the
+ * suggestions' "Go to address" row ([picked]) — still submits the whole
+ * text. Only an edit works on the shortened text, because that is the
+ * text the user is editing.
  *
  * 8 KiB, the same bound saved tabs keep ([TabsState.MAX_SAVED_ADDRESS]),
  * is about 200,000 px of ordinary URL text: far inside the limit even for
@@ -42,12 +46,25 @@ internal object AddressFieldText {
 
     /**
      * An edit (a paste, a suggestion fill) kept within [MAX_CHARS], so a
-     * pasted 2 MB string can't take the field past the limit either. The
-     * selection is clamped to the kept text by [TextFieldValue] itself.
+     * pasted 2 MB string can't take the field past the limit either. A
+     * longer edit is shortened as [shown] shortens an address — its head and
+     * an ellipsis, so the cut is visible — with the cursor at its end. The
+     * caller keeps the edit's whole text and hands it to [submitted] and
+     * [picked], so Go submits what was pasted or picked, not the cut.
      */
-    fun capped(value: TextFieldValue): TextFieldValue =
-        if (value.text.length <= MAX_CHARS) value
-        else TextFieldValue(cut(value.text, MAX_CHARS), value.selection, value.composition)
+    fun capped(value: TextFieldValue): TextFieldValue {
+        if (value.text.length <= MAX_CHARS) return value
+        val text = shown(value.text)
+        return TextFieldValue(text, TextRange(text.length))
+    }
+
+    /**
+     * What a suggestion row's [pick] submits while the field stands for
+     * [fullText]: the whole text when the pick is the "Go to address" row
+     * for the field's shortened form (which the row trims), else the pick.
+     */
+    fun picked(pick: String, fullText: String): String =
+        if (fullText.length > MAX_CHARS && pick == shown(fullText).trim()) fullText.trim() else pick
 
     /** [text]'s first [max] chars, never ending on half a surrogate pair. */
     private fun cut(text: String, max: Int): String {
