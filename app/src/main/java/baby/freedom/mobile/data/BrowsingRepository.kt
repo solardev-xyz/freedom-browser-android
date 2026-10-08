@@ -306,12 +306,27 @@ class BrowsingRepository internal constructor(
 
     /**
      * Delete the visits recorded at or after [since] (epoch ms); 0 (or
-     * less) deletes every one, as [clearHistory] does.
+     * less) deletes every one, as [clearHistory] does. The favicon cache
+     * goes with them for the same range ([faviconsToForget], #480): it
+     * lists every site visited and when, so it is history too. A
+     * bookmarked site keeps its icon, without the time.
      */
     fun deleteHistorySince(since: Long) {
         scope.launch {
             try {
                 if (since <= 0L) db.history().clear() else db.history().deleteSince(since)
+            } catch (e: SQLiteException) {
+                Log.w(TAG, "deleteHistorySince: ${e.message}")
+            }
+            try {
+                db.withTransaction {
+                    // Keyed as [favicon] reads a bookmark's icon.
+                    val kept = db.bookmarks().allOnce()
+                        .mapNotNullTo(HashSet()) { FaviconOrigin.from(DisplayUrl.settledName(it.url)) }
+                    val forget = faviconsToForget(db.favicons().stampsSince(since.coerceAtLeast(0L)), since, kept)
+                    forget.delete.forEach { db.favicons().delete(it) }
+                    forget.undate.forEach { db.favicons().undate(it) }
+                }
             } catch (e: SQLiteException) {
                 Log.w(TAG, "deleteHistorySince: ${e.message}")
             }

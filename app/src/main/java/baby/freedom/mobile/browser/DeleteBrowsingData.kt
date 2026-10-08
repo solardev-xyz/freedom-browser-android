@@ -268,6 +268,7 @@ internal fun DeleteBrowsingDataPage(
                         icon = Icons.Filled.History,
                         title = stringResource(R.string.delete_data_history),
                         subtitle = historyCount?.let(::historyCountLine) ?: "",
+                        detail = stringResource(R.string.delete_data_history_detail),
                         checked = choice.history,
                         onCheckedChange = { choice = choice.copy(history = it) },
                     )
