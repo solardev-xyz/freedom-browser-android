@@ -104,9 +104,11 @@ internal object EthSigning {
         private var first = true
 
         init {
-            rekey(v + byteArrayOf(0) + key + h1)
+            // The parts go into the HMAC one by one: `v + 0x00 + key + h1`
+            // built with `+` leaves unzeroed intermediates holding the key (#477).
+            rekey(v, ZERO, key, h1)
             step()
-            rekey(v + byteArrayOf(1) + key + h1)
+            rekey(v, ONE, key, h1)
             step()
         }
 
@@ -114,13 +116,13 @@ internal object EthSigning {
         fun next(): ByteArray {
             while (true) {
                 if (!first) {
-                    rekey(v + byteArrayOf(0))
+                    rekey(v, ZERO)
                     step()
                 }
                 first = false
                 step()
                 val candidate = BigInteger(1, v)
-                if (candidate.signum() > 0 && candidate < N) return v.copyOf()
+                if (candidate.signum() > 0 && candidate < N) return HdKeys.scratch(v.copyOf())
             }
         }
 
@@ -129,10 +131,9 @@ internal object EthSigning {
             v.fill(0)
         }
 
-        /** K = HMAC_K(data); [data] (a fresh concatenation) and the old K are zeroed. */
-        private fun rekey(data: ByteArray) {
-            val next = hmac(k, data)
-            data.fill(0)
+        /** K = HMAC_K(parts in order); the old K is zeroed. */
+        private fun rekey(vararg parts: ByteArray) {
+            val next = hmac(k, *parts)
             k.fill(0)
             k = next
         }
@@ -144,10 +145,16 @@ internal object EthSigning {
             v = next
         }
 
-        private fun hmac(key: ByteArray, data: ByteArray): ByteArray {
+        private fun hmac(key: ByteArray, vararg parts: ByteArray): ByteArray {
             val mac = Mac.getInstance("HmacSHA256")
             mac.init(SecretKeySpec(key, "HmacSHA256"))
-            return mac.doFinal(data)
+            for (part in parts) mac.update(part)
+            return HdKeys.scratch(mac.doFinal())
+        }
+
+        private companion object {
+            val ZERO = byteArrayOf(0)
+            val ONE = byteArrayOf(1)
         }
     }
 }
