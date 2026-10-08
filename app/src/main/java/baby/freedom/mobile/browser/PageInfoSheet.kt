@@ -155,6 +155,35 @@ internal fun pageConnectionFor(url: String, errorPage: Boolean, protocol: Protoc
 }
 
 /**
+ * The external IPFS gateway (#125) the page on screen is fetched
+ * through — [externalIpfsBase] as Settings has it (`https://ipfs.io`) —
+ * or null where this device's node serves it, or the page isn't
+ * IPFS content. Such a gateway is one server whose answers aren't
+ * checked against the CID, so Page info must not call the page
+ * peer-to-peer, and a name's shield only covers which CID the name
+ * points to (#479).
+ *
+ * The current setting, not the one the document loaded under: a page
+ * loaded through a gateway is reloaded when the gateway is switched off
+ * ([UnverifiedOrigins]), and one that loaded from this device's node
+ * fetches everything after a switch to a gateway from that gateway.
+ */
+internal fun unverifiedIpfsGatewayFor(
+    connection: PageConnection?,
+    url: String,
+    externalIpfsBase: String,
+): String? {
+    if (externalIpfsBase.isEmpty()) return null
+    val ipfs = when (connection) {
+        PageConnection.Ipfs -> true
+        // A raw virtual origin: IPFS when its root is a CID or IPNS name.
+        PageConnection.Dweb -> servedFromIpfs(VirtualOrigin.parseHostOfUrl(url.trim()))
+        else -> false
+    }
+    return externalIpfsBase.takeIf { ipfs }
+}
+
+/**
  * Whether [url]'s host is a `.onion` name — by the same test the Tor
  * routing applies ([isOnionHost]), so the badge and the routing can't
  * disagree (R2-M1). [url] is the address the tab committed, which
@@ -730,6 +759,12 @@ internal fun PageInfoSheet(
      * gateway (`127.0.0.1:1633`), not this one root ([site]) (#457 R6-M1).
      */
     siteDataGateway: String? = null,
+    /**
+     * The external IPFS gateway the page came through
+     * ([unverifiedIpfsGatewayFor]), or null: said in place of
+     * "peer-to-peer", and after the name's trust (#479).
+     */
+    ipfsGateway: String? = null,
     onDeleteSiteData: () -> Unit,
     onReload: () -> Unit,
     onDismiss: () -> Unit,
@@ -764,7 +799,14 @@ internal fun PageInfoSheet(
                     InfoRow(
                         icon = { Icon(nameTrust.tier.icon, contentDescription = null, tint = nameTrust.tier.color) },
                         title = nameTrust.tier.title,
-                        body = nameTrust.summary,
+                        // The shield covers name → CID only; through a
+                        // gateway, the page itself isn't checked (#479).
+                        body = if (ipfsGateway != null) {
+                            nameTrust.summary + " " +
+                                stringResource(R.string.page_info_name_gateway_note, ipfsGateway)
+                        } else {
+                            nameTrust.summary
+                        },
                     )
                     Expander(stringResource(R.string.page_info_name_details)) {
                         SelectionContainer { TrustFacts(nameTrust) }
@@ -774,21 +816,36 @@ internal fun PageInfoSheet(
 
             if (connection != null) {
                 Section(stringResource(R.string.page_info_section_connection)) {
-                    InfoRow(
-                        icon = {
-                            Icon(
-                                AddressBadge.Connection(connection).icon,
-                                contentDescription = null,
-                                tint = if (connection == PageConnection.NotSecure) {
-                                    MaterialTheme.colorScheme.error
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        },
-                        title = stringResource(connection.titleRes),
-                        body = stringResource(connection.bodyRes),
-                    )
+                    if (ipfsGateway != null) {
+                        // One server, not the network, and not checked (#479).
+                        InfoRow(
+                            icon = {
+                                Icon(
+                                    TrustTier.Unverified.icon,
+                                    contentDescription = null,
+                                    tint = TrustTier.Unverified.color,
+                                )
+                            },
+                            title = stringResource(R.string.page_info_ipfs_gateway_title),
+                            body = stringResource(R.string.page_info_ipfs_gateway_body, ipfsGateway),
+                        )
+                    } else {
+                        InfoRow(
+                            icon = {
+                                Icon(
+                                    AddressBadge.Connection(connection).icon,
+                                    contentDescription = null,
+                                    tint = if (connection == PageConnection.NotSecure) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            },
+                            title = stringResource(connection.titleRes),
+                            body = stringResource(connection.bodyRes),
+                        )
+                    }
                     val rows = remember(certificate) {
                         val fmt = DateFormat.getDateInstance(DateFormat.MEDIUM)
                         certificate?.let { certificateRows(it) { ms -> fmt.format(Date(ms)) } }.orEmpty()

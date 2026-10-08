@@ -21,6 +21,32 @@ class PageInfoTest {
     private val ipfs = ProtocolBadge(R.drawable.ic_ipfs, R.string.browser_badge_via_ipfs)
 
     @Test
+    fun `an IPFS page through an external gateway names the gateway, not the network`() {
+        val gw = "https://ipfs.io"
+        assertEquals(gw, unverifiedIpfsGatewayFor(PageConnection.Ipfs, "ipfs://bafy", gw))
+        assertEquals(gw, unverifiedIpfsGatewayFor(PageConnection.Ipfs, "vitalik.eth", gw))
+        // A raw virtual origin of a CID or an IPNS name is IPFS content too.
+        val cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        val cidOrigin = VirtualOrigin.originFor(ContentRoot.Ipfs(cid))!!
+        assertEquals(gw, unverifiedIpfsGatewayFor(PageConnection.Dweb, "$cidOrigin/index.html", gw))
+        val ipnsOrigin = VirtualOrigin.originFor(ContentRoot.IpnsName("docs.ipfs.tech"))!!
+        assertEquals(gw, unverifiedIpfsGatewayFor(PageConnection.Dweb, "$ipnsOrigin/", gw))
+    }
+
+    @Test
+    fun `this device's node, Swarm, the web and error pages name no gateway`() {
+        // No external gateway: the embedded node checks content against the CID.
+        assertNull(unverifiedIpfsGatewayFor(PageConnection.Ipfs, "ipfs://bafy", ""))
+        val gw = "https://ipfs.io"
+        assertNull(unverifiedIpfsGatewayFor(PageConnection.Swarm, "bzz://abc", gw))
+        assertNull(unverifiedIpfsGatewayFor(PageConnection.Secure, "https://example.org/", gw))
+        assertNull(unverifiedIpfsGatewayFor(PageConnection.ErrorPage, "ipfs://bafy", gw))
+        assertNull(unverifiedIpfsGatewayFor(null, "about:blank", gw))
+        val bzzOrigin = VirtualOrigin.originFor(ContentRoot.Bzz("a".repeat(64)))!!
+        assertNull(unverifiedIpfsGatewayFor(PageConnection.Dweb, "$bzzOrigin/", gw))
+    }
+
+    @Test
     fun `the connection follows the scheme, a dweb page its network`() {
         assertEquals(PageConnection.Secure, pageConnectionFor("https://example.org/a", false, null))
         assertEquals(PageConnection.Secure, pageConnectionFor("HTTPS://example.org", false, null))
