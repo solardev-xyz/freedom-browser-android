@@ -28,6 +28,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -649,18 +652,58 @@ private fun LetterTile(entry: BookmarkEntry) {
 
 /**
  * Load the cached favicon for [url], decoding PNG bytes into an
- * [ImageBitmap] the first time they show up (and again whenever the
- * cached row changes). Returns `null` until something is available,
- * or if decoding fails — callers should show a fallback in that case.
+ * [ImageBitmap] on [Dispatchers.Default] (#482), never during
+ * composition, and through [FaviconImages] so rows showing the same icon,
+ * or a row scrolled back into view, don't decode it again. Returns `null`
+ * until something is available, or if decoding fails — callers should
+ * show a fallback in that case.
  */
 @Composable
 internal fun rememberFavicon(repo: BrowsingRepository, url: String): ImageBitmap? {
-    val bytes by remember(url) { repo.favicon(url) }.collectAsState(initial = null)
-    return remember(bytes) {
-        val data = bytes ?: return@remember null
-        runCatching {
-            BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap()
-        }.getOrNull()
+    val image by remember(url) {
+        repo.favicon(url)
+            .map { bytes -> bytes?.let(FaviconImages::get) }
+            .flowOn(Dispatchers.Default)
+    }.collectAsState(initial = null)
+    return image
+}
+
+/** Decoded favicons, most recently shown kept (#482). */
+internal object FaviconImages {
+    private val cache = DecodeCache(maxEntries = 64) { data ->
+        runCatching { BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap() }.getOrNull()
+    }
+
+    fun get(data: ByteArray): ImageBitmap? = cache.get(data)
+}
+
+/**
+ * A small LRU of decoded images keyed by their encoded bytes' content, so
+ * the same icon arriving as a fresh array (Room hands out a new one per
+ * query) still hits. A failed decode isn't kept.
+ */
+internal class DecodeCache<T : Any>(
+    private val maxEntries: Int,
+    private val decode: (ByteArray) -> T?,
+) {
+    private class Key(val bytes: ByteArray) {
+        private val hash = bytes.contentHashCode()
+        override fun hashCode() = hash
+        override fun equals(other: Any?) = other is Key && bytes.contentEquals(other.bytes)
+    }
+
+    private val entries = object : LinkedHashMap<Key, T>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, T>?) = size > maxEntries
+    }
+
+    fun get(data: ByteArray): T? {
+        val key = Key(data)
+        synchronized(entries) { entries[key]?.let { return it } }
+        // Decoded outside the lock: two rows racing on a new icon may both
+        // decode it once, which beats one waiting on the other.
+        val image = decode(data) ?: return null
+        synchronized(entries) { entries[key] = image }
+        return image
     }
 }
 

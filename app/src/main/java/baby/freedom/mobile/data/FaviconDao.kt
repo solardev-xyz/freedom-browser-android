@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Dao
 interface FaviconDao {
@@ -21,6 +22,10 @@ interface FaviconDao {
      */
     @Query("SELECT data FROM favicons WHERE origin = :origin LIMIT 1")
     fun get(origin: String): Flow<ByteArray?>
+
+    /** The stored PNG bytes for [origin], read once (null when none). */
+    @Query("SELECT data FROM favicons WHERE origin = :origin LIMIT 1")
+    suspend fun dataOnce(origin: String): ByteArray?
 
     @Query("DELETE FROM favicons")
     suspend fun clear()
@@ -40,6 +45,31 @@ interface FaviconDao {
     @Query("UPDATE favicons SET updatedAt = :at WHERE origin = :origin")
     suspend fun restamp(origin: String, at: Long)
 }
+
+/**
+ * Store [entry], but leave the bytes alone when they're the icon already
+ * on file (#482): a site sends the same favicon on every load, and
+ * rewriting the blob each time wakes every [FaviconDao.get] reader for
+ * nothing. Only the time moves then, so a later Delete browsing data
+ * still sees the visit ([faviconsToForget]). Run it in a transaction.
+ */
+internal suspend fun storeFaviconRow(dao: FaviconDao, entry: FaviconEntry) {
+    val stored = dao.dataOnce(entry.origin)
+    if (stored != null && stored.contentEquals(entry.data)) {
+        dao.restamp(entry.origin, entry.updatedAt)
+    } else {
+        dao.upsert(entry)
+    }
+}
+
+/**
+ * Room re-runs [FaviconDao.get] on any write to the table, and hands back
+ * a new array each time even when the icon is the same (#482): pass on
+ * only an actual change, compared by content, so a row decodes its icon
+ * once rather than on every other site's visit.
+ */
+internal fun Flow<ByteArray?>.distinctIcons(): Flow<ByteArray?> =
+    distinctUntilChanged { old, new -> old contentEquals new }
 
 /** A favicon row without its bytes: which origin, stored when. */
 data class FaviconStamp(val origin: String, val updatedAt: Long)

@@ -4607,8 +4607,8 @@ private fun buildRefreshableWebView(
                 // Nor anything from a private tab (#86): the favicon
                 // cache is a list of sites visited.
                 if (state.private) return
-                val bytes = encodePngBytes(icon) ?: return
-                repo.storeFavicon(display, bytes, lastLoadedTicket)
+                // Encoded off the main thread (#482).
+                repo.storeFavicon(display, lastLoadedTicket) { encodePngBytes(icon) }
             }
         }
     }
