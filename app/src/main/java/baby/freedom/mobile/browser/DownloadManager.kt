@@ -487,7 +487,8 @@ class DownloadManager private constructor(context: Context) {
                 ?: downloadFileName(contentDisposition, url, guessedMime, ::extensionForMime)
             val row = DownloadEntry(
                     fileName = initialName,
-                    displayUrl = target.displayUrl,
+                    // Spelled the same whenever it is saved (#490 R1-M2).
+                    displayUrl = DisplayUrl.settledName(target.displayUrl),
                     // A data: URI *is* the file — possibly megabytes — and
                     // doesn't belong in a history row (Room's cursor window
                     // is 2 MB). A blob: URL means nothing once its page is

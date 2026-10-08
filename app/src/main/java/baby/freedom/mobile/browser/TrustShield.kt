@@ -130,7 +130,7 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
      * [name] as these sentences print it: a lookalike `.tez` name as
      * `xn--`, the way the address bar shows it (#465).
      */
-    private val shown: String get() = EnsNormalize.tezosDisplay(name)
+    val shown: String get() = EnsNormalize.tezosDisplay(name)
 
     /** One sentence on what the tier means for this answer. */
     val summary: String
@@ -309,7 +309,8 @@ internal fun TrustDetailsDialog(
 internal fun TrustFacts(trust: NameTrust) {
     val answer = trust.answer
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        TrustFact(stringResource(R.string.names_fact_name), trust.name)
+        // The shown form, as in the capsule and [NameTrust.summary] (#490 R1-F1).
+        TrustFact(stringResource(R.string.names_fact_name), trust.shown)
         if (answer != null) TrustFact(stringResource(R.string.names_fact_resolves_to), answer)
         TrustFact(
             stringResource(R.string.names_fact_block),

@@ -94,11 +94,29 @@ class TezLookalikeDisplayTest {
         // Found from the shown form — the name is still the Unicode one.
         val trust = nameTrustFor("ipfs://$spoofShown/x")!!
         assertEquals(spoof, trust.name)
+        // The facts' Name row prints [NameTrust.shown] (#490 R1-F1).
+        assertEquals(spoofShown, trust.shown)
         assertEquals(
             "2 independent RPC servers returned the same Tezos Domains record for $spoofShown at block #1.",
             trust.summary,
         )
         assert(spoof !in trust.recipientSummary) { trust.recipientSummary }
+    }
+
+    @Test
+    fun `a saved address is spelled the same whenever it is saved`() {
+        // #490 R1-M2: an honest name shown as `xn--` while the tables were
+        // still decoding is saved in Unicode; a lookalike stays `xn--`.
+        val cafe = "xn--" + Punycode.encode("caf\u00E9") + ".tez"
+        assertEquals("caf\u00E9.tez/x?q=1", DisplayUrl.settledName("$cafe/x?q=1"))
+        assertEquals("ipfs://caf\u00E9.tez/x", DisplayUrl.settledName("ipfs://$cafe/x"))
+        assertEquals("caf\u00E9.tez", DisplayUrl.settledName("caf\u00E9.tez"))
+        assertEquals("$spoofShown/x", DisplayUrl.settledName("$spoofShown/x"))
+        assertEquals("$spoofShown/x", DisplayUrl.settledName("$spoof/x"))
+        // Anything that isn't a `.tez` name is left as it is.
+        for (url in listOf("https://xn--caf-dma.example/", "xn--caf-dma.eth/x", "alice.tez/x", "bzz://abc/x")) {
+            assertEquals(url, DisplayUrl.settledName(url))
+        }
     }
 
     private companion object {

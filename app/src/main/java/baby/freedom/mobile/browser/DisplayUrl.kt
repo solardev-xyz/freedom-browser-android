@@ -102,13 +102,40 @@ object DisplayUrl {
      * display URL. Parsing the result ([EnsInput.parse]) gives back the
      * same name. Anything else comes back unchanged.
      */
-    fun shownName(display: String): String {
+    fun shownName(display: String): String = respellName(display, EnsNormalize::tezosDisplay)
+
+    /**
+     * [display] spelled the way [shownName] spells it once the ENSIP-15
+     * tables are decoded, whatever it was spelled with before (#490
+     * R1-M2). [shownName] fails closed while the tables are still
+     * decoding at startup, so an honest `café.tez` reads
+     * `xn--caf-dma.tez` for that moment; anything saved from then
+     * (a bookmark, a history row, a download) would keep that spelling
+     * for good. This maps a `.tez` name's `xn--` labels back
+     * ([EnsNormalize.tezosForm]) and shows it again with the tables
+     * warm, so what is saved doesn't depend on when it was saved.
+     *
+     * Decodes the tables if they aren't yet ([EnsNormalize.warm]): call
+     * it off the main thread, where the address is written to disk.
+     */
+    fun settledName(display: String): String = respellName(display) { name ->
+        if (!name.lowercase().endsWith(".tez")) return@respellName name
+        if (name.all { it.code < 0x80 } && name.split('.').none { it.lowercase().startsWith("xn--") }) {
+            return@respellName name
+        }
+        val unicode = EnsNormalize.tezosForm(name) ?: return@respellName name
+        if (!EnsNormalize.isWarm) EnsNormalize.warm()
+        EnsNormalize.tezosDisplay(unicode)
+    }
+
+    /** [display] with the name it names (bare, or after a [NAME_SCHEMES] scheme) passed through [respell]. */
+    private inline fun respellName(display: String, respell: (String) -> String): String {
         val sep = display.indexOf("://")
         if (sep >= 0 && display.substring(0, sep).lowercase() !in NAME_SCHEMES) return display
         val start = if (sep < 0) 0 else sep + 3
         val end = display.indexOfAny(charArrayOf('/', '?', '#'), start).let { if (it < 0) display.length else it }
         val name = display.substring(start, end)
-        val shown = EnsNormalize.tezosDisplay(name)
+        val shown = respell(name)
         return if (shown == name) display else display.substring(0, start) + shown + display.substring(end)
     }
 

@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteException
 import android.util.Log
 import androidx.room.withTransaction
 import baby.freedom.mobile.browser.BookmarkUrls
+import baby.freedom.mobile.browser.DisplayUrl
 import baby.freedom.mobile.browser.typedForm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -89,7 +90,8 @@ class BrowsingRepository internal constructor(
         scope.launch {
             db.history().insert(
                 HistoryEntry(
-                    url = url,
+                    // Not the startup-only `xn--` spelling of a `.tez` name (#490 R1-M2).
+                    url = DisplayUrl.settledName(url),
                     title = title,
                     visitedAt = System.currentTimeMillis(),
                 ),
@@ -171,7 +173,8 @@ class BrowsingRepository internal constructor(
      */
     fun bookmark(address: String, title: String): Deferred<Bookmarked?> = scope.async {
         // `page#` is saved as `page` (#418): the `#` names no place.
-        val url = PageVisits.withoutEmptyFragment(address)
+        // Spelled the same whenever it is saved, also right after startup (#490 R1-M2).
+        val url = DisplayUrl.settledName(PageVisits.withoutEmptyFragment(address))
         if (!isRecordable(url)) return@async null
         try {
             db.withTransaction {
@@ -210,6 +213,9 @@ class BrowsingRepository internal constructor(
      * the dialog mid-save can't lose it.
      */
     fun editBookmark(id: Long, title: String, url: String): Deferred<BookmarkEditResult> = scope.async {
+        // Spelled the same whenever it is saved (#490 R1-M2).
+        @Suppress("NAME_SHADOWING")
+        val url = DisplayUrl.settledName(url)
         try {
             db.withTransaction {
                 val current = db.bookmarks().byId(id) ?: return@withTransaction BookmarkEditResult.Gone

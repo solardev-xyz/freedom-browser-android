@@ -96,6 +96,7 @@ import baby.freedom.mobile.wallet.ledger.Ledger
 import baby.freedom.mobile.wallet.NodeIdentitySync
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.ens.EnsInput
+import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.TezosDomainsResolver
 import baby.freedom.swarm.IpfsInfo
@@ -1457,7 +1458,8 @@ fun BrowserScreen(
                                 detail = EnsGate.withTrustNote(
                                     Strings.get(
                                         R.string.browser_ens_wrong_protocol_detail,
-                                        name,
+                                        // As the error page's address shows it (#490 R1-M1).
+                                        EnsNormalize.tezosDisplay(name),
                                         result.protocol,
                                         requiredProtocol,
                                     ),
