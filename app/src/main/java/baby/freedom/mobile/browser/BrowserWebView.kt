@@ -786,6 +786,18 @@ internal class CommittedVisitGate {
         recordedDisplay = display
         return true
     }
+
+    /**
+     * The [BrowsingRepository.historyTicket] the next row's write
+     * carries (#480 R2-M1): the document's own row was asked for when
+     * its load started ([documentTicket], the same ticket its icon
+     * carries), so a page whose load began before Delete browsing data
+     * doesn't come back into History when it finishes after it. A later
+     * row of the same document — a `pushState`/hash step — is asked for
+     * by that step itself, now ([now]). Call before [recordOnce].
+     */
+    fun ticketFor(documentTicket: Long, now: () -> Long): Long =
+        if (recordedDisplay == null) documentTicket else now()
 }
 
 /**
@@ -3416,8 +3428,12 @@ private fun buildRefreshableWebView(
                 // the same visit again.
                 val flushed = pendingVisit.flush(url)
                 // A private tab (#86) claims the slot and writes nothing.
-                if (flushed != null && visitGate.recordOnce(flushed.display) && !state.private) {
-                    repo.recordVisit(flushed.display, flushed.title)
+                if (flushed != null) {
+                    // Asked for when this document's load started (#480 R2-M1).
+                    val ticket = visitGate.ticketFor(lastLoadedTicket, repo::historyTicket)
+                    if (visitGate.recordOnce(flushed.display) && !state.private) {
+                        repo.recordVisit(flushed.display, flushed.title, ticket)
+                    }
                 }
             }
 
@@ -3633,8 +3649,11 @@ private fun buildRefreshableWebView(
                     isCurrent
                 ) {
                     if (visitGate.isCommitted) {
+                        // The document's own row carries the ticket from
+                        // its load start, as its icon does (#480 R2-M1).
+                        val ticket = visitGate.ticketFor(lastLoadedTicket, repo::historyTicket)
                         if (visitGate.recordOnce(display) && !state.private) {
-                            repo.recordVisit(display, state.title)
+                            repo.recordVisit(display, state.title, ticket)
                         }
                     } else if (url != null) {
                         pendingVisit.park(PendingVisit(url, display, state.title))
