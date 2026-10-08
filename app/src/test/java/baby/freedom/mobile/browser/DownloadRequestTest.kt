@@ -532,4 +532,28 @@ class DownloadRequestTest {
             downloadRedirect("https://example.com/a", "http://"),
         )
     }
+
+    @Test
+    fun `a download row keeps no address over 8 KiB`() {
+        // #461 R1-M3: such a row wouldn't fit the window the list is read through.
+        val limit = MAX_STORED_DOWNLOAD_URL
+        assertEquals(8 * 1024, limit)
+        val atLimit = "https://e.example/?" + "q".repeat(limit - 19)
+        val over = atLimit + "q"
+        val huge = "https://e.example/x?" + "q".repeat(2_000_000)
+        assertEquals(atLimit, storedSourceUrl(DownloadTarget.Web(atLimit, atLimit), atLimit))
+        assertEquals("", storedSourceUrl(DownloadTarget.Web(over, over), over))
+        assertEquals("", storedSourceUrl(DownloadTarget.Web(huge, huge), huge))
+        assertEquals("", storedSourceUrl(DownloadTarget.Data("data:,x"), "data:,x"))
+
+        assertEquals(atLimit, storedDisplayUrl(atLimit))
+        val shown = storedDisplayUrl(huge)
+        assertEquals(limit, shown.length)
+        assertTrue(shown.startsWith("https://e.example/x?qq") && shown.endsWith("…"))
+        // Never cut inside a surrogate pair.
+        val emoji = "https://e.example/" + "😀".repeat(limit)
+        val cut = storedDisplayUrl(emoji)
+        assertTrue(cut.length <= limit && cut.endsWith("…"))
+        assertTrue(!Character.isHighSurrogate(cut[cut.length - 2]))
+    }
 }
