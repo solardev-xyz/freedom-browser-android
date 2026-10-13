@@ -246,10 +246,15 @@ class ChequebookTest {
         assertEquals(milli, settlementDepositTarget(null))
         assertEquals(BigInteger.TEN.pow(16), settlementDepositTarget(25))
         assertEquals(BigInteger.TEN.pow(16), settlementDepositTarget(255))
-        // The plan is the deepest stamp the node can use.
-        fun stamp(depth: Int, usable: Boolean = true) = PostageBatch("ab".repeat(32), usable, depth, 16, 0, true, null)
+        // The plan is the deepest stamp the node can use, or has just
+        // bought and is still propagating (ant counts it: usable || propagating).
+        fun stamp(depth: Int, usable: Boolean = true, propagating: Boolean = false) =
+            PostageBatch("ab".repeat(32), usable, depth, 16, 0, true, null, propagating)
         assertEquals(tenth.shiftLeft(1), planDepositTarget(listOf(stamp(20), stamp(22), stamp(24, usable = false))))
         assertEquals(milli, planDepositTarget(emptyList()))
+        // A first depth-24 buy, still propagating: the plan is already depth 24.
+        assertEquals(tenth.shiftLeft(3), planDepositTarget(listOf(stamp(24, usable = false, propagating = true))))
+        assertEquals(milli, planDepositTarget(listOf(stamp(24, usable = false))))
     }
 
     @Test

@@ -42,6 +42,11 @@ internal data class PostageBatch(
     val immutable: Boolean,
     /** Seconds left, or null when the node couldn't read it from the chain. */
     val ttlSeconds: Long?,
+    /**
+     * Not usable yet only because the node just bought it and it is still
+     * reaching the storers (ant's `propagating`); it will be by waiting.
+     */
+    val propagating: Boolean = false,
 ) {
     /** What it holds, bee's effective size for its depth. */
     val capacityBytes: Long get() = effectiveStampBytes(depth)
@@ -76,6 +81,7 @@ internal fun stampsFrom(body: String): List<PostageBatch>? {
             utilization = o.optLong("utilization"),
             immutable = o.optBoolean("immutableFlag"),
             ttlSeconds = ttl.takeIf { it >= 0 && it != ANT_PLACEHOLDER_TTL },
+            propagating = o.optBoolean("propagating"),
         )
     }
 }

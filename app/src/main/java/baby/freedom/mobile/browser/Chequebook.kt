@@ -247,11 +247,14 @@ internal fun settlementDepositTarget(depth: Int?): BigInteger {
 }
 
 /**
- * The deposit target for the node's plan as ant reckons it: for the
- * deepest of [stamps] the node can stamp with, or with none, no plan.
+ * The deposit target for the node's plan as ant reckons it
+ * (`plan_deposit_target`): for the deepest of [stamps] the node can stamp
+ * with or has just bought and is still propagating, or with none, no plan.
+ * Counting a propagating batch matters: the chequebook page reads this
+ * right after a buy, while the new batch still reads `usable: false`.
  */
 internal fun planDepositTarget(stamps: List<PostageBatch>): BigInteger =
-    settlementDepositTarget(stamps.filter { it.usable }.maxOfOrNull { it.depth })
+    settlementDepositTarget(stamps.filter { it.usable || it.propagating }.maxOfOrNull { it.depth })
 
 /**
  * Below this the credit is low: half the deposit the chequebook is kept at
