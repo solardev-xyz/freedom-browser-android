@@ -115,7 +115,7 @@ internal fun fundReviewRows(quote: SendQuote, plan: SwarmFunder.Plan, days: Long
         quote.tx.to.equals(SwarmFunder.ADDRESS, ignoreCase = true) &&
         request.amount == plan.value && quote.tx.value == plan.value &&
         request.dapp?.data?.contentEquals(data) == true && quote.tx.data.contentEquals(data) &&
-        request.dapp.swarm == SwarmFundLabel(plan.node, plan.batchId, plan.depth, days)
+        request.dapp.swarm == SwarmFundLabel(plan.node, plan.batchId, plan.depth, days, plan.depositPlur)
     return if (matches) FundReviewRows(fundNodeSummary(plan, days), plan.node) else null
 }
 
@@ -322,7 +322,7 @@ internal fun FundNodeScreen(
                 val q = sender.prepare(
                     SendRequest(
                         chain, TokenRegistry.native(chain), from, SwarmFunder.ADDRESS, p.value,
-                        DappCall(null, p.calldata(), null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, d)),
+                        DappCall(null, p.calldata(), null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, d, p.depositPlur)),
                     ),
                 )
                 reviewing = FundReviewing(p, d, q)
@@ -500,6 +500,9 @@ private fun FundQuoteCard(
             plan == null -> MutedText(stringResource(R.string.stamps_fund_not_wallet_identity))
             priced is Priced.Ready -> {
                 TotalFigure(formatXdaiCeiling(plan.value))
+                if (plan.depositPlur.signum() > 0) {
+                    MutedText(stringResource(R.string.stamps_total_includes_deposit, formatBzz(plan.depositPlur)))
+                }
                 SubLine(stringResource(R.string.stamps_fund_total_note))
                 payer?.let { p ->
                     val short = payerBalance != null && payerBalance < plan.value

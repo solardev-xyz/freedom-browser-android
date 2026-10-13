@@ -202,6 +202,7 @@ internal object SendJournalCodec {
                             "swarm",
                             it.swarm?.let { l ->
                                 JSONObject().put("node", l.node).put("batchId", l.batchId).put("depth", l.depth).put("days", l.days)
+                                    .put("depositPlur", l.depositPlur?.toString() ?: JSONObject.NULL)
                             } ?: JSONObject.NULL,
                         )
                 } ?: JSONObject.NULL,
@@ -253,7 +254,12 @@ internal object SendJournalCodec {
                 d.getString("data").hexToBytes(),
                 d.optStringOrNull("gasLimit")?.let(::BigInteger),
                 d.optJSONObject("safe")?.let { l -> SafeCallLabel(l.getString("address"), l.getString("name"), l.getBoolean("activates")) },
-                d.optJSONObject("swarm")?.let { l -> SwarmFundLabel(l.getString("node"), l.getString("batchId"), l.getInt("depth"), l.getLong("days")) },
+                d.optJSONObject("swarm")?.let { l ->
+                    SwarmFundLabel(
+                        l.getString("node"), l.getString("batchId"), l.getInt("depth"), l.getLong("days"),
+                        l.optStringOrNull("depositPlur")?.let(::BigInteger),
+                    )
+                },
             )
         }
         val request = SendRequest(

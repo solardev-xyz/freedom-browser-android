@@ -114,6 +114,8 @@
     <string name="stamps_total">Total</string>
     <!-- %1$s: an xDAI amount with its unit. -->
     <string name="stamps_total_about">About %1$s</string>
+    <!-- %1$s: the chequebook deposit, with its unit. -->
+    <string name="stamps_total_includes_deposit">Includes a chequebook deposit of %1$s, sized to this storage.</string>
     <string name="stamps_total_buy_note">From the node\'s account, network fees included. What isn\'t used stays there.</string>
     <!-- %1$s: the xDAI the node is short of, with its unit. -->
     <string name="stamps_short_of_xdai">The node needs %1$s more. Add funds from your wallet, or send xDAI on Gnosis Chain to the node\'s address.</string>
@@ -135,7 +137,7 @@
     <!-- %1$s: capacity; %2$s: duration; %3$s: cost; %4$s: the xDAI sentence (stamps_spend_cost). -->
     <string name="stamps_buy_confirm_body">%1$s for %2$s, for %3$s. %4$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
     <!-- %1$s: capacity; %2$s: duration; %3$s: cost; %4$s: chequebook deposit; %5$s: the xDAI sentence (stamps_spend_cost). -->
-    <string name="stamps_buy_confirm_body_deposit">%1$s for %2$s, for %3$s, plus %4$s into the node\'s new chequebook. %5$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
+    <string name="stamps_buy_confirm_body_deposit">%1$s for %2$s, for %3$s, plus a chequebook deposit of %4$s, sized to this storage. %5$s These are real transactions on Gnosis Chain and can\'t be undone.</string>
     <string name="stamps_extend_only_active">Only the storage the node uploads with can get more time in this version of Freedom.</string>
     <string name="stamps_add">Add</string>
     <string name="stamps_extend_confirm_title">Add time to this storage?</string>
@@ -147,7 +149,7 @@
     <string name="stamps_no_price_reason">No price right now: %1$s</string>
     <string name="stamps_cost">Cost</string>
     <string name="stamps_chequebook_deposit">Chequebook deposit</string>
-    <string name="stamps_deposit_first_stamp_note">Once, with the first stamp: backs what the node pays other nodes for storing your data.</string>
+    <string name="stamps_deposit_first_stamp_note">Moved into the node\'s chequebook with this stamp: it pays other nodes for uploading your data. It grows with the storage: 0.1 xBZZ at depth 21, doubling with each depth above and halving below, between 0.001 and 1 xBZZ, less what the chequebook already holds.</string>
     <string name="stamps_node_xbzz">Node\'s xBZZ</string>
     <string name="stamps_swapped_from_xdai">Swapped from xDAI</string>
     <string name="stamps_xdai_needed">xDAI needed</string>
@@ -187,7 +189,7 @@
     <!-- A stamp's capacity and duration: "537 MB, 2 days". -->
     <string name="stamps_size_and_duration">%1$s, %2$s</string>
     <string name="stamps_fund_stamp_cost">Stamp cost</string>
-    <string name="stamps_fund_deposit_note">The node moves this into its new chequebook when it connects the stamp.</string>
+    <string name="stamps_fund_deposit_note">The node moves this into its chequebook when it connects the stamp. It grows with the storage, at most 1 xBZZ.</string>
     <string name="stamps_fund_pool_price">Pool price</string>
     <!-- %1$s: the pool's price in xDAI, with its unit. -->
     <string name="stamps_fund_pool_price_value">1 xBZZ = %1$s</string>

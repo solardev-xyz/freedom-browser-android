@@ -52,21 +52,26 @@ import org.json.JSONObject
  * xBZZ, read every [pollMs] while [light] and the app is in the
  * foreground, and again at once whenever
  * [refresh] changes (a spend just ended). `/wallet` costs the gateway two
- * chain reads, so only the page that offers a deposit asks for it.
+ * chain reads, so only the page that offers a deposit asks for it. With
+ * [withPlan], the deposit target for the node's plan too
+ * ([ChequebookState.depositTargetPlur]), from its stamps: once per
+ * [refresh], since `/stamps` reads each batch's time left from the chain.
  */
 @Composable
 internal fun rememberChequebookState(
     light: Boolean,
     refresh: Any = Unit,
     withWallet: Boolean = false,
+    withPlan: Boolean = false,
     pollMs: Long = CHEQUEBOOK_POLL_MS,
 ): ChequebookState {
     val lifecycle = currentLifecycle()
-    val state by produceState(ChequebookState(), light, refresh, withWallet, pollMs, lifecycle) {
+    val state by produceState(ChequebookState(), light, refresh, withWallet, withPlan, pollMs, lifecycle) {
         if (!light) {
             value = ChequebookState()
             return@produceState
         }
+        var target: BigInteger? = null
         lifecycle.pollWhileStarted(pollMs) {
             val address = gatewayGet("/chequebook/address")?.let(::chequebookFrom)
             val funds = if (address.isNullOrEmpty()) null else gatewayGet("/chequebook/balance")?.let(::chequebookFundsFrom)
@@ -81,7 +86,13 @@ internal fun rememberChequebookState(
                 availablePlur = if (none) null else funds?.availablePlur ?: value.availablePlur,
                 availableUpperBound = if (none) false else funds?.availableUpperBound ?: value.availableUpperBound,
                 ledgerLost = if (none) false else funds?.ledgerLost ?: value.ledgerLost,
+                depositTargetPlur = target ?: value.depositTargetPlur,
             )
+            // After the balances, so a slow `/stamps` doesn't hold them back.
+            if (withPlan && target == null && !address.isNullOrEmpty()) {
+                target = gatewayGet("/stamps", STAMPS_TIMEOUT_MS)?.let(::stampsFrom)?.let(::planDepositTarget)
+                target?.let { value = value.copy(depositTargetPlur = it) }
+            }
         }
     }
     return state
@@ -132,7 +143,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     val settings = remember(context) { NodeSettings.get(context) }
     // Confirmed lost ledgers: their credit stays an upper bound.
     val confirmedLedgers by remember(settings) { settings.swarmConfirmedLedgers }.collectAsState(initial = emptySet())
-    val state = rememberChequebookState(light = blocked == null, refresh = refresh, withWallet = true)
+    val state = rememberChequebookState(light = blocked == null, refresh = refresh, withWallet = true, withPlan = true)
         .withConfirmedLedgers(confirmedLedgers)
     // The switch's setting; null until read, so it doesn't flicker.
     // MainActivity relays it to the node, live and after every init.

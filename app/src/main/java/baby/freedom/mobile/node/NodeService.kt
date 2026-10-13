@@ -489,6 +489,9 @@ class NodeService : Service() {
         fun days() = args.getLong("days").also { require(it in 1..MAX_STAMP_DAYS) { "bad duration" } }
         fun amount() = BigInteger(args.getString("amountPerChunk")).also { require(it.signum() > 0) { "bad amount" } }
         fun maxSwap() = BigInteger(args.getString("maxSwapWei")).also { require(it.signum() >= 0) { "bad xDAI total" } }
+        // The chequebook deposit the user confirmed (the quote's): the most the spend may move into it.
+        fun settlementDeposit() =
+            BigInteger(args.getString("settlementDepositPlur")).also { require(it.signum() >= 0) { "bad deposit" } }
         fun spendable() = check(swarmNode.state.value.walletIdentity) {
             Strings.get(R.string.node_not_wallet_identity)
         }
@@ -552,21 +555,21 @@ class NodeService : Service() {
                 spendable()
                 val depth = args.getInt("depth").also { require(it in MIN_STAMP_DEPTH..MAX_STAMP_DEPTH) { "bad depth" } }
                 Log.i(TAG, "buying a postage batch (depth $depth), as the user confirmed")
-                swarmNode.buyStamp(depth, amount(), immutable = true, maxSwapWei = maxSwap())
+                swarmNode.buyStamp(depth, amount(), immutable = true, maxSwapWei = maxSwap(), settlementDepositPlur = settlementDeposit())
             }
             "extend" -> spending {
                 spendable()
                 Log.i(TAG, "extending a postage batch, as the user confirmed")
                 swarmNode.extendStamp(args.getString("batchId"), amount(), maxSwap())
             }
-            // Counted as a buy: a first connect sets up the chequebook, as a
-            // first buy does (the running gateway picks it up itself, ant
+            // Counted as a buy: a connect sets up the chequebook, as a
+            // buy does (the running gateway picks it up itself, ant
             // 0.5.52+); a publish still waits it out, as for a buy.
             "connect" -> spending(buy = true) {
                 // A batch the wallet bought for the node (#115); ant checks the node owns it.
                 spendable()
                 Log.i(TAG, "connecting a postage batch the wallet bought for the node")
-                swarmNode.connectBatch(args.getString("batchId"))
+                swarmNode.connectBatch(args.getString("batchId"), settlementDeposit())
             }
             "deposit" -> spending {
                 spendable()

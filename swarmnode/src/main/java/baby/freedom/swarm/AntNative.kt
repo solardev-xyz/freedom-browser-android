@@ -85,7 +85,11 @@ internal object AntNative {
 
     /**
      * `ant_swap_status`: `{"supported","swap_switch","swap_enabled",
-     * "paying","chequebook","persisted"}`. Never blocks on the network.
+     * "paying","chequebook","persisted","deposited_plur","issued_plur",
+     * "available_plur"}` (the `_plur` figures since ant 0.5.68, null
+     * until read; the app reads the chequebook's figures from the
+     * gateway's `/chequebook/balance` instead, which also says when they
+     * are lost or only an upper bound). Never blocks on the network.
      */
     external fun swapStatus(handle: Long): String
 
@@ -116,8 +120,9 @@ internal object AntNative {
 
     /**
      * `ant_storage_connect_batch` (#115): registers [batchId], which the
-     * node's account must already own on chain, and — first time only —
-     * sets up the chequebook, which broadcasts: only through
+     * node's account must already own on chain, and sets up the
+     * chequebook (a deploy when there's none, then its plan-sized
+     * deposit), which broadcasts: only through
      * [SpendGuard.during] with a [SpendPlan.ConnectBatch].
      */
     external fun storageConnectBatch(handle: Long, gnosisRpc: String, batchId: String): String

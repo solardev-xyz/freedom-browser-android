@@ -114,6 +114,9 @@ class SwarmNodeTest {
         /** Run inside each spend, in place of ant's transactions. */
         @Volatile var onSpend: (String) -> String = { it }
         override fun storageStatus(handle: Long) = storageStatusJson
+        /** What [settlementStatus] answers: the node's persisted chequebook; none by default. */
+        @Volatile var settlementStatusJson = """{"enabled":false,"chequebook":null}"""
+        override fun settlementStatus(handle: Long) = settlementStatusJson
         override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String {
             calls += "quote:$handle:$gnosisRpc:$depth:$days"
             return """{"depth":$depth}"""
@@ -639,7 +642,7 @@ class SwarmNodeTest {
             """{"enabled":true}"""
         }
         assertFalse(SpendGuard.admit(confirmed))
-        node.buyStamp(17, amount, immutable = false, maxSwapWei = java.math.BigInteger.TEN.pow(17))
+        node.buyStamp(17, amount, immutable = false, maxSwapWei = java.math.BigInteger.TEN.pow(17), settlementDepositPlur = java.math.BigInteger.ZERO)
         assertEquals(listOf(false, true), seen)
         // Closed again once the buy returns.
         assertFalse(SpendGuard.admit(confirmed))
@@ -684,7 +687,7 @@ class SwarmNodeTest {
             release.await(5, TimeUnit.SECONDS)
             "{}"
         }
-        val buyer = Thread { runCatching { node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE) } }
+        val buyer = Thread { runCatching { node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO) } }
         buyer.start()
         assertTrue(inside.await(5, TimeUnit.SECONDS))
         node.stop()
@@ -702,7 +705,7 @@ class SwarmNodeTest {
         val node = lightNode(ops)
         ops.onSpend = { throw RuntimeException("rpc: error sending request for url (https://rpc.example/key123/)") }
         val e = assertThrows(RuntimeException::class.java) {
-            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO)
         }
         assertFalse(e.message!!.contains("key123"))
         assertTrue(e.message!!.contains("the Gnosis RPC"))
@@ -802,14 +805,43 @@ class SwarmNodeTest {
             ops.chequebookHex = chequebook
             """{"enabled":true}"""
         }
-        assertThrows(IllegalArgumentException::class.java) { node.connectBatch("0x1234") }
-        node.connectBatch("0x" + id.uppercase())
+        assertThrows(IllegalArgumentException::class.java) { node.connectBatch("0x1234", java.math.BigInteger.ZERO) }
+        node.connectBatch("0x" + id.uppercase(), milliBzz)
         assertEquals(listOf(false, false, true, true), verdicts)
         assertTrue("connect:1:0x$id" in ops.calls)
         assertFalse(SpendGuard.admit(TestTx.request(TestTx.deployChequebook())))
         // The chequebook it set up is on the running gateway: no restart.
         assertNoGatewayRestart(ops)
         assertGatewaySeesChequebook(ops, node)
+        node.dispose()
+    }
+
+    @Test
+    fun aBuyOrConnectPinsTheDepositToTheChequebookTheNodeAlreadyHas() {
+        // ant persisted a chequebook for this account: the deposit may go only
+        // there, at most the confirmed amount, and no second chequebook is deployed.
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        val own = "dd".repeat(20)
+        ops.settlementStatusJson = """{"enabled":true,"chequebook":"0x${own.uppercase()}"}"""
+        val deposit = java.math.BigInteger.TEN.pow(15) // 0.1 xBZZ, a depth-21 plan's
+        val verdicts = mutableListOf<Boolean>()
+        ops.onSpend = {
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.deployChequebook()))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.transfer("cc".repeat(20), deposit)))
+            verdicts += SpendGuard.admit(TestTx.request(TestTx.transfer(own, deposit)))
+            it
+        }
+        node.buyStamp(21, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, deposit)
+        assertEquals(listOf(false, false, true), verdicts)
+        verdicts.clear()
+        node.connectBatch("ab".repeat(32), deposit)
+        assertEquals(listOf(false, false, true), verdicts)
+        // No chequebook yet: the one the spend deploys can't be named, so any recipient.
+        ops.settlementStatusJson = """{"enabled":false,"chequebook":null}"""
+        verdicts.clear()
+        node.buyStamp(21, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, deposit)
+        assertEquals(listOf(true, true, false), verdicts)
         node.dispose()
     }
 
@@ -821,7 +853,7 @@ class SwarmNodeTest {
         // running gateway at it: no stop and start of the gateway, and
         // settlement's reads — the chequebook page's, a deposit's — see it.
         ops.onSpend = { ops.chequebookHex = chequebook; it }
-        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO)
         assertNoGatewayRestart(ops)
         assertGatewaySeesChequebook(ops, node)
 
@@ -830,7 +862,7 @@ class SwarmNodeTest {
         // settlement to second-guess it any more.
         ops.chequebookHex = "0".repeat(40)
         ops.onSpend = { it }
-        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+        node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO)
         assertNoGatewayRestart(ops)
         node.dispose()
     }
@@ -1053,7 +1085,7 @@ class SwarmNodeTest {
         // Refused before anything went on-chain (no xDAI).
         ops.onSpend = { throw RuntimeException("insufficient xDAI") }
         assertThrows(RuntimeException::class.java) {
-            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO)
         }
         assertEquals(listOf("light:https://rpc.example/key123"), ops.gatewayModes)
         assertFalse(ops.calls.contains("stopGateway:1"))
@@ -1061,11 +1093,11 @@ class SwarmNodeTest {
         val otherPayment = java.util.concurrent.CountDownLatch(1)
         val running = java.util.concurrent.CountDownLatch(1)
         ops.onSpend = { running.countDown(); otherPayment.await(5, TimeUnit.SECONDS); it }
-        val first = Thread { runCatching { node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE) } }
+        val first = Thread { runCatching { node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO) } }
         first.start()
         assertTrue(running.await(5, TimeUnit.SECONDS))
         val refused = assertThrows(IllegalStateException::class.java) {
-            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO)
         }
         assertEquals("another payment is already running", refused.message)
         assertEquals(listOf("light:https://rpc.example/key123"), ops.gatewayModes)
@@ -1124,7 +1156,7 @@ class SwarmNodeTest {
         val before = ops.chequebookHex
         ops.onSpend = { throw RuntimeException("createBatch reverted") }
         assertThrows(RuntimeException::class.java) {
-            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE)
+            node.buyStamp(17, java.math.BigInteger.TEN, false, java.math.BigInteger.ONE, java.math.BigInteger.ZERO)
         }
         assertEquals(before, ops.chequebookHex)
         assertNoGatewayRestart(ops)

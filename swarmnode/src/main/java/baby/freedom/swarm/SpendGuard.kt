@@ -18,8 +18,13 @@ sealed interface SpendPlan {
      * showed), approve `amountPerChunk × 2^depth` to the postage contract,
      * `createBatch` with exactly these parameters, then settlement: deploy
      * the node's chequebook if it has none, and bring a new or adopted
-     * chequebook's deposit up to the settlement target (ant 0.5.51+ tops
-     * up an existing one on any buy, not only the first).
+     * chequebook's deposit up to the settlement target for this plan
+     * (ant 0.5.68+: 0.1 xBZZ at depth 21, doubling per level above and
+     * halving per level below, between 0.001 and 1 xBZZ). That transfer
+     * moves at most [settlementDepositPlur], the deposit the purchase
+     * review showed (the quote's `settlement_deposit_plur`; 0: none), and
+     * only to [chequebook] when the node already has one (40 lowercase
+     * hex; null only when the buy may deploy it).
      */
     data class BuyStamp(
         override val owner: String,
@@ -27,7 +32,14 @@ sealed interface SpendPlan {
         val amountPerChunk: BigInteger,
         val immutable: Boolean,
         val maxSwapWei: BigInteger,
-    ) : SpendPlan
+        override val settlementDepositPlur: BigInteger,
+        override val chequebook: String?,
+    ) : SpendPlan, SetsUpChequebook {
+        init {
+            require(settlementDepositPlur.signum() >= 0) { "deposit" }
+            require(chequebook == null || isAddressHex(chequebook)) { "chequebook" }
+        }
+    }
 
     /**
      * Extending one batch (`ant_storage_topup_xdai`): swap, approve
@@ -56,14 +68,39 @@ sealed interface SpendPlan {
 
     /**
      * Connecting a batch the wallet bought for the node (#115,
-     * `ant_storage_connect_batch`): it buys nothing, but on a first
-     * connect ant sets up the chequebook — deploys it (issuer = the node)
-     * and moves at most [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR] of the
-     * node's xBZZ into it, as a first buy does. Nothing else: no swap, no
-     * approval, no batch.
+     * `ant_storage_connect_batch`): it buys nothing, but ant then sets up
+     * the chequebook — deploys it (issuer = the node) if there's none —
+     * and brings its deposit up to the target for the node's plan, from
+     * xBZZ the wallet sent the node for it, as a buy does. That transfer
+     * moves at most [settlementDepositPlur], the deposit the funding
+     * review showed (0: none), and only to [chequebook] when the node
+     * already has one (null only when the connect may deploy it). Nothing
+     * else: no swap, no approval, no batch.
      */
-    data class ConnectBatch(override val owner: String) : SpendPlan
+    data class ConnectBatch(
+        override val owner: String,
+        override val settlementDepositPlur: BigInteger,
+        override val chequebook: String?,
+    ) : SpendPlan, SetsUpChequebook {
+        init {
+            require(settlementDepositPlur.signum() >= 0) { "deposit" }
+            require(chequebook == null || isAddressHex(chequebook)) { "chequebook" }
+        }
+    }
+
+    /**
+     * A plan that may set up the node's chequebook: deploy it, and pay its
+     * settlement deposit — at most [settlementDepositPlur] (and never more
+     * than [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR]), to [chequebook] if
+     * it's known.
+     */
+    sealed interface SetsUpChequebook {
+        val settlementDepositPlur: BigInteger
+        val chequebook: String?
+    }
 }
+
+private fun isAddressHex(s: String) = s.length == 40 && s.all { it in '0'..'9' || it in 'a'..'f' }
 
 /**
  * The Swarm node's broadcast gate (#114, #116, #117).
@@ -81,24 +118,31 @@ sealed interface SpendPlan {
  * request racing the app's own spend can at worst use up one of its
  * slots, which makes the app's spend fail rather than spend twice.
  *
- * One slot doesn't pin its recipient: a buy's (or a batch connect's,
- * #115) chequebook settlement deposit ([SpendPermit.Slot.SettlementDeposit], at most
- * [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR] = 0.001 xBZZ) may be a `transfer` to any
- * address. On a first buy the chequebook it funds is created in the same
- * flow, so its address can't be known before ant sends the deposit; and
- * since ant 0.5.51 any buy or connect may also top up the deposit of a
- * chequebook ant adopted (one deployed earlier, on this device or
- * another), whose address the app doesn't pin either. That is safe only
+ * A buy's (or a batch connect's, #115) chequebook settlement deposit
+ * ([SpendPermit.Slot.SettlementDeposit]) moves at most the deposit the
+ * user confirmed ([SpendPlan.SetsUpChequebook.settlementDepositPlur], the
+ * quote's `settlement_deposit_plur`; 0 admits no transfer at all), and
+ * never more than [SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR] = 1 xBZZ,
+ * ant's cap on the plan-scaled target (ant 0.5.68+). When the node
+ * already has a chequebook, the transfer must go to it
+ * ([SpendPlan.SetsUpChequebook.chequebook], ant's persisted one: the only
+ * one ant funds while it has one). Only when it has none is the
+ * recipient left open: the buy or connect deploys the chequebook it
+ * funds in the same flow, so its address can't be known before ant sends
+ * the deposit (or ant adopts one this account deployed earlier, on
+ * another device, which the app doesn't know either). That is safe only
  * because no ant gateway route transfers xBZZ to an address the caller
  * chooses. Several routes transfer xBZZ — `POST /chequebook/deposit`
  * (#117), `POST /v0/settlement/deposit`, and `POST /stamps`, whose
  * after-buy hook deploys or tops up a chequebook — but every one pays
  * only the node's own chequebook, the one ant loaded or adopted. So
- * during a buy or connect the only `transfer`s ant can sign go to the
- * node's chequebooks. Recheck this on every ant bump: if ant ever gains a
- * route that pays a caller-chosen address (a withdraw, a cash-out), pin
- * this slot to the node's chequebook first — until then a request racing
- * a buy could send up to 0.001 xBZZ to an address of its choice.
+ * during a first buy or connect the only `transfer`s ant can sign go to
+ * the node's chequebooks. Recheck this on every ant bump (last: ant
+ * 0.5.60..0.5.68, which added only the `/v0/cache` routes, none of
+ * which touches the chain): if ant ever gains a route that pays a
+ * caller-chosen address (a withdraw, a cash-out), a request racing a
+ * first buy could send up to its confirmed deposit to an address of its
+ * choice, so the first deploy would need pinning too.
  */
 object SpendGuard {
     @Volatile
@@ -203,14 +247,14 @@ class SpendPermit(val plan: SpendPlan) {
                     address(0) == owner && tx.value <= maxSwap
             }
         }
-        // What sets up the chequebook: a first buy's last two, or all a connect may send.
-        val setsUpChequebook = plan is SpendPlan.BuyStamp || plan is SpendPlan.ConnectBatch
+        // What sets up the chequebook: a buy's last two, or all a connect may send.
         val (depth, amount) = when (plan) {
             is SpendPlan.BuyStamp -> plan.depth to plan.amountPerChunk
             is SpendPlan.ExtendStamp -> plan.depth to plan.amountPerChunk
             is SpendPlan.DepositChequebook -> return null
             is SpendPlan.ConnectBatch -> null to null
         }
+        val setup = plan as? SpendPlan.SetsUpChequebook
         return when {
             depth != null && amount != null && to == BZZ_TOKEN && selector == SEL_APPROVE && words == 64 ->
                 Slot.Approve.takeIf { address(0) == POSTAGE_STAMP && uint(1) == amount.shiftLeft(depth) }
@@ -223,15 +267,18 @@ class SpendPermit(val plan: SpendPlan) {
                 }
             plan is SpendPlan.ExtendStamp && to == POSTAGE_STAMP && selector == SEL_TOP_UP && words == 64 ->
                 Slot.TopUp.takeIf { hex(word(0)) == plan.batchId && uint(1) == plan.amountPerChunk }
-            setsUpChequebook && to == CHEQUEBOOK_FACTORY && selector == SEL_DEPLOY_CHEQUEBOOK && words == 96 ->
-                Slot.DeployChequebook.takeIf { address(0) == owner }
-            setsUpChequebook && to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 ->
-                // The chequebook's settlement deposit: ant's 0.001 xBZZ target at most.
-                // The recipient (the chequebook ant just deployed) isn't known here, so
-                // any address passes — safe only while no ant gateway route transfers
-                // xBZZ to a caller-chosen address; see the class KDoc.
+            setup != null && to == CHEQUEBOOK_FACTORY && selector == SEL_DEPLOY_CHEQUEBOOK && words == 96 ->
+                // Not when the node already has a chequebook: ant funds that one, it deploys none.
+                Slot.DeployChequebook.takeIf { address(0) == owner && setup.chequebook == null }
+            setup != null && to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 ->
+                // The chequebook's settlement deposit: at most what the user confirmed (and
+                // ant's 1 xBZZ cap), to the node's chequebook when it has one; a first
+                // buy's or connect's chequebook isn't known here, so then any address
+                // passes — see the class KDoc.
                 Slot.SettlementDeposit.takeIf {
-                    address(0) != null && uint(1).signum() > 0 && uint(1) <= MAX_SETTLEMENT_DEPOSIT_PLUR
+                    val recipient = address(0)
+                    recipient != null && (setup.chequebook == null || recipient == setup.chequebook) &&
+                        uint(1).signum() > 0 && uint(1) <= settlementDepositCap(setup.settlementDepositPlur)
                 }
             else -> null
         }
@@ -253,8 +300,16 @@ class SpendPermit(val plan: SpendPlan) {
         private const val SEL_TOP_UP = "b67644b9" // topUp(bytes32,uint256)
         private const val SEL_DEPLOY_CHEQUEBOOK = "15efd8a7" // deploySimpleSwap(address,uint256,bytes32)
 
-        /** 0.001 xBZZ, ant's chequebook settlement deposit target. */
-        val MAX_SETTLEMENT_DEPOSIT_PLUR: BigInteger = BigInteger.TEN.pow(13)
+        /**
+         * 1 xBZZ, the most ant's chequebook settlement deposit target asks
+         * for (0.1 xBZZ at depth 21, doubling per level; ant 0.5.68+): a
+         * hard ceiling on top of the confirmed deposit, in case a quote
+         * ever said more.
+         */
+        val MAX_SETTLEMENT_DEPOSIT_PLUR: BigInteger = BigInteger.TEN.pow(16)
+
+        /** The most a settlement deposit confirmed as [confirmed] PLUR may move: that, within [MAX_SETTLEMENT_DEPOSIT_PLUR]. */
+        fun settlementDepositCap(confirmed: BigInteger): BigInteger = confirmed.max(BigInteger.ZERO).min(MAX_SETTLEMENT_DEPOSIT_PLUR)
 
         /** 0.01 xDAI of gas per transaction; ant's biggest (the chequebook deploy) is 0.003. */
         val MAX_GAS_WEI: BigInteger = BigInteger.TEN.pow(16)
@@ -266,7 +321,7 @@ class SpendPermit(val plan: SpendPlan) {
             setOf(Slot.Swap, Slot.Approve, Slot.TopUp)
         }
 
-        /** What connecting a batch (#115) may broadcast: the chequebook's setup, as on a first buy. */
+        /** What connecting a batch (#115) may broadcast: the chequebook's setup, as on a buy. */
         val CONNECT_SLOTS: Set<Slot> = setOf(Slot.DeployChequebook, Slot.SettlementDeposit)
 
         /** The most gas connecting a batch can cost: [MAX_GAS_WEI] for each of [CONNECT_SLOTS]. */

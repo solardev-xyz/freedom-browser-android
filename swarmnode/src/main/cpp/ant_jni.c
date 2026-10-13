@@ -646,8 +646,9 @@ Java_baby_freedom_swarm_AntNative_storageTopupXdai(JNIEnv *env, jobject thiz, jl
 /*
  * ant_storage_connect_batch (#115): registers a batch the node's account
  * already owns on Gnosis — one the wallet bought for it through
- * SwarmNodeFunder. Buys nothing itself, but on a first connect ant sets
- * up the chequebook (deploy + settlement deposit), which broadcasts: so
+ * SwarmNodeFunder. Buys nothing itself, but ant then sets up the
+ * chequebook (a deploy when there's none, and the plan-sized settlement
+ * deposit), which broadcasts: so
  * it puts the gate back first, like the spends, and SwarmNode runs it
  * inside SpendGuard.during.
  */

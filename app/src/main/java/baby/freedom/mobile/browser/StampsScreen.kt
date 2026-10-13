@@ -486,6 +486,8 @@ private fun BuyPage(
                 is QuoteState.Failed -> MutedText(stringResource(R.string.stamps_no_price_reason, quote.message))
                 is QuoteState.Ready -> {
                     TotalFigure(stringResource(R.string.stamps_total_about, withUnit(quote.quote.xdaiRequiredDisplay, "xDAI")))
+                    // ant 0.5.68+ sizes the deposit by the plan (up to 1 xBZZ): part of the total, so said up front.
+                    quote.quote.depositBzz?.let { MutedText(stringResource(R.string.stamps_total_includes_deposit, withUnit(it, "xBZZ"))) }
                     SubLine(stringResource(R.string.stamps_total_buy_note))
                     if (!quote.quote.sufficientFunds) {
                         Spacer(Modifier.height(4.dp))
@@ -844,4 +846,4 @@ private fun expiryText(ttlSeconds: Long): String =
 private const val STAMPS_POLL_MS = 10_000L
 
 /** ant reads each batch's balance from the chain for `/stamps`, giving up after 8 s. */
-private const val STAMPS_TIMEOUT_MS = 15_000
+internal const val STAMPS_TIMEOUT_MS = 15_000
