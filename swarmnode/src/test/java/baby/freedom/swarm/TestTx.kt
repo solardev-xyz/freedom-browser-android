@@ -65,6 +65,10 @@ internal object TestTx {
     fun transfer(to: String, amount: BigInteger) =
         tx(SpendPermit.BZZ_TOKEN, call("a9059cbb", addr(to), word(amount)))
 
+    /** ant 0.5.69's chequebook withdraw: `withdraw(uint256)` on the chequebook itself. */
+    fun withdraw(chequebook: String, amount: BigInteger, nonce: Long = 9) =
+        tx(chequebook, call("2e1a7d4d", word(amount)), nonce = nonce)
+
     fun call(selector: String, vararg words: ByteArray): ByteArray =
         words.fold(bytes(selector)) { acc, w -> acc + w }
 

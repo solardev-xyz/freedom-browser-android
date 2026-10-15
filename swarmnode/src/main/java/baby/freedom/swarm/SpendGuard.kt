@@ -138,11 +138,18 @@ private fun isAddressHex(s: String) = s.length == 40 && s.all { it in '0'..'9' |
  * only the node's own chequebook, the one ant loaded or adopted. So
  * during a first buy or connect the only `transfer`s ant can sign go to
  * the node's chequebooks. Recheck this on every ant bump (last: ant
- * 0.5.60..0.5.68, which added only the `/v0/cache` routes, none of
- * which touches the chain): if ant ever gains a route that pays a
- * caller-chosen address (a withdraw, a cash-out), a request racing a
- * first buy could send up to its confirmed deposit to an address of its
- * choice, so the first deploy would need pinning too.
+ * 0.5.60..0.5.69). 0.5.60..0.5.68 added only the `/v0/cache` routes,
+ * none of which touches the chain. 0.5.69 added a chequebook withdraw
+ * (`POST /chequebook/withdraw?amount=`, `ant_storage_settlement_withdraw_amount`):
+ * it takes only an amount and sends `withdraw(uint256)` to the node's
+ * own chequebook, whose contract pays its issuer, the node's own
+ * wallet, so it never pays a caller-chosen address either. No plan
+ * here admits it (it matches no [SpendPermit.Slot]: wrong recipient,
+ * wrong selector), so with or without a permit open it is refused; the
+ * app offers no withdraw. If ant ever gains a route that pays a
+ * caller-chosen address (a cash-out to a named beneficiary), a request
+ * racing a first buy could send up to its confirmed deposit to an
+ * address of its choice, so the first deploy would need pinning too.
  */
 object SpendGuard {
     @Volatile

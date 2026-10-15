@@ -325,4 +325,29 @@ class SpendGuardTest {
         throws { SpendPlan.ConnectBatch(TestTx.OWNER, BigInteger.ONE.negate(), null) }
         throws { SpendPlan.ConnectBatch(TestTx.OWNER, pointTwoBzz, "37") }
     }
+
+    @Test
+    fun aChequebookWithdrawIsNeverAdmitted() {
+        // ant 0.5.69 signs `withdraw(uint256)` to the chequebook (POST /chequebook/withdraw,
+        // ant_storage_settlement_withdraw_amount). The app offers no withdraw, so no permit
+        // admits one, and with no permit open nothing does.
+        val withdraw = TestTx.withdraw(chequebook, depositAmount)
+        assertFalse(SpendGuard.admit(TestTx.request(withdraw)))
+        val plans = listOf(
+            buy, extend, deposit, connect,
+            buyWith(pointTwoBzz, chequebook), SpendPlan.ConnectBatch(TestTx.OWNER, pointTwoBzz, chequebook),
+        )
+        for (plan in plans) {
+            val p = SpendPermit(plan)
+            assertNull(LegacyTx.decode(withdraw)?.let(p::slotFor))
+            assertFalse(p.admits(withdraw))
+            assertFalse(p.admits(TestTx.withdraw(chequebook, BigInteger.ONE, nonce = 12)))
+            assertFalse(p.admits(TestTx.withdraw("cc".repeat(20), depositAmount)))
+        }
+        // Inside a running spend too: the guard's own path refuses it.
+        SpendGuard.during(deposit) {
+            assertFalse(SpendGuard.admit(TestTx.request(withdraw)))
+            assertTrue(SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, depositAmount))))
+        }
+    }
 }

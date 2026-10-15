@@ -34,7 +34,7 @@ extern "C" {
  * rust/myotis-engine/src/lib.rs and is pinned to it by a capi.rs unit test
  * (header_pins_the_current_abi_version), so a bump that forgets this file
  * fails `cargo test`. Gate on this macro — do not copy the number. */
-#define MYOTIS_ABI_VERSION 32
+#define MYOTIS_ABI_VERSION 45
 
 /* Availability + ABI handshake. Installs the log ring subscriber (idempotent)
  * and returns the engine's ABI version; refuse to call anything else if it
@@ -89,6 +89,22 @@ bool myotis_set_tor_enabled(bool on);
  * 0 = this build has no Tor support. */
 int32_t myotis_tor_status(void);
 
+/* Name the absolute directories the embedded Tor client keeps its state and
+ * its directory cache in, before the first Tor read (required on Android;
+ * elsewhere unset means Arti's platform defaults). Returns true iff the client
+ * will use exactly these: false for a NULL, non-UTF-8 or relative path, a
+ * different pair once a bootstrap holds its directories, or a Tor-less build.
+ * Process-global, not per-handle. */
+bool myotis_set_tor_storage_dirs(const char *state_dir, const char *cache_dir);
+
+/* Allow or forbid EIP-1459 DNS discovery — the EL node lists, walked over the
+ * system resolver — for every network this process runs. Off by default: a
+ * host that resolves through the system resolver (desktop, daemon) switches it
+ * on; a host that supplies its own DNS servers has no port for them in this
+ * engine yet and leaves it off (mobile). Never used while Tor is enabled.
+ * Returns the state now in force. Process-global, not per-handle. */
+bool myotis_set_dns_discovery(bool on);
+
 /* Status JSON object (camelCase keys), or "{}" for an unknown handle. */
 char *myotis_status_json(int64_t handle);
 
@@ -130,7 +146,10 @@ bool myotis_accept_stale_anchor(int64_t handle);
  * refused, retryably, while no finalized block has landed or no peer still
  * serves that state), a number only inside [head-64, head+16] (head state),
  * anything else {"error","code":-32602}. Every result names the block it
- * proved at: "anchor": "head" | "finalized". */
+ * proved at: "anchor": "head" | "finalized".
+ * v41: the account read carries "blockTimestamp" (unix seconds) when that
+ * block's timestamp is PROVEN — the read ran against the beacon-attested
+ * block and its verdict holds — else null. */
 char *myotis_request_account_json(int64_t handle, const char *address,
                                   const char *block);
 char *myotis_get_storage_proof_json(int64_t handle, const char *address,
@@ -145,19 +164,25 @@ char *myotis_get_storage_at_json(int64_t handle, const char *address,
  * and "verified" (true = an ok/revert that ran against the beacon-FINALIZED
  * block; always false on unavailable), ABI >= 30.
  * `from` empty = anonymous; `value` is wei as a decimal string.
- * The engine checks `block` itself (ABI >= 27): latest/pending/safe or
+ * The engine checks `block` itself (ABI >= 27): latest/pending or
  * empty/NULL run against the VERIFIED HEAD's state; "finalized" (ABI >= 30)
  * runs against the beacon-finalized block — older and never reorged, but a
  * state peers may already have pruned, so it can fail retryably while latest
- * serves (before ABI 30 it ran against the head); safe and pending still mean
- * the head (#366). A block number (0x-hex, or bare decimal digits) runs only
+ * serves (before ABI 30 it ran against the head); pending means the head
+ * (#366). A block number (0x-hex, or bare decimal digits) runs only
  * within [head-64, head+16], and still against head state. Anything else is
  * refused, never answered from the head:
- *   - behind that window, earliest, a block hash, or a malformed selector:
+ *   - behind that window, safe (no engine tracks the safe head; served from
+ *     the head before #366), earliest, a block hash, or a malformed selector:
  *     {"error","code":-32602}, PERMANENT (JSON-RPC invalid params) — do
  *     not retry. A malformed from/to/data/value is refused the same way;
  *   - ahead of the window, or no verified head yet: a plain {"error"},
  *     retryable.
+ * An EXECUTOR refusal is the same permanent {"error","code":-32602} (ABI >= 33):
+ * a head whose header and this build's fork table disagree about Amsterdam —
+ * an Amsterdam block without EIP-7843's slot number, or a slot number on a
+ * block the table puts before Amsterdam (the fork was scheduled or moved after
+ * this build shipped). It ran nowhere, so it carries no "blockNumber".
  * An EMPTY `to` selects contract creation (the calldata is init code and the
  * constructor's return data is the result), so a NULL `to` is REFUSED
  * (ABI >= 29) rather than read as that: pass "" to create. */
@@ -177,14 +202,68 @@ char *myotis_eth_call_overrides_json(int64_t handle, const char *from,
                                      const char *state_overrides);
 /* {"status":"ok","gas":N} | {"status":"revert","dataHex"} (the estimated tx
  * reverted — a verified answer; serve JSON-RPC code 3 with the raw payload) |
- * {"status":"unavailable","reason"} | {"error"}. */
+ * {"status":"unavailable","reason"} | {"error"} (retryable) |
+ * {"error","code":-32602} (ABI >= 33: an executor refusal, as for
+ * myotis_eth_call_json — PERMANENT, do not retry). */
 char *myotis_estimate_gas_json(int64_t handle, const char *from,
                                const char *to, const char *data,
                                const char *value);
-/* {"status":"ok","addressHex","blockNumber"} | {"status":"noRecord",...} |
- * {"status":"offchain",...} | {"error"}. */
+/* eth_estimateGas for the FULL JSON-RPC transaction object (ABI >= 34): `tx`
+ * is geth's TransactionArgs JSON (from, to, input|data, value, gas, gasPrice |
+ * maxFeePerGas + maxPriorityFeePerGas, nonce, chainId, type, accessList,
+ * authorizationList), `block` the RPC block selector (checked as for
+ * myotis_eth_call_json), `state_overrides` a state override object (empty =>
+ * none). Every field is applied or the request refused. Returns the shapes of
+ * myotis_estimate_gas_json plus {"status":"infeasible","reason"} — the
+ * transaction does not fit the caller's gas or funds; serve JSON-RPC -32000
+ * with `reason` verbatim, as geth does — and {"error","code":-32602} for a
+ * malformed or contradictory object (PERMANENT, do not retry). */
+char *myotis_estimate_gas_tx_json(int64_t handle, const char *tx,
+                                  const char *block,
+                                  const char *state_overrides);
+/* eth_call for the FULL JSON-RPC transaction object (ABI >= 35): the arguments
+ * of myotis_estimate_gas_tx_json, every field applied as the estimate applies
+ * it (`gas` is the call's limit, a fee is checked against the base fee and
+ * charged to the sender, both lists are applied) or the request refused.
+ * Returns the shapes of myotis_eth_call_json plus {"status":"infeasible",
+ * "reason"} — the call cannot succeed within the caller's gas, fee cap or
+ * funds; serve JSON-RPC -32000 with `reason` verbatim, as geth does — and
+ * {"error","code":-32602} for a malformed or contradictory object
+ * (PERMANENT, do not retry). */
+char *myotis_eth_call_tx_json(int64_t handle, const char *tx,
+                              const char *block, const char *state_overrides);
+/* eth_createAccessList for the FULL JSON-RPC transaction object (ABI >= 40):
+ * the arguments of myotis_estimate_gas_tx_json, the request checked as
+ * myotis_eth_call_tx_json checks it. Returns {"status":"ok","accessList":
+ * [{"address","storageKeys":[...]}],"gasUsed":N} — the EIP-2930 list the
+ * transaction touches, built as geth builds it (sorted by address and key),
+ * and the gas the run made with it used — plus "vmError" when that run
+ * itself failed ("execution reverted", with "revertDataHex" = the raw
+ * payload, or the halt, e.g. "out of gas"): geth's `error` field, which it
+ * reports NEXT TO the list, so serve the list and the error together, never
+ * a code-3 error (named vmError here because a top-level "error" is this
+ * engine's failure envelope) | {"status":
+ * "unavailable","reason"} (retryable) | {"status":"infeasible","reason"} (the
+ * request cannot run within the caller's gas, fee cap or funds; serve
+ * JSON-RPC -32000 with `reason` verbatim, as geth does) | {"error"}
+ * (retryable) | {"error","code":-32602} for a malformed or contradictory
+ * object (PERMANENT, do not retry). Every served status also carries
+ * blockNumber and verified, as myotis_eth_call_json's shapes do. */
+char *myotis_create_access_list_json(int64_t handle, const char *tx,
+                                     const char *block,
+                                     const char *state_overrides);
+/* {"status":"ok","addressHex","blockNumber","blockTimestamp"} |
+ * {"status":"noRecord",...} | {"status":"offchain",...} | {"error"}.
+ * v41: "blockTimestamp" (unix seconds) on every status, from the verified
+ * header the resolution ran against; the record shapes below carry it too. */
 char *myotis_resolve_ens_json(int64_t handle, const char *name);
-/* Generic ENS record dispatch; method + args travel in params_json. */
+/* Generic ENS record dispatch; method + args travel in params_json.
+ * v42: method "ownership" — {"status":"ok","blockNumber","blockTimestamp",
+ * "verified","wrapped", and when present "registrantHex","managerHex",
+ * "resolverHex","expiresAt","gracePeriodSeconds"}: the registry's owner and
+ * resolver and, for a .eth second-level name, the registrar's registrant,
+ * expiry and grace period, seen through the NameWrapper; an absent part is
+ * left out. An older engine answers "unknown ens method". */
 char *myotis_ens_record_json(int64_t handle, const char *params_json);
 /* Block JSON, the literal "null", or {"error"}. full_transactions selects
  * decoded tx objects over hashes. */
@@ -217,15 +296,42 @@ char *myotis_fee_estimate_json(int64_t handle);
 char *myotis_fee_history_json(int64_t handle, int64_t block_count,
                               const char *newest_block_tag,
                               const char *percentiles_json);
-/* {"txHash":"0x..."} or {"error"}. */
+/* {"txHash":"0x..."}, {"status":"rejected","reason"} (ABI >= 36: never
+ * broadcast; reason = geth's txpool verdict, served under -32000),
+ * {"error","code":-32602} (ABI >= 44: bytes that are no transaction this node
+ * relays, never broadcast — a permanent refusal), or {"error"}. */
 char *myotis_send_raw_transaction_json(int64_t handle, const char *raw_tx_hex);
+/* ABI >= 45: the eth_sendRawTransaction gate on the bytes alone, no handle:
+ * {"ok":true}, the permanent {"error","code":-32602} refusal, or {"error"} for
+ * bad hex. Call it before any readiness hold, so a starting or paused node
+ * answers bytes that are no transaction with the permanent refusal. */
+char *myotis_check_raw_transaction_json(const char *raw_tx_hex);
 
 /* Release any char* returned by the functions above. NULL is a no-op. */
 void myotis_string_free(char *s);
 
 /* v21: the opt-in eth_getLogs watch-list index (docs/eth-getlogs-design.md).
  * get_logs answers only inside indexed coverage; anything else is an
- * {"error": ...} JSON — never an empty array for unindexed ranges. */
+ * {"error": ...} JSON — never an empty array for unindexed ranges. A filter
+ * that fails to parse (malformed, a `safe` or hash selector, no address)
+ * carries "code": -32602 as well, like eth_call's refusals; a refusal that
+ * depends on the index (coverage, the watch-list) stays plain and retryable.
+ *
+ * set_log_index_config takes {"enabled":bool,"watch":[{"address","fromBlock",
+ * "topic0s"?,"name"?}],"unwatch":["0x..",..]?}. `watch` is additive (v24): an
+ * address left out of it stays subscribed. `unwatch` (v37) is the unsubscribe
+ * — each address it names leaves the index before the union, with its
+ * coverage and its stored logs; the other entries keep theirs, and an address
+ * the index does not watch is ignored. true means the unwatch is durable (its
+ * checkpoint is on disk). false for malformed JSON, an address listed twice
+ * or under both keys, a handle without a running EL reader, or an unwatch
+ * whose checkpoint could not be written — the entries are then dropped in
+ * memory only, the rest of the push is not applied, and repeating the push
+ * retries the write.
+ *
+ * The status JSON's entries are {"address","fromBlock","name"?,"coveredLow"?,
+ * "coveredHigh"?,"restricted"?}; "restricted":true (v37) marks an entry
+ * indexed under a topic0 restriction. */
 char *myotis_get_logs_json(int64_t handle, const char *filter_json);
 bool myotis_set_log_index_config(int64_t handle, const char *config_json);
 char *myotis_log_index_status_json(int64_t handle);
@@ -264,7 +370,10 @@ char *myotis_export_log_index(int64_t handle, const char *path);
  * v31 also adds "snapServingPeers" to myotis_status_json: the pooled peers
  * that can answer a read at the anchored head NOW — gate reads on it rather
  * than on "snapPeers", which a pool of still-syncing peers satisfies for
- * hours while every read fails. */
+ * hours while every read fails.
+ * v38 adds "snap2ServingPeers": the part of "snapServingPeers" whose
+ * connection runs snap/2 (EIP-8189). Informational only — never gate on it;
+ * reads are the same on snap/1 and snap/2. */
 bool myotis_set_boot_enodes(int64_t handle, const char *enodes_json);
 
 #ifdef __cplusplus
