@@ -96,6 +96,8 @@ class SwarmProviderTest {
         /** Uploads run past the gateway's whole-call deadline (a slow, working node). */
         var slowUploads = false
         var tag = 7L
+        /** ant v0.5.69's `GET /feeds` while too few peers answered to call a miss an empty feed. */
+        var feedsNotReady = false
 
         override fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int): SwarmProvider.Http.Answer {
             if (!up) throw java.io.IOException("connection refused")
@@ -142,6 +144,10 @@ class SwarmProviderTest {
                 }
                 method == "GET" && bare.startsWith("/chunks/") -> chunks[bare.removePrefix("/chunks/")]
                     ?.let { SwarmProvider.Http.Answer(200, emptyMap(), it) } ?: notFound()
+                method == "GET" && bare.startsWith("/feeds/") && feedsNotReady -> json(
+                    JSONObject().put("message", "feed lookup: feed has no updates (probed 1 indices); too few peers answered"),
+                    503,
+                )
                 method == "GET" && bare.startsWith("/feeds/") -> {
                     val (owner, topic) = bare.removePrefix("/feeds/").split('/')
                     var latest = -1L
@@ -571,6 +577,29 @@ class SwarmProviderTest {
         assertEquals(1, list.length())
         assertEquals("posts", list.getJSONObject(0).getString("name"))
         assertEquals(0, (ok(call("swarm_listFeeds", origin = other)) as JSONArray).length())
+    }
+
+    @Test
+    fun `an uncorroborated feed miss is node-not-ready, never an empty feed written from index 0`() {
+        connect()
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        feeds.grant(site)
+        ok(call("swarm_createFeed", JSONObject().put("name", "posts")))
+        node.feedsNotReady = true
+        for ((method, params) in listOf(
+            "swarm_updateFeed" to JSONObject().put("feedId", "posts").put("reference", "cd".repeat(32)),
+            "swarm_writeFeedEntry" to JSONObject().put("name", "posts").put("data", "hello"),
+            "swarm_readFeedEntry" to JSONObject().put("name", "posts"),
+        )) {
+            val e = err(call(method, params))
+            assertEquals(method, 4900, e.code)
+            assertEquals(method, "node-not-ready", e.reason)
+        }
+        assertTrue("nothing was signed or uploaded", node.uploads().none { it.second.startsWith("/soc/") })
+        // Once the node can tell, the feed reads as empty and the write lands at index 0.
+        node.feedsNotReady = false
+        assertEquals("feed_empty", err(call("swarm_readFeedEntry", JSONObject().put("name", "posts"))).reason)
+        assertEquals(0, okJson(call("swarm_writeFeedEntry", JSONObject().put("name", "posts").put("data", "hello"))).getInt("index"))
     }
 
     @Test
