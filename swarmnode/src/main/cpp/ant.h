@@ -292,7 +292,9 @@ int ant_set_unverified_logs_rpc(const AntHandle *handle,
  * GET /v0/settlement/swap and GET /node's "settlement" report, for a host
  * that doesn't run the gateway:
  *   {"supported":bool,"swap_switch":true,"swap_enabled":bool,
- *    "paying":bool,"chequebook":"0x…"|null,"persisted":false}
+ *    "paying":bool,"chequebook":"0x…"|null,"persisted":false,
+ *    "deposited_plur":"…"|null,"issued_plur":"…"|null,
+ *    "available_plur":"…"|null}
  * supported: this build pays peers with SWAP cheques once a funded
  * chequebook backs settlement (the `chain` feature). swap_switch: the
  * switch can be changed at runtime (ant_set_swap_enabled). swap_enabled:
@@ -300,7 +302,13 @@ int ant_set_unverified_logs_rpc(const AntHandle *handle,
  * alike. paying: cheques are being paid right now (switch on, chequebook
  * funds read from the chain and not spent), otherwise the free
  * pseudosettle tier. persisted: always false, the switch resets at
- * ant_init. Never blocks on the network. Free with ant_free_string.
+ * ant_init. The _plur figures are decimal PLUR strings: deposited_plur
+ * the chequebook's funds as last read from the chain (every minute),
+ * issued_plur every cheque issued from it (current with each cheque),
+ * available_plur what it can still pay out (deposited less issued);
+ * null before funds are read or without a chequebook (new after
+ * 0.5.67). Never blocks on the network: poll it for a live view. Free
+ * with ant_free_string.
  */
 char *ant_swap_status(const AntHandle *handle, char **out_err);
 
@@ -401,7 +409,11 @@ int ant_cache_set_capacity(const AntHandle *handle, uint64_t bytes, char **out_e
  * its cheque figures were lost, and let the node pay cheques from it
  * again, for downloads and uploads alike.
  * When the node's outbound cheque ledger (pushsync_outbound.json) is
- * found unparseable it is moved aside and a ".lost" marker is left;
+ * found unparseable it is moved aside and a ".lost" marker is left (as
+ * it is when the ledger written before per-chequebook sections may
+ * belong to a chequebook: its fresh-chequebook marker is unparsable, or
+ * a fresh deploy couldn't be recorded as such — the latter is lifted
+ * again once the record is written);
  * while that marker names a loss, the node pays no cheques (downloads
  * or uploads; both stay on the free pseudosettle tier) from any
  * chequebook that used the file (logged at warn, and /chequebook/balance
@@ -656,6 +668,9 @@ char *ant_storage_settlement_status(const AntHandle *handle, char **out_err);
  * at deposit 0 publishes fine until the peers' payment tolerance runs
  * out, then collapses into pushsync timeouts — so the Storage tab reads
  * this to detect that and offer ant_storage_settlement_topup.
+ * `target_*` is the deposit for the account's storage plan (its deepest
+ * usable batch; see ant_storage_settlement_topup), 0.001 xBZZ with no
+ * plan.
  * `enabled=false` (zeroed, needs_top_up=false) when this account has no
  * chequebook yet (buying/connecting a plan deploys one, funded), or when
  * this process's chain check disqualified its chequebook (settlement is
@@ -669,7 +684,9 @@ char *ant_storage_settlement_deposit(const AntHandle *handle,
 
 /*
  * Fund this account's chequebook up to the settlement deposit target
- * (0.001 xBZZ), funding ONLY with xDAI: the node swaps the xBZZ
+ * for its storage plan (0.1 xBZZ at depth 21, doubling per extra depth
+ * level and halving per level below, between 0.001 and 1 xBZZ; 0.001
+ * xBZZ with no plan), funding ONLY with xDAI: the node swaps the xBZZ
  * shortfall on-chain if it doesn't already hold it, then transfers the
  * deposit to the chequebook. The explicit top-up path — a chequebook's
  * deposit is only read at deploy time, so an already-deployed one can be
@@ -708,6 +725,51 @@ char *ant_storage_settlement_topup_amount(const AntHandle *handle,
                                           const char *gnosis_rpc,
                                           const char *amount_plur,
                                           char **out_err);
+
+/*
+ * Withdraw `amount_plur` (a decimal PLUR string, 1 xBZZ = 10^16 PLUR)
+ * from this account's chequebook back to its wallet (the chequebook's
+ * withdraw(uint256), signed by the node key, its issuer). Never takes
+ * xBZZ that backs a cheque already issued: an amount above the node's
+ * available credit (ant_swap_status available_plur: deposited less
+ * issued, bee's availableBalance) or above the chequebook's liquid
+ * balance is refused with the most it can take now, and nothing is sent
+ * while the node can't say what it has issued (its cheque ledger for
+ * this chequebook isn't loaded, or lost its figures). The node stops
+ * signing cheques against the amount before the transaction goes out
+ * and reads the chequebook's funds again once it confirms, so
+ * ant_swap_status available_plur / paying follow at once. Mirrors bee's
+ * (and the gateway's) POST /chequebook/withdraw?amount=. Errors on an
+ * amount that isn't a positive integer. Returns the refreshed
+ * ant_storage_settlement_deposit JSON, or the JSON literal `null` when
+ * the withdrawal confirmed but re-reading the deposit failed (not an
+ * error: the xBZZ has moved, so retrying would withdraw again; re-read
+ * the deposit later). An error once the transaction may have gone out
+ * (a receipt timeout, an RPC error after sending) does not mean nothing
+ * moved: the transaction may still land, so the node keeps the amount off
+ * ant_swap_status available_plur (and paying) for up to 10 minutes from
+ * the error, as it does on reads that don't show a confirmed one yet.
+ * Re-read ant_storage_settlement_deposit before retrying, or the retry
+ * may withdraw twice. Only a refusal before sending, or a reverted
+ * transaction, hands the amount back at once. SUBMITS A REAL TRANSACTION
+ * (a little xDAI for gas) and BLOCKS until it confirms. Requires the
+ * `chain` cargo feature.
+ */
+char *ant_storage_settlement_withdraw_amount(const AntHandle *handle,
+                                             const char *gnosis_rpc,
+                                             const char *amount_plur,
+                                             char **out_err);
+
+/*
+ * This account's wallet balances as a JSON object:
+ *   {"address":"0x…","bzz_plur","bzz","xdai_wei","xdai"}
+ * (PLUR / wei as decimal strings; bzz / xdai short 4-decimal display
+ * strings): the xBZZ ant_storage_settlement_topup_amount draws on first
+ * and the xDAI that pays for gas and swaps. Two light reads over
+ * `gnosis_rpc`, no gateway needed; a read that fails is an error, never
+ * a zero. Requires the `chain` cargo feature.
+ */
+char *ant_wallet_balance(const AntHandle *handle, const char *gnosis_rpc, char **out_err);
 
 /*
  * Deep read-back propagation check for an uploaded reference. Resolves
@@ -844,7 +906,8 @@ char *ant_storage_discover_full(const AntHandle *handle,
  * as-is (no redeploy — though one still short of its settlement deposit
  * is topped up from spare xBZZ); otherwise this signs an on-chain
  * factory.deploySimpleSwap (issuer = node EOA), funds it with the
- * 0.001 xBZZ settlement deposit so its cheques are actually backed,
+ * settlement deposit for the account's storage plan (see
+ * ant_storage_settlement_topup) so its cheques are actually backed,
  * persists the association, and returns the new address. SUBMITS REAL
  * ON-CHAIN TRANSACTIONS: spends gas (xDAI) plus the deposit (xBZZ, capped
  * to the wallet's balance) and BLOCKS until they confirm. Light-mode only (requires the `chain` cargo feature;
@@ -874,8 +937,10 @@ char *ant_deploy_chequebook(const AntHandle *handle,
  * For the xDAI-only flow, `xdai_to_send_display` is exactly how much more
  * xDAI to send; the node swaps it to xBZZ and buys the plan itself.
  * `settlement_deposit_*` is the one-time xBZZ deposit this purchase also
- * puts behind the node's chequebook so its cheques are backed (0 once it
- * is funded). It is part of the all-in figures (`needed_bzz`,
+ * puts behind the node's chequebook so its cheques are backed: what it
+ * is short of the target for a `depth` plan (0.1 xBZZ at depth 21,
+ * doubling per extra depth level and halving per level below, between
+ * 0.001 and 1 xBZZ), 0 once it is funded that far. It is part of the all-in figures (`needed_bzz`,
  * `xdai_required`, `xdai_to_send`, `sufficient_funds`), not of
  * `total_cost_*`, which stays the plan's own price.
  * Requires the `chain` cargo feature.
@@ -1055,6 +1120,23 @@ bool ant_start_gateway(const AntHandle *handle,
                        char **out_err);
 
 /*
+ * Run the chain startup work ant_start_gateway runs with a `gnosis_rpc`,
+ * for a host that serves no HTTP (new after 0.5.66). It drops batches the
+ * chain disowns, registers batches this account owns on-chain but not on
+ * disk, and adopts the persisted or on-chain chequebook. Adopting
+ * switches outbound settlement on and starts the funds watch, so uploads
+ * and downloads pay with cheques instead of staying on the free tier
+ * after an ant_init. Spends nothing: no deploy, no funding. Returns at
+ * once (the work runs in the background) and doesn't retry on its own:
+ * call it again on foreground or once the network is back. Re-calling is
+ * cheap once settlement is on. ant_swap_status's `paying` reports when
+ * cheques start.
+ * Returns 0 once started; -1 with *out_err set on a null handle, a null,
+ * empty or non-UTF-8 gnosis_rpc, or a build without the `chain` feature.
+ */
+int ant_chain_init(const AntHandle *handle, const char *gnosis_rpc, char **out_err);
+
+/*
  * Set the CORS origins the in-process gateway allows (new after 0.5.48).
  * Takes effect at the next ant_start_gateway; call it before the first
  * start or after ant_stop_gateway — while a gateway is running it fails
@@ -1191,7 +1273,10 @@ typedef char *(*ant_chain_transport)(const char *request_json, void *host_ctx);
  * Threading: the callback runs on ant's runtime blocking pool, so
  * blocking inside it is fine and expected (verified reads, locks, a
  * nested event loop). It may be invoked concurrently from several such
- * threads, so `host_ctx` must be safe to use from any thread.
+ * threads, so `host_ctx` must be safe to use from any thread. Return
+ * within a minute: some reads (the chequebook funds refresh) stop
+ * waiting after 60 s, but the thread stays inside the callback until it
+ * returns, and that refresh starts no new read until it does.
  *
  * Lifetime: `transport` must stay callable and `host_ctx` valid until
  * the transport is replaced/cleared or ant_shutdown is called. Both of
@@ -1299,31 +1384,235 @@ char *ant_bench_stop(const AntHandle *handle, char **out_err);
  * ------------------------------------------------------------------- */
 
 /*
+ * The 32-byte feed topic a text topic names, as 64 lowercase hex:
+ * keccak256(utf8(text)), bee-js Topic.fromString, the way a Solar Punk
+ * catalog entry's "topic" is read; `text` is hashed exactly as given.
+ * The same hash ant_publisher_start applies to "topic_text", so a host
+ * keeping a text topic can create the channel's feed manifest
+ * (POST /feeds/{owner}/{topic}) before going live. Needs no node.
+ * Returns an allocated string (free with ant_free_string), or NULL with
+ * a message in *out_err when `text` is NULL or not UTF-8.
+ */
+char *ant_topic_from_string(const char *text, char **out_err);
+
+/*
+ * The single-owner-chunk identifier, as 64 lowercase hex, of the ladder
+ * time marker (issue #174) for the channel whose feed topic is
+ * `topic_hex` (64 hex, "0x" optional) and the marker period `period`
+ * (unix_ms / 10000): keccak256("ladder-marker" || group topic ||
+ * period_be8), the group topic being keccak256 of the text
+ * "antstream-ladder-<topic hex>", where a broadcast started with
+ * "ladder": true writes it every ten seconds. A viewer reads
+ * GET /soc/{owner}/{id} (JSON {"v":2,"period":..,"writtenAt":..,
+ * "rungs":{"<topic hex>":<newest feed index>},"segmentMs":..}) and starts
+ * its feed read at that index (GET /feeds/{owner}/{topic}?after=<index>)
+ * instead of walking the feed from 0. Needs no node. Returns an
+ * allocated string (free with ant_free_string), or NULL with a message
+ * in *out_err when `topic_hex` is NULL or not 32 bytes of hex.
+ */
+char *ant_ladder_marker_id(const char *topic_hex, uint64_t period, char **out_err);
+
+/*
+ * How long a broadcast fits on the storage plan, checked before going
+ * live (issue #176). `config_json` is the publisher config the broadcast
+ * would start with (its "batch_id", "format", "bitrate_kbps",
+ * "segment_ms" and "ladder" are read; "bitrate_kbps" counts everything a
+ * segment carries, so a host adds its audio rate); `plan_json` is the
+ * plan as ant_storage_status reports it (its "enabled", "batch_id",
+ * "immutable", "worst_case_remaining_chunks", "usable" and "propagating"
+ * are read; pass "usable" through, since a missing one reads as true and
+ * the estimate's "usable" would then always be true).
+ * Returns a JSON object:
+ *   {"batch_id","immutable","usable","chunks_per_minute","chunks_left",
+ *    "minutes_left","low"}
+ * the chunks a minute of the broadcast stamps (segments, the playlist
+ * and feed update after each, ladder markers, the recording's share),
+ * the room left counting the batch's fullest bucket, the whole minutes
+ * that fit, and "low" under 60 minutes. An immutable batch refuses the
+ * broadcast's uploads once "minutes_left" runs out; a mutable one
+ * ("immutable": false) overwrites its oldest chunks instead, so a host
+ * warns about it whatever its room. Needs no node.
+ * Returns an allocated string (free with ant_free_string), or NULL with
+ * a message in *out_err when either document doesn't parse, the plan is
+ * not connected, or the plan's batch is not the config's.
+ */
+char *ant_publisher_capacity(const char *config_json,
+                             const char *plan_json,
+                             char **out_err);
+
+/*
  * Start a live broadcast from this node.
  *
  * This is the bench loop above with the synthetic generator replaced by
- * the host's camera pipeline. Per segment: POST /bzz the segment,
- * rebuild the HLS media playlist over a sliding window, POST /bzz the
- * playlist, and publish its reference as a sequence-feed update with
- * POST /soc (bee-js shape: id = keccak256(topic || index_be8), payload
- * timestamp_be8 || reference) so any bee gateway resolves the channel.
+ * the host's camera pipeline. Per segment it uploads the segment,
+ * rebuilds the HLS media playlist over a sliding window (the newest
+ * segments whose rendered playlist fits in one 4096-byte chunk, so a
+ * viewer's poll is one chunk read; "playlist_window" caps the count),
+ * uploads the playlist, and publishes it as a sequence-feed update
+ * with POST /soc (id = keccak256(topic || index_be8)), in one of two
+ * formats ("format"):
+ *
+ *   "bzz" (the default): POST /bzz for segments and the playlist
+ *     (stream.m3u8), segments listed as gateway-root /bzz/<ref>/<name>
+ *     paths, and a v1 update (bee-js upload shape: payload
+ *     timestamp_be8 || reference of the playlist's manifest). A viewer
+ *     plays /bzz/<channel reference>/stream.m3u8, which re-resolves the
+ *     feed; the web player and the Android Watch tab read this.
+ *   "solar-punk": POST /bytes for segments and the playlist, segments
+ *     and EXT-X-MAP listed by bare 64-hex reference (a viewer fetches
+ *     each from <its gateway>/bytes/<ref>), and a v2 update (bee-js
+ *     uploadPayload shape: the SOC wraps the playlist's own root chunk).
+ *     GET /soc/{owner}/{id} and GET /feeds/{owner}/{topic} then both
+ *     return the playlist text, on any bee gateway and on ant; this is
+ *     what Solar Punk's viewers read. The channel reference does not
+ *     resolve to the playlist through /bzz.
+ *
  * A feed manifest is created once at start with POST /feeds; its
- * reference is the single thing a viewer needs.
+ * reference names the channel (owner and topic, in its metadata) in one
+ * value, the single thing a viewer needs.
  *
  * `config_json` is a PublisherConfig document; "channel" and "batch_id"
  * are required:
  *   {
  *     "channel":         "Kitchen",               // required, names the feed
- *     "topic":           "0x<64 hex>",            // omit -> derived per broadcast
+ *     "topic_text":      "kitchen-cam",           // text topic, see below
+ *     "topic":           "0x<64 hex>",            // or raw topic bytes
+ *     "format":          "bzz",                   // or "solar-punk"; see above
+ *     "start_index":     0,                       // override: exact first feed index; see below
  *     "gateway":         "http://127.0.0.1:1633", // ant_start_gateway's address
  *     "batch_id":        "0x<64 hex>",            // required: the storage plan
  *     "segment_ms":      2000,                    // nominal segment duration
  *     "bitrate_kbps":    900,                     // 360p, the stage-1 rendition
  *     "max_in_flight":   4,                       // measured stable window
  *     "max_backlog":     4,                       // drop-oldest past this
- *     "playlist_window": 6,                       // segments in the live playlist
- *     "notes":           "iPhone 15 Pro / LTE"
+ *     "playlist_window": 64,                      // most segments listed; 4096 bytes binds first
+ *     "notes":           "iPhone 15 Pro / LTE",
+ *     "reap_ms":         60000,                      // end by itself after 60 s with no media; 0 = never (default)
+ *     "ladder":          true,                       // master playlist + ladder time markers; false (default)
+ *     "width":           640,                        // the master's RESOLUTION, left out unless both set
+ *     "height":          360,
+ *     "recovery_path":   "<app support>/antstream/broadcast-recovery.json", // crash recovery; "" = none (default)
+ *     "resume":          false                       // continue the broadcast saved there; see below
  *   }
+ *
+ * "topic_text" is the topic as a Solar Punk catalog entry names it: the
+ * feed topic is keccak256(utf8(topic_text)), bee-js Topic.fromString,
+ * hashed exactly as given. "topic" is raw 32-byte hex instead, for a
+ * host that already has topic bytes. Set one, not both (an error). With
+ * neither, the topic is the text "antstream/<channel>", the same for
+ * every broadcast of the channel, so the channel reference (the feed
+ * manifest of owner + topic) stays one link. Progress and the report
+ * carry the topic as hex ("topic") and its text ("topic_text", empty
+ * for a raw topic), and the "format".
+ *
+ * A broadcast continues the feed its topic already holds (issue #173).
+ * Before its first update it reads the feed head once
+ * (GET /feeds/{owner}/{topic}?exact=true: ant's node answers only once
+ * the slot after the head is confirmed empty, else a 503, so a head
+ * slow to answer is never skipped) and writes from the index after it;
+ * it
+ * numbers its media from where the head playlist's numbering ends
+ * (EXT-X-MEDIA-SEQUENCE plus its entries, gaps included), with an
+ * EXT-X-DISCONTINUITY on its first segment, so a viewer following the
+ * channel sees the media sequence only ever increase; and its recording
+ * opens with the head playlist's entries, so the head plays every
+ * broadcast of the channel. Only a 404 "no update found" (a feed nothing
+ * was written to; the node answers it only for a miss more than a couple
+ * of peers agree on, and a 503 for one a cold node's one or two peers
+ * gave) starts at index 0. A v1 head's playlist that does not retrieve
+ * counts as a failed read too. Any other failed read holds every
+ * playlist and feed update (segments still upload) until a retry reads
+ * the head, so a flaky read never overwrites earlier broadcasts; a
+ * broadcast stopped before it ever does writes none. Confirming either
+ * miss (an empty feed, or the slot after the head) takes more than two
+ * peers' "not found": on a node with at most two peers the head read
+ * keeps answering 503, so the broadcast publishes no playlist until
+ * the node reaches three or more (a brand-new channel included).
+ *
+ * "ladder": true also publishes the channel as a one-rung ladder (issue
+ * #174), so a viewer joining hours in reaches the live playlist in two
+ * round trips (one marker read, then one round of feed-slot reads from
+ * the index it names) instead of walking the feed from index 0. The
+ * ladder's group is the text "antstream-ladder-<topic hex>" (progress
+ * and the report carry it as "ladder_group"); its feed topic is
+ * keccak256 of that text. Every ten seconds of global time (period =
+ * unix_ms / 10000) a ladder time marker goes up: one single-owner chunk
+ * at ant_ladder_marker_id(topic, period) holding Solar Punk's v2 marker
+ * JSON, naming the newest feed index this broadcast published and
+ * "segment_ms". From the first landed feed update until the stop, none
+ * while paused; 360 chunks an hour; a marker that fails is skipped
+ * ("markers_written" doesn't rise). Under "solar-punk" with a
+ * topic_text a URI can carry (no '/', whitespace, '#', '?' or '%', so
+ * not the default "antstream/<channel>"), a one-rung master playlist
+ * also goes up as the group feed's next v2 update (after its head, read
+ * like the channel's): #EXT-X-STREAM-INF with BANDWIDTH and
+ * AVERAGE-BANDWIDTH measured from the segments listed (peak over three
+ * in a row, and the mean), then swarm://<owner>/<topic_text>. Written
+ * once three segments are measured and again when the measured peak
+ * outgrows the advertised one by a quarter; "master_reference" is the
+ * last that landed. Markers and the master are never waited on by a
+ * stop: one still on the wire then is dropped.
+ *
+ * "start_index", when present, overrides all of that: the first update
+ * goes exactly there, nothing is read, the numbering starts at 0 and the
+ * recording holds this broadcast alone. A host passing the previous
+ * broadcast's "feed_index" there must get it right, or it rewrites the
+ * indices that hold earlier playlists.
+ *
+ * "recovery_path" keeps a recovery entry for the broadcast (issue
+ * #175): a small JSON file, written (to a temporary file, then renamed
+ * over it) ahead of every feed update once that update's playlist has
+ * uploaded. It holds "saved_at_ms", "channel", "owner", "topic",
+ * "topic_text", "format", "broadcast_id", "feed_index" (the index of
+ * the update it was written ahead of), the media and discontinuity
+ * sequence, the dating clock, "recording" (every entry listed so
+ * far; gap entries have "gap": true) and "shape" ("live", or "closing" /
+ * "recording" once a stop began closing the broadcast). It is removed once the recording
+ * is the feed's head, and kept when the recording or its update fails.
+ * A fresh broadcast with the same path replaces it at its first feed
+ * update. The whole list is rewritten each time, about 250 bytes an
+ * entry (some 450 KB after an hour at 2 s segments). A failure to write
+ * it shows as "recovery_error" in progress and the report, never in
+ * "errors": the broadcast goes on regardless.
+ *
+ * After a kill or crash, start again with "resume": true and the same
+ * "recovery_path" to carry that broadcast on: the same broadcast id,
+ * numbering and dating (never before the last saved segment), its first
+ * new segment behind one EXT-X-DISCONTINUITY, and a recording that
+ * holds every saved entry plus the new ones. The topic and "format" must
+ * be the entry's and the node's owner its "owner"; a mismatch, a
+ * missing or an unreadable entry fails the start and leaves the file
+ * as it was. The feed head is read once (retried until it answers)
+ * only to learn whether the update the entry was written ahead of
+ * landed; the run writes after it, and its playlist is not read as a
+ * predecessor. A head anywhere else means the channel moved on since:
+ * the run then ends by itself with nothing written and the reason in
+ * "errors", the entry left in place. To finalize instead, start with
+ * "resume" and call ant_publisher_stop straight away: the closing window
+ * and the recording go up as on any stop. Such a stopping run keeps
+ * reading a head that fails or does not answer for up to a minute after
+ * the stop (a read still in flight then is dropped), rather than giving
+ * up at the first as a new broadcast does. An entry whose "shape" is past
+ * "live" (a stop had begun closing it, so a live viewer may already have
+ * stopped) is only finalized: the run starts stopped, refuses segments,
+ * and writes the closing window and the recording, or, if the recording
+ * is already the head, only removes the entry. "resume" with
+ * "start_index" is an error.
+ *
+ * An interruption pauses a broadcast, it never ends it (issue #172):
+ * see ant_publisher_pause / ant_publisher_resume. It ends on
+ * ant_publisher_stop, or, with "reap_ms" set, by itself once that long
+ * passes with no media reaching the playlist (counted from the latest of
+ * go-live, the last listed segment and the first resume after it). Not
+ * while paused: a window that runs out during an outage ends the
+ * broadcast at ant_publisher_resume instead, so the closing playlist and
+ * the recording go up over the returned connection rather than failing
+ * against a dead one (an outage that never ends stays paused until
+ * ant_publisher_stop). A
+ * reaped broadcast closes and writes its recording exactly as a stop
+ * does, and progress reports "reaped":true; the host then calls
+ * ant_publisher_stop for the report. Leave "reap_ms" at 0 unless the
+ * host handles a broadcast that ended without its stop call.
  *
  * Do NOT raise max_in_flight without re-measuring: stage 1 found
  * window 4 stable (899/899 segments) and window 8 a connection-layer
@@ -1346,8 +1635,14 @@ bool ant_publisher_start(const AntHandle *handle,
  * whenever the writer restarts (camera flip, interruption recovery,
  * thermal downshift) and set `discontinuity` on the first media segment
  * after it. `duration_ms` is the segment's real duration (ignored for
- * the initialization segment). The bytes are copied; the caller may
- * free `data` as soon as this returns.
+ * the initialization segment): it is the EXTINF, and the step from
+ * this segment's EXT-X-PROGRAM-DATE-TIME to the next one's. Every media
+ * segment is dated once, at this call, from one anchor taken off the
+ * wall clock at the first media segment (less its duration) and
+ * re-taken at each writer restart, never moving backwards, so a host
+ * that rounds or nominalises `duration_ms` drifts the broadcast's
+ * dates by that error every segment. The bytes are copied; the caller
+ * may free `data` as soon as this returns.
  *
  * CALL ORDER IS THE BROADCAST ORDER — segments are numbered as these
  * calls arrive, and that number fixes both the playlist order and which
@@ -1363,8 +1658,12 @@ bool ant_publisher_start(const AntHandle *handle,
  * Returns:
  *    0  queued
  *    1  queued, and the oldest pending segment was dropped to stay at
- *       the live edge (the playlist marks the gap EXT-X-DISCONTINUITY)
- *    2  refused: the broadcast is stopping
+ *       the live edge (the playlist lists it as an EXT-X-GAP entry)
+ *    2  refused: the broadcast is stopping (ant_publisher_stop, or
+ *       reaped after "reap_ms" with no media)
+ *    3  withheld, not uploaded: the broadcast is paused
+ *       (ant_publisher_pause). Media only; an initialization segment is
+ *       queued until ant_publisher_resume.
  *   -1  error, with an allocated message in *out_err
  */
 int32_t ant_publisher_push_segment(const AntHandle *handle,
@@ -1376,17 +1675,75 @@ int32_t ant_publisher_push_segment(const AntHandle *handle,
                                    char **out_err);
 
 /*
+ * The device lost its connection mid-broadcast (issue #172): pause the
+ * running broadcast instead of letting it end or fill with failures.
+ * Call it alongside ant_suspend when the network goes. The broadcast
+ * goes silent: media segments pushed while paused are withheld
+ * (ant_publisher_push_segment returns 3), initialization segments wait
+ * for ant_publisher_resume, and the live playlist simply stops
+ * advancing. Nothing is closed and no EXT-X-ENDLIST is written.
+ * Non-blocking and idempotent. Returns 0, or -1 with an allocated
+ * message in *out_err when no broadcast is running.
+ */
+int ant_publisher_pause(const AntHandle *handle, char **out_err);
+
+/*
+ * The connection is back: the paused broadcast carries on in the same
+ * feed and the same recording, its next media segment behind one
+ * EXT-X-DISCONTINUITY and dated from the wall clock again. The first
+ * return after the last listed segment also restarts the "reap_ms"
+ * window, so a return late in an outage still gets the whole window to
+ * deliver its first segment; a return after the window already ran out
+ * during the outage ends the broadcast instead (progress then reports
+ * "reaped"). Call it after ant_resume / ant_wake when
+ * the network returns, and on a return to the foreground; harmless
+ * without a prior pause. Non-blocking and idempotent. Return values as
+ * ant_publisher_pause.
+ */
+int ant_publisher_resume(const AntHandle *handle, char **out_err);
+
+/*
  * Live progress of the broadcast, as an allocated JSON object (free
  * with ant_free_string):
  *   {"running":true,"elapsed_s":42.0,"channel":"Kitchen",
- *    "topic":"<64 hex>","owner":"<40 hex>",
- *    "channel_reference":"<64 hex>","playlist_reference":"<64 hex>",
+ *    "topic":"<64 hex>","topic_text":"kitchen-cam","owner":"<40 hex>",
+ *    "channel_reference":"<64 hex>","format":"bzz",
+ *    "playlist_reference":"<64 hex>",
  *    "feed_index":21,"segments_pushed":22,"segments_published":21,
  *    "segments_listed":21,"segments_failed":0,"segments_dropped":0,
  *    "bytes_published":4725000,
  *    "playlists_published":21,"publish_ms_p50":900,"publish_ms_p95":2100,
  *    "lag_ms":2400,"lag_ms_max":3100,"keeping_up":true,
- *    "sustained_mbit_s":0.9,"peers":114,"last_error":"","error_count":0}
+ *    "sustained_mbit_s":0.9,"peers":114,"last_error":"","error_count":0,
+ *    "paused":false,"segments_withheld":0,"reaped":false,
+ *    "ladder_group":"","master_reference":"","markers_written":0,
+ *    "ladder_failures":0,"ladder_error":"","recovery_error":"",
+ *    "batch_full_refusals":0,"batch_unusable_refusals":0,"batch_error":""}
+ *
+ * "paused" is ant_publisher_pause in force; "segments_withheld" counts
+ * the media segments outages withheld (never uploaded, never listed);
+ * "reaped" means the broadcast is ending by itself ("reap_ms" passed
+ * with no media) and the host should call ant_publisher_stop.
+ * "ladder_group", "master_reference", "markers_written",
+ * "ladder_failures" and "ladder_error" describe the one-rung ladder
+ * ("ladder": true at start; empty and 0 otherwise). A marker or master
+ * write that fails counts in "ladder_failures" and shows as
+ * "ladder_error" (the newest), never in "errors", "last_error" or
+ * "error_count": a ladder write is a shortcut a viewer can do without,
+ * retried every period, so it would otherwise crowd out the segment and
+ * feed failures those fields are for. "recovery_error" is the newest
+ * failure to write or remove the "recovery_path" entry, "" while none
+ * has failed: a kill now may lose what the entry missed.
+ * "batch_full_refusals" counts the broadcast's uploads (segments,
+ * playlists, feed updates, the channel manifest, the recording) the
+ * gateway refused because the postage batch is full (402 "batch is
+ * overissued": a full bucket on an immutable batch), and
+ * "batch_unusable_refusals" those refused because the batch itself is
+ * unusable (a 400 naming it, or a 422: not on chain); "batch_error" is
+ * the newest of either, "" while there has been none (issue #176).
+ * Neither is a network failure and no retry fixes them, so a host names
+ * them as the storage plan's problem. Each is also in "errors" and
+ * "error_count", and a refused media segment in "segments_failed".
  *
  * "lag_ms" is the live-edge lag the on-screen indicator shows: how far
  * behind live a viewer is right now, i.e. the age of the newest segment
@@ -1403,9 +1760,15 @@ char *ant_publisher_progress(const AntHandle *handle, char **out_err);
 /*
  * End the broadcast and return its final report as an allocated JSON
  * object (free with ant_free_string): the progress fields above plus
- * duration_s, chunks_published, feed_updates, sustained_chunks_s,
+ * recording_reference (see below), duration_s, chunks_published,
+ * feed_updates, feed_index (the next update's index: where the next
+ * broadcast on the channel starts; null, here and in the progress, until
+ * the broadcast has read its feed head, so a broadcast stopped or reaped
+ * before that reports null, never 0: pass it on as "start_index" and the
+ * next broadcast reads the head itself), sustained_chunks_s,
  * publish_ms_p50|p95|max, lag_ms_p50|p95|max|final, the first few error
- * strings, and a "kept_up" verdict (at least one feed update landed AND
+ * strings, "reaped" (it ended by itself, see "reap_ms"), and a
+ * "kept_up" verdict (at least one feed update landed AND
  * every captured media segment reached a published playlist AND the
  * live edge ended inside 3 x segment_ms). "lag_ms_final" is that live
  * edge — the age of the newest playable segment at stop, frozen there
@@ -1417,17 +1780,35 @@ char *ant_publisher_progress(const AntHandle *handle, char **out_err);
  * verdict at all?" off segments_listed too.
  *
  * BLOCKING: stopping is cooperative. Segments already captured are
- * published — the last seconds of a broadcast are real content — and
- * the playlist is closed with EXT-X-ENDLIST so viewers see a finished
- * recording rather than a stream that stopped updating. Returns after
- * ~130 s at the latest; a worst-case drain (the in-flight window, a
- * segment the pump had already popped behind it, then the backlog —
- * up to three rounds of the 60 s per-segment publish deadline) can
- * still be finishing in the background past that, with the report
- * returned honestly either way. Call it off the main thread.
+ * published — the last seconds of a broadcast are real content — the
+ * live playlist is closed with EXT-X-ENDLIST (a viewer following the
+ * live edge stops there), and then the whole broadcast goes up as one
+ * EXT-X-PLAYLIST-TYPE:VOD playlist, the feed's final update, so the
+ * channel plays from its first segment to its last afterwards.
+ * "recording_reference" is that recording, playable with no feed lookup
+ * (format "bzz": /bzz/<it>/stream.m3u8; "solar-punk": /bytes/<it>):
+ * keep it to list past broadcasts. It is "" when nothing was listed or
+ * its upload failed (the reason is in "errors"); it is also "" when the
+ * stop grace below ran out before it landed. Returns after
+ * ~130 s, plus up to ~65 s more for a feed update already on the wire
+ * then; a worst-case drain (the in-flight window, a segment the pump
+ * had already popped behind it, then the backlog — up to three rounds
+ * of the 60 s per-request publish deadline), one more round for a
+ * feed-head read that had not answered yet (see "start_index" at
+ * ant_publisher_start; a stop gives up on it after that one, a
+ * finalizing resumed run a minute after the stop), then the
+ * closing window and the recording (an upload and a feed update each,
+ * four more rounds) can still be finishing in the background past that,
+ * with the report returned honestly either way. Call it off the main
+ * thread. "feed_index" is final either way: a broadcast still going
+ * when the call returns writes no further feed update, so a closing
+ * window or recording landing late never takes the index handed out
+ * as the next "start_index" (it then stays off the feed; a late
+ * recording still plays by its own reference, which this report does
+ * not carry).
  *
- * Calling it on a broadcast that already finished on its own returns
- * that broadcast's report. Once a stop call has returned and released
+ * Calling it on a broadcast that already finished on its own (reaped)
+ * returns that broadcast's report. Once a stop call has returned and released
  * the slot, a second call fails with "not broadcasting" — keep the
  * report from the first call rather than re-fetching it.
  */

@@ -42,6 +42,11 @@ internal data class PostageBatch(
     val immutable: Boolean,
     /** Seconds left, or null when the node couldn't read it from the chain. */
     val ttlSeconds: Long?,
+    /**
+     * Not usable yet only because the node just bought it and it is still
+     * reaching the storers (ant's `propagating`); it will be by waiting.
+     */
+    val propagating: Boolean = false,
 ) {
     /** What it holds, bee's effective size for its depth. */
     val capacityBytes: Long get() = effectiveStampBytes(depth)
@@ -76,6 +81,7 @@ internal fun stampsFrom(body: String): List<PostageBatch>? {
             utilization = o.optLong("utilization"),
             immutable = o.optBoolean("immutableFlag"),
             ttlSeconds = ttl.takeIf { it >= 0 && it != ANT_PLACEHOLDER_TTL },
+            propagating = o.optBoolean("propagating"),
         )
     }
 }
@@ -169,7 +175,7 @@ internal data class StampQuote(
     /** PLUR per chunk: what the buy or extension is then made with, so it charges what was shown. */
     val amountPerChunk: BigInteger,
     val totalCostBzz: String,
-    /** The node's chequebook deposit a first buy also makes, or null for none. */
+    /** The chequebook deposit the buy also makes (ant 0.5.68+ sizes it by the plan), or null for none. */
     val depositBzz: String?,
     /** The same in PLUR; zero for none. */
     val depositPlur: BigInteger = BigInteger.ZERO,
@@ -561,6 +567,8 @@ internal object StampClient {
             .put("depth", quote.depth)
             .put("amountPerChunk", quote.amountPerChunk.toString())
             .put("maxSwapWei", quote.xdaiRequired.toString())
+            // The chequebook deposit the review showed: the node lets no more out (SpendGuard).
+            .put("settlementDepositPlur", quote.depositPlur.toString())
     }
 
     /** Extends [batchId] as [quote] priced it, as the user just confirmed. */
@@ -582,11 +590,14 @@ internal object StampClient {
     /**
      * Connects batch [batchId], which the wallet bought for the node
      * through SwarmNodeFunder (#115, [SwarmFunding]), so the node stamps
-     * with it; a first one also sets up the node's chequebook, and so may
-     * reload the gateway. False if a spend or a discover is already
-     * running, or a publish is uploading.
+     * with it; it also sets up the node's chequebook, moving at most
+     * [settlementDepositPlur] (the deposit the funding review showed) into
+     * it, and so may reload the gateway. False if a spend or a discover is
+     * already running, or a publish is uploading.
      */
-    fun connect(batchId: String): Boolean = start(Kind.Connect, batchId) { JSONObject().put("batchId", batchId) }
+    fun connect(batchId: String, settlementDepositPlur: BigInteger): Boolean = start(Kind.Connect, batchId) {
+        JSONObject().put("batchId", batchId).put("settlementDepositPlur", settlementDepositPlur.toString())
+    }
 
     /** Forget a finished spend's outcome once it's been shown. */
     fun acknowledge() {

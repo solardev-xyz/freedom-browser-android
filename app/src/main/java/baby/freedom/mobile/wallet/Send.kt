@@ -306,9 +306,17 @@ class DappCall(
  * The wallet's own `SwarmNodeFunder` call (#115, [SwarmFunder]): it funds
  * the Swarm node [node] (EIP-55) and buys it batch [batchId] (64 lowercase
  * hex), [depth] deep for about [days] days — which the node connects once
- * the call is mined.
+ * the call is mined, moving at most [depositPlur] (the chequebook deposit
+ * the review showed, sent to the node with the stamp) into its chequebook.
+ * Null for a send journaled before it was recorded.
  */
-data class SwarmFundLabel(val node: String, val batchId: String, val depth: Int, val days: Long)
+data class SwarmFundLabel(
+    val node: String,
+    val batchId: String,
+    val depth: Int,
+    val days: Long,
+    val depositPlur: BigInteger? = null,
+)
 
 /** Which Safe account (#141) a wallet-composed call is for ([address], shown by [name]), and whether it [activates] it or executes a transaction its owners signed. */
 data class SafeCallLabel(val address: String, val name: String, val activates: Boolean)

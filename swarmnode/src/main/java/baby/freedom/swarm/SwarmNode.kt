@@ -87,6 +87,7 @@ class SwarmNode internal constructor(
         fun stopGateway(handle: Long)
         fun shutdown(handle: Long)
         fun storageStatus(handle: Long): String
+        fun settlementStatus(handle: Long): String
         fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long): String
         fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long): String
         fun storageValidity(handle: Long, gnosisRpc: String): String
@@ -130,6 +131,7 @@ class SwarmNode internal constructor(
             override fun stopGateway(handle: Long) = AntNative.stopGateway(handle)
             override fun shutdown(handle: Long) = AntNative.shutdown(handle)
             override fun storageStatus(handle: Long) = AntNative.storageStatus(handle)
+            override fun settlementStatus(handle: Long) = AntNative.settlementStatus(handle)
             override fun storageQuote(handle: Long, gnosisRpc: String, depth: Int, days: Long) =
                 AntNative.storageQuote(handle, gnosisRpc, depth, days)
             override fun storageTopupQuote(handle: Long, gnosisRpc: String, days: Long) =
@@ -739,18 +741,31 @@ class SwarmNode internal constructor(
     /**
      * Buys a batch as the user confirmed it: [depth], [amountPerChunk] from
      * the quote they saw, swapping at most [maxSwapWei] of xDAI for the
-     * xBZZ it needs. SPENDS: only these transactions get out ([SpendGuard]).
-     * Once the batch is bought and registered, the first buy also sets up
-     * the chequebook (deploys one, or adopts the one this account already
-     * owns), and since ant 0.5.52 points the running gateway at it itself —
-     * settlement and the chequebook page (#117) see it with no gateway
-     * restart. A buy that fails on the batch never gets that far (ant
-     * v0.5.56's activate_bought_batch runs ensure_settlement only after
-     * createBatch and register_batch succeed), so it sets up no chequebook.
+     * xBZZ it needs, and moving at most [settlementDepositPlur] (the
+     * quote's chequebook deposit, which ant 0.5.68+ sizes by the plan's
+     * depth) into the node's chequebook. SPENDS: only these transactions
+     * get out ([SpendGuard]). Once the batch is bought and registered, the
+     * buy also sets up the chequebook (deploys one, or adopts the one this
+     * account already owns, and brings its deposit up to the plan's
+     * target), and since ant 0.5.52 points the running gateway at it
+     * itself — settlement and the chequebook page (#117) see it with no
+     * gateway restart. A buy that fails on the batch never gets that far
+     * (ant v0.5.56's activate_bought_batch runs ensure_settlement only
+     * after createBatch and register_batch succeed), so it sets up no
+     * chequebook; a deposit refused there leaves the batch bought (ant's
+     * settlement step is best-effort).
      */
-    fun buyStamp(depth: Int, amountPerChunk: BigInteger, immutable: Boolean, maxSwapWei: BigInteger): String =
+    fun buyStamp(
+        depth: Int,
+        amountPerChunk: BigInteger,
+        immutable: Boolean,
+        maxSwapWei: BigInteger,
+        settlementDepositPlur: BigInteger,
+    ): String =
         withLightNode { h, rpc ->
-            val plan = SpendPlan.BuyStamp(owner(), depth, amountPerChunk, immutable, maxSwapWei)
+            val plan = SpendPlan.BuyStamp(
+                owner(), depth, amountPerChunk, immutable, maxSwapWei, settlementDepositPlur, nodeChequebook(h),
+            )
             SpendGuard.during(plan) { ops.storageBuyXdai(h, rpc, depth, amountPerChunk.toString(), immutable) }
         }
 
@@ -778,16 +793,33 @@ class SwarmNode internal constructor(
      * Connects batch [batchId] (hex, `0x` optional), which the wallet
      * bought for this node through SwarmNodeFunder (#115): ant checks on
      * chain that the node's account owns it and registers it, so the node
-     * stamps with it. A first connect also sets up the chequebook, as a
-     * first buy does — the only transactions the permit lets out — which
-     * (ant 0.5.52+) the running gateway picks up at once, with no
-     * restart. Returns ant's storage status.
+     * stamps with it. ant then also sets up the chequebook, as a buy does
+     * — deploys one if there's none, and moves at most
+     * [settlementDepositPlur] (the deposit the funding review showed,
+     * which the wallet sent the node along with the stamp) into it: the
+     * only transactions the permit lets out. The running gateway picks
+     * the chequebook up at once (ant 0.5.52+), with no restart. Returns
+     * ant's storage status.
      */
-    fun connectBatch(batchId: String): String {
+    fun connectBatch(batchId: String, settlementDepositPlur: BigInteger): String {
         val id = normalizeBatchId(batchId) ?: throw IllegalArgumentException("not a batch id")
         return withLightNode { h, rpc ->
-            SpendGuard.during(SpendPlan.ConnectBatch(owner())) { ops.storageConnectBatch(h, rpc, "0x$id") }
+            val plan = SpendPlan.ConnectBatch(owner(), settlementDepositPlur, nodeChequebook(h))
+            SpendGuard.during(plan) { ops.storageConnectBatch(h, rpc, "0x$id") }
         }
+    }
+
+    /**
+     * The chequebook a buy or connect on [h] tops up, as 40 lowercase hex:
+     * the one ant persisted for this account (`ant_storage_settlement_status`,
+     * a local read), which is the only one ant funds while it has one.
+     * Null when it has none (or one its chain check disqualified): then the
+     * spend may deploy one, whose address can't be known yet.
+     */
+    private fun nodeChequebook(h: Long): String? {
+        val o = JSONObject(ops.settlementStatus(h))
+        if (!o.optBoolean("enabled")) return null
+        return normalizeAddress(o.optString("chequebook"))?.takeIf { a -> a.any { it != '0' } }
     }
 
     /**

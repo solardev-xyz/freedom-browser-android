@@ -224,12 +224,48 @@ class ChequebookTest {
     fun `paying peers comes from ant's own paying flag`() {
         assertEquals(CreditStatus.Paying(low = false), creditStatus(swap(paying = true), funded))
         assertEquals("Paying peers", creditStatusText(CreditStatus.Paying(low = false)))
-        // Below half the default deposit: still paying, but low.
+        // Below half the no-plan deposit: still paying, but low.
         assertEquals(
             CreditStatus.Paying(low = true),
             creditStatus(swap(paying = true), funded.copy(availablePlur = BigInteger("4000000000000"))),
         )
         assertEquals(CreditStatus.Checking, creditStatus(null, funded))
+    }
+
+    @Test
+    fun `the settlement deposit target follows the plan's depth, as ant sizes it`() {
+        val tenth = BigInteger.TEN.pow(15) // 0.1 xBZZ
+        assertEquals(tenth, settlementDepositTarget(21))
+        assertEquals(tenth.shiftLeft(1), settlementDepositTarget(22))
+        assertEquals(tenth.shiftLeft(3), settlementDepositTarget(24))
+        assertEquals(tenth.shiftRight(1), settlementDepositTarget(20))
+        assertEquals(tenth.shiftRight(4), settlementDepositTarget(17))
+        // Floored at 0.001 xBZZ, capped at 1 xBZZ; no plan is the floor.
+        assertEquals(milli, settlementDepositTarget(14))
+        assertEquals(milli, settlementDepositTarget(0))
+        assertEquals(milli, settlementDepositTarget(null))
+        assertEquals(BigInteger.TEN.pow(16), settlementDepositTarget(25))
+        assertEquals(BigInteger.TEN.pow(16), settlementDepositTarget(255))
+        // The plan is the deepest stamp the node can use, or has just
+        // bought and is still propagating (ant counts it: usable || propagating).
+        fun stamp(depth: Int, usable: Boolean = true, propagating: Boolean = false) =
+            PostageBatch("ab".repeat(32), usable, depth, 16, 0, true, null, propagating)
+        assertEquals(tenth.shiftLeft(1), planDepositTarget(listOf(stamp(20), stamp(22), stamp(24, usable = false))))
+        assertEquals(milli, planDepositTarget(emptyList()))
+        // A first depth-24 buy, still propagating: the plan is already depth 24.
+        assertEquals(tenth.shiftLeft(3), planDepositTarget(listOf(stamp(24, usable = false, propagating = true))))
+        assertEquals(milli, planDepositTarget(listOf(stamp(24, usable = false))))
+    }
+
+    @Test
+    fun `low credit is half the deposit the chequebook is kept at for the plan`() {
+        // No plan known yet: half of 0.001 xBZZ.
+        assertEquals(BigInteger("5000000000000"), lowCreditPlur(null))
+        val depth22 = settlementDepositTarget(22) // 0.2 xBZZ
+        assertEquals(BigInteger.TEN.pow(15), lowCreditPlur(depth22))
+        val planned = funded.copy(depositTargetPlur = depth22, availablePlur = BigInteger.TEN.pow(15).subtract(BigInteger.ONE))
+        assertEquals(CreditStatus.Paying(low = true), creditStatus(swap(paying = true), planned))
+        assertEquals(CreditStatus.Paying(low = false), creditStatus(swap(paying = true), planned.copy(availablePlur = BigInteger.TEN.pow(15))))
     }
 
     @Test

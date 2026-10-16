@@ -22,7 +22,7 @@ class StampsTest {
         val body = """{"stamps":[
             {"batchID":"$id","utilization":2,"usable":true,"label":"","depth":17,"amount":"0","bucketDepth":16,
              "blockNumber":0,"immutableFlag":true,"exists":true,"batchTTL":172795},
-            {"batchID":"0x${"CD".repeat(32)}","utilization":0,"usable":false,"depth":20,"bucketDepth":16,
+            {"batchID":"0x${"CD".repeat(32)}","utilization":0,"usable":false,"propagating":true,"depth":20,"bucketDepth":16,
              "immutableFlag":false,"batchTTL":315360000},
             {"batchID":"nope","depth":17},
             {"batchID":"${"ef".repeat(32)}","depth":18,"batchTTL":-1}
@@ -33,6 +33,9 @@ class StampsTest {
         assertTrue(first.usable)
         assertTrue(first.immutable)
         assertEquals(172795L, first.ttlSeconds)
+        // Just bought, still propagating; absent reads as not.
+        assertTrue(stamps[1].propagating)
+        assertFalse(first.propagating)
         // 2 of a bucket's 2^(17-16) = 2 slots: full.
         assertEquals(1.0, first.usedFraction, 0.0)
         // ant's stand-in when it can't read the chain, and bee's "unknown".

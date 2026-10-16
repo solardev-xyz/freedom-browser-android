@@ -10,7 +10,10 @@ import org.junit.Test
 class SpendGuardTest {
     private val amount = BigInteger("4325218560")
     private val maxSwap = BigInteger("50000000000000000") // 0.05 xDAI
-    private val buy = SpendPlan.BuyStamp(TestTx.OWNER, 17, amount, immutable = false, maxSwapWei = maxSwap)
+    private val milliBzz = BigInteger.TEN.pow(13) // 0.001 xBZZ: a depth-17 plan's deposit (ant's floor)
+    private val buy = SpendPlan.BuyStamp(
+        TestTx.OWNER, 17, amount, immutable = false, maxSwapWei = maxSwap, settlementDepositPlur = milliBzz, chequebook = null,
+    )
     private val batch = "ab".repeat(32)
     private val extend = SpendPlan.ExtendStamp(TestTx.OWNER, batch, 18, amount, maxSwap)
 
@@ -64,7 +67,7 @@ class SpendGuardTest {
         // xDAI sent anywhere but the swap helper; value on a contract call.
         refused(TestTx.tx("55".repeat(20), ByteArray(0), value = BigInteger.ONE))
         refused(TestTx.createBatch(TestTx.OWNER, amount, 17, false, value = BigInteger.ONE))
-        // A settlement deposit over 0.001 xBZZ; a chequebook for someone else.
+        // A settlement deposit over the confirmed 0.001 xBZZ; a chequebook for someone else.
         refused(TestTx.transfer("cc".repeat(20), BigInteger.TEN.pow(13).add(BigInteger.ONE)))
         refused(TestTx.deployChequebook(issuer = "66".repeat(20)))
         // A top-up, a dilute, a contract creation (the swap helper's deploy included).
@@ -212,18 +215,18 @@ class SpendGuardTest {
 
     @Test
     fun aStampPermitAdmitsNoDepositBeyondItsSettlementSlot() {
-        // A buy's settlement slot takes at most 0.001 xBZZ, whatever the recipient;
+        // A buy's settlement slot takes at most the confirmed deposit (here 0.001 xBZZ);
         // anything bigger — a deposit racing the buy — stays out.
         assertFalse(SpendPermit(buy).admits(TestTx.transfer(chequebook, depositAmount.add(BigInteger.ONE))))
         assertFalse(SpendPermit(extend).admits(TestTx.transfer(chequebook, depositAmount)))
     }
 
-    private val connect = SpendPlan.ConnectBatch(TestTx.OWNER)
+    private val connect = SpendPlan.ConnectBatch(TestTx.OWNER, depositAmount, chequebook = null)
 
     @Test
     fun aConnectAdmitsOnlyTheChequebookSetupOnce() {
         // #115: the wallet already bought the batch; connecting it may only set up
-        // the node's chequebook, as a first buy does.
+        // the node's chequebook, as a buy does.
         val p = SpendPermit(connect)
         assertTrue(p.admits(TestTx.deployChequebook()))
         assertTrue(p.admits(TestTx.transfer("cc".repeat(20), depositAmount)))
@@ -248,5 +251,103 @@ class SpendGuardTest {
         }
         assertEquals(SpendPermit.CONNECT_SLOTS, slots)
         assertEquals(BigInteger("20000000000000000"), SpendPermit.CONNECT_MAX_GAS_WEI) // 2 × 0.01 xDAI
+    }
+
+    // The settlement deposit scales with the plan (ant 0.5.68+): 0.1 xBZZ at depth 21,
+    // 0.2 at 22. The permit carries the exact amount the purchase review showed.
+    private val pointTwoBzz = BigInteger.TEN.pow(15).shiftLeft(1)
+    private fun buyWith(deposit: BigInteger, chequebook: String? = null) =
+        SpendPlan.BuyStamp(TestTx.OWNER, 22, amount, immutable = false, maxSwapWei = maxSwap, settlementDepositPlur = deposit, chequebook = chequebook)
+
+    @Test
+    fun theSettlementDepositAdmitsTheQuotedAmountAndNotACentMore() {
+        for (plan in listOf(buyWith(pointTwoBzz), SpendPlan.ConnectBatch(TestTx.OWNER, pointTwoBzz, null))) {
+            assertTrue(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), pointTwoBzz)))
+            // Less is fine: the chequebook may already hold part of it.
+            assertTrue(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), pointTwoBzz.subtract(milliBzz))))
+            // A cent over (0.01 xBZZ), or one PLUR over, isn't.
+            assertFalse(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), pointTwoBzz.add(BigInteger.TEN.pow(14)))))
+            assertFalse(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), pointTwoBzz.add(BigInteger.ONE))))
+        }
+    }
+
+    @Test
+    fun aZeroQuotedDepositAdmitsNoDepositTransfer() {
+        // The chequebook already holds the plan's target: the review showed no deposit.
+        for (plan in listOf(buyWith(BigInteger.ZERO), SpendPlan.ConnectBatch(TestTx.OWNER, BigInteger.ZERO, null))) {
+            assertFalse(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), BigInteger.ONE)))
+            assertFalse(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), milliBzz)))
+            assertFalse(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), BigInteger.ZERO)))
+        }
+        // The rest of the buy still goes through.
+        val p = SpendPermit(buyWith(BigInteger.ZERO))
+        assertTrue(p.admits(TestTx.createBatch(TestTx.OWNER, amount, 22, false)))
+    }
+
+    @Test
+    fun aPinnedChequebookRefusesAnyOtherRecipientAndASecondDeploy() {
+        for (plan in listOf(buyWith(pointTwoBzz, chequebook), SpendPlan.ConnectBatch(TestTx.OWNER, pointTwoBzz, chequebook))) {
+            assertFalse(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), pointTwoBzz)))
+            assertFalse(SpendPermit(plan).admits(TestTx.transfer("cc".repeat(20), BigInteger.ONE)))
+            // The node has a chequebook: ant funds it and deploys none.
+            assertFalse(SpendPermit(plan).admits(TestTx.deployChequebook()))
+            val p = SpendPermit(plan)
+            assertTrue(p.admits(TestTx.transfer(chequebook, pointTwoBzz)))
+            // Once.
+            assertFalse(p.admits(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(BigInteger.ONE)), nonce = 11)))
+        }
+        // Unpinned (a first buy deploys the chequebook it funds): any recipient, and the deploy.
+        val first = SpendPermit(buyWith(pointTwoBzz))
+        assertTrue(first.admits(TestTx.deployChequebook()))
+        assertTrue(first.admits(TestTx.transfer("cc".repeat(20), pointTwoBzz)))
+    }
+
+    @Test
+    fun theDepositNeverPassesAntsOneBzzCeiling() {
+        val oneBzz = BigInteger.TEN.pow(16)
+        assertEquals(oneBzz, SpendPermit.MAX_SETTLEMENT_DEPOSIT_PLUR)
+        // A quote over ant's 1 xBZZ cap (which ant never sends) still moves at most 1 xBZZ.
+        val over = buyWith(oneBzz.shiftLeft(1), chequebook)
+        assertFalse(SpendPermit(over).admits(TestTx.transfer(chequebook, oneBzz.add(BigInteger.ONE))))
+        assertFalse(SpendPermit(over).admits(TestTx.transfer(chequebook, oneBzz.shiftLeft(1))))
+        assertTrue(SpendPermit(over).admits(TestTx.transfer(chequebook, oneBzz)))
+        assertEquals(oneBzz, SpendPermit.settlementDepositCap(oneBzz.shiftLeft(1)))
+        assertEquals(pointTwoBzz, SpendPermit.settlementDepositCap(pointTwoBzz))
+        assertEquals(BigInteger.ZERO, SpendPermit.settlementDepositCap(BigInteger.ONE.negate()))
+    }
+
+    @Test
+    fun aPlanRefusesANegativeDepositOrAMalformedChequebook() {
+        fun throws(block: () -> Unit) = assertTrue(runCatching(block).exceptionOrNull() is IllegalArgumentException)
+        throws { buyWith(BigInteger.ONE.negate()) }
+        throws { buyWith(pointTwoBzz, "0x$chequebook") }
+        throws { buyWith(pointTwoBzz, "AB".repeat(20)) }
+        throws { SpendPlan.ConnectBatch(TestTx.OWNER, BigInteger.ONE.negate(), null) }
+        throws { SpendPlan.ConnectBatch(TestTx.OWNER, pointTwoBzz, "37") }
+    }
+
+    @Test
+    fun aChequebookWithdrawIsNeverAdmitted() {
+        // ant 0.5.69 signs `withdraw(uint256)` to the chequebook (POST /chequebook/withdraw,
+        // ant_storage_settlement_withdraw_amount). The app offers no withdraw, so no permit
+        // admits one, and with no permit open nothing does.
+        val withdraw = TestTx.withdraw(chequebook, depositAmount)
+        assertFalse(SpendGuard.admit(TestTx.request(withdraw)))
+        val plans = listOf(
+            buy, extend, deposit, connect,
+            buyWith(pointTwoBzz, chequebook), SpendPlan.ConnectBatch(TestTx.OWNER, pointTwoBzz, chequebook),
+        )
+        for (plan in plans) {
+            val p = SpendPermit(plan)
+            assertNull(LegacyTx.decode(withdraw)?.let(p::slotFor))
+            assertFalse(p.admits(withdraw))
+            assertFalse(p.admits(TestTx.withdraw(chequebook, BigInteger.ONE, nonce = 12)))
+            assertFalse(p.admits(TestTx.withdraw("cc".repeat(20), depositAmount)))
+        }
+        // Inside a running spend too: the guard's own path refuses it.
+        SpendGuard.during(deposit) {
+            assertFalse(SpendGuard.admit(TestTx.request(withdraw)))
+            assertTrue(SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, depositAmount))))
+        }
     }
 }

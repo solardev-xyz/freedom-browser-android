@@ -64,7 +64,7 @@ class PublishStampGateTest {
 
         assertFalse(StampClient.buy(quote))
         // Nor connecting a stamp the wallet bought (#115): it may set up the chequebook.
-        assertFalse(StampClient.connect("ab".repeat(32)))
+        assertFalse(StampClient.connect("ab".repeat(32), java.math.BigInteger.ZERO))
         assertFalse(StampClient.discover("0x" + "aa".repeat(20)))
         assertEquals(StampClient.Spend.Idle, StampClient.spend.value)
         assertEquals(StampClient.Discovery.Idle, StampClient.discovery.value)

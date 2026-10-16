@@ -48,7 +48,7 @@ class FundNodeReviewTest {
         return SendQuote(
             SendRequest(
                 gnosis, TokenRegistry.native(gnosis), from, SwarmFunder.ADDRESS, p.value,
-                DappCall(null, data, null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, d)),
+                DappCall(null, data, null, swarm = SwarmFundLabel(p.node, p.batchId, p.depth, d, p.depositPlur)),
             ),
             EthTransaction(100, BigInteger.ONE, BigInteger.valueOf(400_000), SwarmFunder.ADDRESS, p.value, data, EthTransaction.Fees.Legacy(BigInteger.ONE)),
             BigInteger.TEN.pow(18), null, 0L, ChainTrustsForTest.unverified,

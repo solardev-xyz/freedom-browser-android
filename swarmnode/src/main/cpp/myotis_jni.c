@@ -2,7 +2,7 @@
  * JNI shim between `baby.freedom.swarm.MyotisNative` and the plain C ABI
  * of the Myotis Ethereum light client (`myotis_*`, linked into
  * `libfreedom_mobile_ffi.so` via freedom-mobile-ffi; header vendored as
- * `myotis_engine.h` from biafra23/myotis v0.1.12, engine ABI 32).
+ * `myotis_engine.h` from biafra23/myotis v0.1.15, engine ABI 45).
  *
  * Same split as `ant_jni.c` / `freedom_ipfs_jni.c`: the Rust library owns
  * the C ABI, this file only marshals JNI types. Bridged: the node lifecycle

@@ -794,10 +794,26 @@ class SwarmProvider(
         return latest.second ?: (latest.first + 1)
     }
 
-    /** The feed's latest index and the next one (if the node said), or null for an empty feed. */
+    /**
+     * The feed's latest index and the next one (if the node said), or null for an empty feed.
+     *
+     * Only ant's 404 means empty: since ant v0.5.69 (`cb91f5d`) it answers that only for a
+     * miss the network corroborated. A miss only one or two cold peers gave is a 503, which
+     * says nothing about whether the feed has entries, so it's `4900 node-not-ready` for the
+     * page to retry, never "empty" (that would write index 0 over an existing feed).
+     */
     private suspend fun latestIndex(owner: String, topic: String): Pair<Long, Long?>? {
         val answer = call("GET", "/feeds/$owner/$topic", mapOf("swarm-only-root-chunk" to "true"), null, READ_TIMEOUT_MS)
         if (answer.status == 404) return null
+        if (answer.status == 503) {
+            throw Invalid(
+                Reply.Err(
+                    UNAVAILABLE,
+                    "The Swarm node can't tell yet whether this feed has entries. Try again shortly.",
+                    reason("node-not-ready"),
+                ),
+            )
+        }
         if (!answer.ok) throw Invalid(Reply.Err(INTERNAL, "Feed lookup failed: ${answer.message()}"))
         val index = answer.headers["swarm-feed-index"]?.let { parseFeedIndex(it) }
             ?: throw Invalid(Reply.Err(INTERNAL, "Feed lookup returned no index"))

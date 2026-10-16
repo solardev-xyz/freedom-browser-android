@@ -42,7 +42,7 @@ import org.json.JSONObject
  */
 internal class SwarmFunding(
     private val file: File,
-    private val connect: (String) -> Boolean = StampClient::connect,
+    private val connect: (String, BigInteger) -> Boolean = StampClient::connect,
     private val spends: StateFlow<StampClient.Spend> = StampClient.spend,
     private val chain: ChainReader? = null,
     private val checkEveryMs: Long = CHECK_EVERY_MS,
@@ -94,7 +94,20 @@ internal class SwarmFunding(
         /** The paying account and the call's nonce, to tell a call that can never be mined any more. */
         val from: String? = null,
         val nonce: BigInteger? = null,
-    )
+        /**
+         * The chequebook deposit the funding review showed ([SwarmFundLabel.depositPlur]):
+         * the most the connect may move into the node's chequebook. Null for a
+         * record kept before it was recorded ([connectDepositPlur]).
+         */
+        val depositPlur: BigInteger? = null,
+    ) {
+        /**
+         * What the connect may move into the chequebook: [depositPlur], or for
+         * a record from before it was kept, the flat 0.001 xBZZ every quote
+         * asked for then (ant before 0.5.68).
+         */
+        val connectDepositPlur: BigInteger get() = depositPlur ?: LEGACY_DEPOSIT_PLUR
+    }
 
     private val _pending = MutableStateFlow(load())
     val pending: StateFlow<Pending?> = _pending.asStateFlow()
@@ -230,9 +243,9 @@ internal class SwarmFunding(
             // Only a send still going out starts a record: a finished one with none
             // was already connected or forgotten (the sender replays its last status).
             val base = (
-                same ?: Pending(label.node, label.batchId, label.depth, label.days, null, mined = false)
+                same ?: Pending(label.node, label.batchId, label.depth, label.days, null, mined = false, depositPlur = label.depositPlur)
                     .takeIf { status.inFlight || status.stage == SendStatus.Stage.Unconfirmed }
-                )?.copy(from = status.quote.request.from.address, nonce = status.quote.tx.nonce)
+                )?.let { it.copy(from = status.quote.request.from.address, nonce = status.quote.tx.nonce, depositPlur = it.depositPlur ?: label.depositPlur) }
             val stage = status.stage
             when {
                 base == null -> current
@@ -296,7 +309,7 @@ internal class SwarmFunding(
         val p = _pending.value?.takeIf { it.mined || !it.tracked } ?: return 0
         val ticket = synchronized(this) { ++connectsAsked }
         if (!p.mined) scope.launch { checkChain() }
-        if (!connect(p.batchId)) return -ticket
+        if (!connect(p.batchId, p.connectDepositPlur)) return -ticket
         synchronized(this) {
             connectStarted = maxOf(connectStarted, ticket)
             _connectOwed.compareAndSet(p.batchId, null)
@@ -473,6 +486,7 @@ internal class SwarmFunding(
                 tracked = !o.optBoolean("untracked", false),
                 from = o.optString("from").takeIf { it.isNotEmpty() },
                 nonce = o.optString("nonce").takeIf { it.isNotEmpty() }?.let(::BigInteger),
+                depositPlur = o.optString("depositPlur").takeIf { it.isNotEmpty() }?.let(::BigInteger)?.takeIf { it.signum() >= 0 },
             ).takeIf { normalizeBatchId(it.batchId) == it.batchId }
         }
     } catch (e: Exception) {
@@ -492,6 +506,7 @@ internal class SwarmFunding(
                 JSONObject().put("node", p.node).put("batchId", p.batchId).put("depth", p.depth).put("days", p.days)
                     .put("hash", p.hash ?: "").put("mined", p.mined)
                     .put("untracked", !p.tracked).put("from", p.from ?: "").put("nonce", p.nonce?.toString() ?: "")
+                    .put("depositPlur", p.depositPlur?.toString() ?: "")
                     .toString(),
             )
             if (!tmp.renameTo(file)) tmp.delete()
@@ -502,6 +517,9 @@ internal class SwarmFunding(
 
     companion object {
         private const val TAG = "SwarmFunding"
+
+        /** 0.001 xBZZ: the chequebook deposit every quote asked for before ant 0.5.68 scaled it by the plan. */
+        internal val LEGACY_DEPOSIT_PLUR: BigInteger = BigInteger.TEN.pow(13)
         private const val CHECK_EVERY_MS = 30_000L
         private const val CHECK_AT_MOST_EVERY_MS = 30 * 60_000L
         private const val CONFIRM_AFTER_MS = 30_000L

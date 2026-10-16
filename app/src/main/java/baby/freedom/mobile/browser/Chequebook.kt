@@ -30,8 +30,8 @@ import org.json.JSONObject
 
 /**
  * The amounts the deposit page offers, in PLUR: desktop's 0.1, 0.5 and 1
- * xBZZ, below them ant's own settlement-deposit target (0.001 xBZZ, what
- * a first stamp puts in) and 0.01.
+ * xBZZ, and below them 0.001 and 0.01 for a small top-up. (A stamp buy
+ * puts in its own deposit, sized by the plan: [settlementDepositTarget].)
  */
 internal val DEPOSIT_PRESETS_PLUR: List<BigInteger> =
     listOf("0.001", "0.01", "0.1", "0.5", "1").map { BigDecimal(it).movePointRight(16).toBigIntegerExact() }
@@ -128,6 +128,8 @@ internal data class ChequebookState(
      * is an upper bound for good, though ant no longer says so.
      */
     val ledgerConfirmed: Boolean = false,
+    /** The deposit ant keeps the chequebook at for the node's plan ([planDepositTarget]); null for not known. */
+    val depositTargetPlur: BigInteger? = null,
 )
 
 /**
@@ -219,8 +221,48 @@ internal fun swapStatusFrom(o: JSONObject): SwapStatus? {
  */
 internal val MIN_CHEQUE_PLUR: BigInteger = BigInteger.valueOf(90_000L * 100_000L)
 
-/** Below this the credit is low: half the node's default 0.001 xBZZ deposit, as on desktop. */
-internal val LOW_CREDIT_PLUR: BigInteger = BigInteger("5000000000000")
+/** ant's settlement deposit target at depth 21: 0.1 xBZZ. */
+private val PLAN_DEPOSIT_AT_21_PLUR: BigInteger = BigInteger.TEN.pow(15)
+
+/** ant's settlement deposit target with no plan, and its floor: 0.001 xBZZ. */
+internal val NO_PLAN_DEPOSIT_PLUR: BigInteger = BigInteger.TEN.pow(13)
+
+/** The most ant's settlement deposit target asks for: 1 xBZZ. */
+private val MAX_PLAN_DEPOSIT_PLUR: BigInteger = BigInteger.TEN.pow(16)
+
+/**
+ * The deposit ant keeps behind the node's chequebook for a storage plan
+ * [depth] deep (ant 0.5.68+, `deposit_target_for_depth`): 0.1 xBZZ at
+ * depth 21, doubling per level above and halving per level below,
+ * between 0.001 and 1 xBZZ. Null [depth] (no plan): 0.001 xBZZ.
+ */
+internal fun settlementDepositTarget(depth: Int?): BigInteger {
+    if (depth == null) return NO_PLAN_DEPOSIT_PLUR
+    val target = if (depth >= 21) {
+        PLAN_DEPOSIT_AT_21_PLUR.shiftLeft((depth - 21).coerceAtMost(64))
+    } else {
+        PLAN_DEPOSIT_AT_21_PLUR.shiftRight((21 - depth).coerceAtMost(64))
+    }
+    return target.max(NO_PLAN_DEPOSIT_PLUR).min(MAX_PLAN_DEPOSIT_PLUR)
+}
+
+/**
+ * The deposit target for the node's plan as ant reckons it
+ * (`plan_deposit_target`): for the deepest of [stamps] the node can stamp
+ * with or has just bought and is still propagating, or with none, no plan.
+ * Counting a propagating batch matters: the chequebook page reads this
+ * right after a buy, while the new batch still reads `usable: false`.
+ */
+internal fun planDepositTarget(stamps: List<PostageBatch>): BigInteger =
+    settlementDepositTarget(stamps.filter { it.usable || it.propagating }.maxOfOrNull { it.depth })
+
+/**
+ * Below this the credit is low: half the deposit the chequebook is kept at
+ * for the node's plan ([depositTargetPlur], [planDepositTarget]), as desktop
+ * calls half its deposit low; half of the no-plan 0.001 xBZZ until that's known.
+ */
+internal fun lowCreditPlur(depositTargetPlur: BigInteger?): BigInteger =
+    (depositTargetPlur ?: NO_PLAN_DEPOSIT_PLUR).shiftRight(1)
 
 /** Why downloads are on the free tier. */
 internal enum class FreeTierReason { NotSupported, SwitchedOff, NoChequebook, LedgerLost, NoCredit, NotSetUp }
@@ -229,7 +271,7 @@ internal enum class FreeTierReason { NotSupported, SwitchedOff, NoChequebook, Le
 internal sealed interface CreditStatus {
     data object Checking : CreditStatus
     /**
-     * [low]: the credit is surely below [LOW_CREDIT_PLUR]. [uncertain]: the
+     * [low]: the credit is surely below [lowCreditPlur]. [uncertain]: the
      * figure is only an upper bound, so what is left may be less still.
      */
     data class Paying(val low: Boolean, val uncertain: Boolean = false) : CreditStatus
@@ -253,7 +295,7 @@ internal fun creditStatus(swap: SwapStatus?, state: ChequebookState): CreditStat
         state.ledgerLost -> CreditStatus.FreeTier(FreeTierReason.LedgerLost)
         available != null && available < MIN_CHEQUE_PLUR -> CreditStatus.FreeTier(FreeTierReason.NoCredit)
         swap.paying -> CreditStatus.Paying(
-            low = available != null && available < LOW_CREDIT_PLUR,
+            low = available != null && available < lowCreditPlur(state.depositTargetPlur),
             uncertain = state.availableUpperBound,
         )
         else -> CreditStatus.FreeTier(FreeTierReason.NotSetUp)

@@ -68,7 +68,7 @@ class SwarmFundingTest {
     private fun idle() = kotlinx.coroutines.flow.MutableStateFlow<StampClient.Spend>(StampClient.Spend.Idle)
 
     private fun funding(file: File = File(tmp.root, "funding.json")) =
-        SwarmFunding(file, connect = { connects += it; true }, spends = idle(), context = driven)
+        SwarmFunding(file, connect = { it, _ -> connects += it; true }, spends = idle(), context = driven)
 
     private fun status(stage: SendStatus.Stage, l: SwarmFundLabel? = label): SendStatus {
         val gnosis = BuiltInChains.GNOSIS
@@ -110,6 +110,34 @@ class SwarmFundingTest {
         assertEquals(listOf(batch, batch), connects)
         again.forget()
         assertNull(funding().pending.value)
+    }
+
+    @Test
+    fun `the connect may move only the deposit the funding review showed, kept across a restart`() {
+        val deposits = java.util.Collections.synchronizedList(mutableListOf<BigInteger>())
+        fun withDeposits() = SwarmFunding(
+            File(tmp.root, "funding.json"), connect = { _, d -> deposits += d; true }, spends = idle(), context = driven,
+        )
+        val pointOne = BigInteger.TEN.pow(15) // a depth-21 plan's deposit (ant 0.5.68+)
+        val f = withDeposits()
+        f.noteSend(status(SendStatus.Stage.Pending, label.copy(depth = 21, depositPlur = pointOne)))
+        assertEquals(pointOne, f.pending.value!!.depositPlur)
+        f.noteSend(status(SendStatus.Stage.Confirmed(48_500_000, null), label.copy(depth = 21, depositPlur = pointOne)))
+        assertEquals(listOf(pointOne), deposits)
+        // Read back after a restart, the record still carries it.
+        assertTrue(withDeposits().connectNow())
+        assertEquals(listOf(pointOne, pointOne), deposits)
+        f.forget()
+
+        // A record kept before the deposit was (a label without one): the flat 0.001 xBZZ
+        // every quote asked for then, not "no deposit" and not more.
+        val old = withDeposits()
+        old.noteSend(status(SendStatus.Stage.Pending, label))
+        old.noteSend(status(SendStatus.Stage.Confirmed(48_500_000, null), label))
+        assertNull(old.pending.value!!.depositPlur)
+        assertEquals(BigInteger.TEN.pow(13), deposits.last())
+        assertEquals(SwarmFunding.LEGACY_DEPOSIT_PLUR, deposits.last())
+        old.forget()
     }
 
     @Test
@@ -237,7 +265,7 @@ class SwarmFundingTest {
             untrack()
         }
         return SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { it, _ -> connects += it; true }, spends = idle(), chain = chain,
             confirmAfterMs = 30_000, now = now, context = driven,
         )
     }
@@ -433,7 +461,7 @@ class SwarmFundingTest {
     fun `an untracked call is looked up less and less often, and not at all once it can never be mined`() {
         val chain = FakeChain()
         val f = SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { it, _ -> connects += it; true }, spends = idle(), chain = chain,
             checkEveryMs = 10, checkAtMostEveryMs = 60_000, confirmAfterMs = 10, now = virtualNow, context = driven,
         )
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
@@ -461,7 +489,7 @@ class SwarmFundingTest {
     fun `lookups stopped by a superseded verdict start again when a Connect's read withdraws it`() {
         val chain = FakeChain()
         val f = SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; false }, spends = idle(), chain = chain,
+            File(tmp.root, "funding.json"), connect = { it, _ -> connects += it; false }, spends = idle(), chain = chain,
             checkEveryMs = 10, checkAtMostEveryMs = 40, confirmAfterMs = 10, now = virtualNow, context = driven,
         )
         chain.minedCount = BigInteger.TWO
@@ -497,7 +525,7 @@ class SwarmFundingTest {
     fun `once the wallet stops following the call, it's looked up on chain until it's mined`() {
         val chain = FakeChain()
         val f = SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { connects += it; true }, spends = idle(), chain = chain, checkEveryMs = 20,
+            File(tmp.root, "funding.json"), connect = { it, _ -> connects += it; true }, spends = idle(), chain = chain, checkEveryMs = 20,
             now = virtualNow, context = driven,
         )
         f.start(flowOf(status(SendStatus.Stage.Pending), status(SendStatus.Stage.Unconfirmed), null))
@@ -519,7 +547,7 @@ class SwarmFundingTest {
     /** A funding whose connects are refused while [free] is false, as [StampClient.start] refuses them under other work. */
     private fun busyFunding(free: kotlinx.coroutines.flow.MutableStateFlow<Boolean>, chain: FakeChain? = null) =
         SwarmFunding(
-            File(tmp.root, "funding.json"), connect = { if (free.value) { connects += it; true } else false },
+            File(tmp.root, "funding.json"), connect = { it, _ -> if (free.value) { connects += it; true } else false },
             spends = idle(), chain = chain, confirmAfterMs = 30_000, now = { 0L }, connectFree = free, context = driven,
         )
 
@@ -578,7 +606,7 @@ class SwarmFundingTest {
         var onRefused: (() -> Unit)? = null
         f = SwarmFunding(
             File(tmp.root, "funding.json"),
-            connect = {
+            connect = { it, _ ->
                 if (free.value) {
                     connects += it
                     true
@@ -628,7 +656,7 @@ class SwarmFundingTest {
         // As StampClient does: a started connect holds the node until it ends.
         val f = SwarmFunding(
             File(tmp.root, "funding.json"),
-            connect = {
+            connect = { it, _ ->
                 if (failsOnNextAsk) {
                     failsOnNextAsk = false
                     spends.value = failed
@@ -682,7 +710,7 @@ class SwarmFundingTest {
         // UI acknowledges it to Idle — all before the funding's collector could read any of it.
         val f = SwarmFunding(
             File(tmp.root, "funding.json"),
-            connect = {
+            connect = { it, _ ->
                 if (free.value) {
                     connects += it
                     spends.value = StampClient.Spend.Running(StampClient.Kind.Connect, it)

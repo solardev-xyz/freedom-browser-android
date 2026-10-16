@@ -1434,7 +1434,7 @@ class SendTest {
         val node = "0xD5572300E441b77b72bdd318BBFA7b97A1F03096"
         val nonce = ByteArray(32) { 7 }
         val data = SwarmFunder.calldata(node, SwarmFunder.XDAI_FOR_NODE_WEI, BigInteger.TEN, BigInteger.TEN, 17, nonce, true)
-        val label = SwarmFundLabel(node, SwarmFunder.batchId(nonce), 17, 2)
+        val label = SwarmFundLabel(node, SwarmFunder.batchId(nonce), 17, 2, depositPlur = BigInteger.TEN.pow(15))
         val value = BigInteger("53000000000000000")
         val quote = s.prepare(SendRequest(gnosis, xdai, from, SwarmFunder.ADDRESS, value, DappCall(null, data, null, swarm = label)))
         chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
