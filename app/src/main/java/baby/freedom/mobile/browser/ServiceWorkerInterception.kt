@@ -57,6 +57,14 @@ object ServiceWorkerInterception {
                     ): WebResourceResponse? {
                         // Before the fetch: see [UnverifiedOrigins.noteWorkerDocument].
                         val tick = DocumentClock.next()
+                        // No tab's: WebAuthn off in every tab for a document
+                        // on this device, before it is answered, or no
+                        // document (#524 R1-F1).
+                        if (isDocumentRequest(request.isForMainFrame, request.requestHeaders) &&
+                            !PasskeyGate.workerDocumentRequested(request.url?.toString())
+                        ) {
+                            return passkeyHoldTimedOut()
+                        }
                         val response = interceptVirtualRequest(request)
                         // A frame document a worker fetches never reaches
                         // the tab's WebViewClient, so no tab's

@@ -36,7 +36,7 @@
     <string name="settings_passkeys_on">Sites can ask for passkeys in normal tabs, not in private ones. Tap to pick your passkey manager in Android settings.</string>
     <string name="settings_passkeys_needs_android_14">Passkeys need Android 14 or later.</string>
     <string name="settings_passkeys_webview_unsupported">Passkeys need Android System WebView 155 or later. Update it from your app store to use them.</string>
-    <string name="settings_passkeys_setup">To use passkeys, pick a passkey manager in Android settings, then add Freedom to that manager\'s trusted browsers. In KeePassDX: Settings → Form filling → Passkeys settings → Privileged apps. Bitwarden shows a Trust button the first time Freedom asks. Without this step, creating a passkey can seem to work, but signing in with it fails. Sites Freedom serves itself (Swarm, IPFS, ENS) can\'t use passkeys.</string>
+    <string name="settings_passkeys_setup">To use passkeys, pick a passkey manager in Android settings, then add Freedom to that manager\'s trusted browsers. In KeePassDX: Settings → Form filling → Passkeys settings → Privileged apps. Bitwarden shows a Trust button the first time Freedom asks. Without this step, creating a passkey can seem to work, but signing in with it fails. Sites Freedom serves itself (Swarm, IPFS, ENS) and sites on this device (localhost) can\'t use passkeys.</string>
     <string name="settings_passkeys_keywords">WebAuthn, FIDO, KeePassDX, Bitwarden, credential manager, sign in, login, password</string>
 
     <!-- SettingsScreen.kt: Chains (removing a chain or one of its RPCs) -->

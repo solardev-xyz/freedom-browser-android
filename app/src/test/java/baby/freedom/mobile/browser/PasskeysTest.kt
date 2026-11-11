@@ -72,4 +72,84 @@ class PasskeysTest {
         assertEquals(null, Passkeys.majorVersion(""))
         assertEquals(null, Passkeys.majorVersion("dev"))
     }
+
+    @Test
+    fun `browser mode only with the app on screen and nothing of the document on the device`() {
+        val on = WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER
+        for (visible in listOf(false, true)) for (device in listOf(false, true)) {
+            assertEquals(if (visible && !device) on else WEB_AUTHENTICATION_SUPPORT_NONE, Passkeys.live(on, visible, device))
+            // Off stays off; no setting stays untouched.
+            assertEquals(WEB_AUTHENTICATION_SUPPORT_NONE, Passkeys.live(WEB_AUTHENTICATION_SUPPORT_NONE, visible, device))
+            assertEquals(null, Passkeys.live(null, visible, device))
+        }
+    }
+
+    @Test
+    fun `hosts of this device are on it, on any port`() {
+        for (url in listOf(
+            "http://localhost:1633/bzz/abc/", "http://localhost/", "https://localhost:8443/x",
+            "http://abc.ipfs.localhost:8080/", "http://127.0.0.1:1633/bzz/abc/", "http://127.9.9.9/",
+            "http://[::1]:5001/", "http://0.0.0.0:1633/", "blob:http://localhost:1633/0e1d",
+        )) {
+            assertEquals(url, true, Passkeys.onDevice(url))
+        }
+        for (url in listOf(
+            "https://webauthn.io/", "https://app-swarmit-eth.ens.freedom.baby/", "http://127.tracker.example/",
+            "http://localhost.example/", "about:blank", "data:text/html,x", "blob:https://webauthn.io/0e1d", null,
+        )) {
+            assertEquals(url, false, Passkeys.onDevice(url))
+        }
+    }
+
+    @Test
+    fun `a device frame holds the tab until a new document off the device commits`() {
+        val hold = DeviceDocumentHold()
+        hold.mainFrameRequested("https://evil.example/")
+        hold.committed("https://evil.example/")
+        assertEquals(false, hold.held)
+        // The gateway framed, however it got there: held at once.
+        hold.frameRequested("http://localhost:1633/bzz/b/")
+        assertEquals(true, hold.held)
+        // Reached without a main-frame request (a service worker's
+        // answer): the frame's word still stands.
+        hold.committed("https://evil.example/again")
+        assertEquals(true, hold.held)
+        // A new document requested and committed with no device frame.
+        hold.mainFrameRequested("https://webauthn.io/")
+        hold.committed("https://webauthn.io/")
+        assertEquals(false, hold.held)
+        // Asked for before its commit (a preload scan beating `onPageStarted`).
+        hold.mainFrameRequested("https://evil.example/")
+        hold.frameRequested("http://localhost:1633/bzz/b/")
+        hold.committed("https://evil.example/")
+        assertEquals(true, hold.held)
+        // Requested, but the main frame never commits (a download, a 204): still held.
+        hold.mainFrameRequested("https://webauthn.io/file")
+        assertEquals(true, hold.held)
+    }
+
+    @Test
+    fun `a device page stays held through documents with no origin of their own`() {
+        val hold = DeviceDocumentHold()
+        hold.mainFrameRequested("http://localhost:1633/bzz/a/")
+        assertEquals(true, hold.held)
+        hold.committed("http://localhost:1633/bzz/a/")
+        // `location = URL.createObjectURL(…)`, `about:blank`: the device origin carried over.
+        for (url in listOf("blob:http://localhost:1633/0e1d", "about:blank", "data:text/html,x")) {
+            hold.mainFrameRequested(url)
+            hold.committed(url)
+            assertEquals(url, true, hold.held)
+        }
+        // A pop-up it opens (`window.open('')`) starts held.
+        val popup = DeviceDocumentHold()
+        popup.openedBy(hold)
+        assertEquals(true, popup.held)
+        // One from a page off the device doesn't.
+        val fresh = DeviceDocumentHold()
+        DeviceDocumentHold().also { it.openedBy(fresh) }.let { assertEquals(false, it.held) }
+        // An http(s) document off the device ends it.
+        popup.mainFrameRequested("https://webauthn.io/")
+        popup.committed("https://webauthn.io/")
+        assertEquals(false, popup.held)
+    }
 }

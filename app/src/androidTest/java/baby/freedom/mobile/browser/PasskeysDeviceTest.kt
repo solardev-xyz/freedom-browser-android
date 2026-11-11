@@ -14,8 +14,8 @@ import org.junit.runner.RunWith
 
 /**
  * [Passkeys] on a real WebView (#524), as the WebView itself reports the
- * mode back: what a tab gets on this device, and that each mode the
- * decision can make actually takes.
+ * mode back: what a tab gets on this device, that each mode the decision
+ * can make actually takes, and that [PasskeyGate] moves it.
  */
 @RunWith(AndroidJUnit4::class)
 class PasskeysDeviceTest {
@@ -40,15 +40,57 @@ class PasskeysDeviceTest {
         assumeTrue(WebViewFeature.isFeatureSupported(WebViewFeature.WEB_AUTHENTICATION))
         val context = instrumentation.targetContext
         val major = Passkeys.majorVersion(WebViewCompat.getCurrentWebViewPackage(context)?.versionName)
-        for (private in listOf(false, true)) {
-            val expected = Passkeys.mode(true, major, Build.VERSION.SDK_INT, private)
-            assertEquals(expected, readBack { Passkeys.apply(context, it.settings, private) })
+        instrumentation.runOnMainSync { PasskeyGate.appVisible(true) }
+        try {
+            for (private in listOf(false, true)) {
+                val expected = Passkeys.mode(true, major, Build.VERSION.SDK_INT, private)
+                assertEquals(expected, readBack { PasskeyGate(it.settings, Passkeys.mode(context, private)) })
+            }
+            // A private tab is off whatever the WebView.
+            assertEquals(
+                WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_NONE,
+                readBack { PasskeyGate(it.settings, Passkeys.mode(context, privateTab = true)) },
+            )
+        } finally {
+            instrumentation.runOnMainSync { PasskeyGate.appVisible(false) }
         }
-        // A private tab is off whatever the WebView.
-        assertEquals(
-            WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_NONE,
-            readBack { Passkeys.apply(context, it.settings, privateTab = true) },
-        )
+    }
+
+    @Test
+    fun the_gate_drops_browser_mode_for_a_device_document_and_with_the_app_away() {
+        assumeTrue(WebViewFeature.isFeatureSupported(WebViewFeature.WEB_AUTHENTICATION))
+        val on = WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER
+        val off = WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_NONE
+        val seen = mutableListOf<Int>()
+        instrumentation.runOnMainSync {
+            val view = WebView(instrumentation.targetContext)
+            fun mode() = WebSettingsCompat.getWebAuthenticationSupport(view.settings)
+            try {
+                PasskeyGate.appVisible(true)
+                val gate = PasskeyGate(view.settings, on)
+                PasskeyGate.register(gate)
+                seen += mode()
+                // A gateway iframe (#524 R1-F1): off at once, and its page stays off.
+                gate.frameRequested("http://localhost:1633/bzz/abc/")
+                seen += mode()
+                gate.committed("https://example.com/")
+                seen += mode()
+                // Back only with a new document off the device.
+                gate.mainFrameRequested("https://example.com/next")
+                gate.committed("https://example.com/next")
+                seen += mode()
+                // The app away (R1-F2), and back.
+                PasskeyGate.appVisible(false)
+                seen += mode()
+                PasskeyGate.appVisible(true)
+                seen += mode()
+                PasskeyGate.unregister(gate)
+            } finally {
+                PasskeyGate.appVisible(false)
+                view.destroy()
+            }
+        }
+        assertEquals(listOf(on, off, off, on, off, on), seen)
     }
 
     @Test

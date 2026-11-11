@@ -263,6 +263,13 @@ internal fun isDocumentRequest(
     return header("Accept")?.trim()?.lowercase()?.startsWith("text/html") == true
 }
 
+/**
+ * The answer to a document on this device the main thread couldn't turn
+ * WebAuthn off for in time ([PasskeyGate.fromWorker], #524 R1-F1): none.
+ */
+internal fun passkeyHoldTimedOut(): WebResourceResponse =
+    WebResourceResponse("text/plain", "utf-8", 503, "Service Unavailable", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
+
 /** A request's `Referer` header, if it sent one (see [AdblockPage]). */
 internal fun refererOf(headers: Map<String, String>?): String? =
     headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value?.trim()?.ifEmpty { null }
@@ -1278,6 +1285,27 @@ fun BrowserWebViewHost(
             if (pause) wv.onPause() else wv.onResume()
         }
     }
+    // Passkeys (#524 R1-F2): browser-mode WebAuthn only while the app is
+    // on screen. Page script keeps running with the app away, and
+    // Credential Manager starts its sheet even from the background: a
+    // page's timer must not raise it over another app. Lowered on the
+    // stop itself, before any recomposition. Started, not resumed: the
+    // passkey sheet itself only pauses the app ([PasskeyGate]).
+    DisposableEffect(lifecycleOwner) {
+        PasskeyGate.appVisible(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> PasskeyGate.appVisible(true)
+                Lifecycle.Event.ON_STOP -> PasskeyGate.appVisible(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            PasskeyGate.appVisible(false)
+        }
+    }
     // And every WebView's timers while the app is in the background and
     // nothing has played for a while ([webViewTimersPaused],
     // [TIMERS_PAUSE_GRACE_MS]). An OpenLV session is read as the app
@@ -2236,12 +2264,17 @@ private fun buildRefreshableWebView(
             // the user allowed pop-ups — otherwise it is blocked and
             // named in a notice the user can open it from.
             javaScriptCanOpenWindowsAutomatically = true
-            // Passkeys (#524): WebAuthn in browser mode on Android 14+,
-            // through the passkey manager picked in Android settings —
-            // never in a private tab, where a passkey made would outlive
-            // the session in that manager, and only on a WebView recent
-            // enough to refuse it on dweb pages ([Passkeys]).
-            Passkeys.apply(context, this, privateTab = state.private)
+        }
+        // Passkeys (#524): WebAuthn in browser mode on Android 14+,
+        // through the passkey manager picked in Android settings — never
+        // in a private tab, where a passkey made would outlive the
+        // session in that manager, and only on a WebView recent enough to
+        // refuse it on dweb pages ([Passkeys]). Off while the app is away
+        // and once anything of the tab's document is on a host of this
+        // device ([PasskeyGate], R1-F1, R1-F2).
+        passkeys = PasskeyGate(settings, Passkeys.mode(context, privateTab = state.private)).also { gate ->
+            PasskeyGate.register(gate)
+            if (isPopup) ((popupOpener()?.second as? PageWebView)?.passkeys)?.let(gate::openedBy)
         }
 
         this.onSearchSelection = onSearchSelection
@@ -2703,7 +2736,16 @@ private fun buildRefreshableWebView(
         if (bottomUiSupported) {
             val listener = WebViewCompat.WebMessageListener { view, message, sourceOrigin, isMainFrame, replyProxy ->
                 if (sourceOrigin.scheme != "https" && sourceOrigin.scheme != "http") return@WebMessageListener
+                // Every frame's detector speaks at document start, before
+                // the page's own script ([BOTTOM_UI_READY] in the main
+                // frame, [FRAME_STARTED] in a subframe): a frame on this
+                // device turns WebAuthn off in the tab (#524 R1-F1). The
+                // origin is the browser's, not the page's word, and this
+                // sees a frame reached by a redirect hop, which neither
+                // `shouldOverrideUrlLoading` nor the interceptor does.
+                (view as? PageWebView)?.passkeys?.frameRequested(sourceOrigin.toString())
                 if (message.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+                if (message.data == FRAME_STARTED) return@WebMessageListener
                 // A frame's media became audible or fell silent (#91):
                 // any frame, keyed by its reply proxy, folded into the
                 // tab's indicator.
@@ -3154,6 +3196,8 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertErrors.clear()
                 certRefusal.committed(url)
+                // WebAuthn back only for a document off this device (#524 R1-F1).
+                (view as? PageWebView)?.passkeys?.committed(url)
                 // Page info's cleanup mark (#442) lasts this one load.
                 SiteData.committed(state.id, url)
                 // The user's own navigation landing — their address,
@@ -3730,6 +3774,13 @@ private fun buildRefreshableWebView(
                 // Scriptlets for the page it's heading to (#318), before a
                 // service worker can answer it unseen by the interceptor.
                 if (request.isForMainFrame) scriptlets?.ensure(target)
+                // Before the navigation starts, in any frame, redirect hops
+                // included (#524 R1-F1): WebAuthn off for a document on
+                // this device ([PasskeyGate]).
+                (view as? PageWebView)?.passkeys?.let { gate ->
+                    if (request.isForMainFrame && !request.isRedirect) gate.mainFrameRequested(target)
+                    else gate.frameRequested(target)
+                }
                 // "Continue once" on the not-cross-checked ENS warning
                 // (#96): never a load, only a message for the submit
                 // flow, which checks it is this tab's ([EnsGate]).
@@ -4014,6 +4065,20 @@ private fun buildRefreshableWebView(
                 // site's user agent, and the page re-issues it with the
                 // right one (see [PageWebView.pageHopRequested]).
                 var heldBack = false
+                // WebAuthn off for a document, top or framed, on this
+                // device (#524 R1-F1), before it is answered — or, if the
+                // main thread can't get to it in time, no document.
+                (view as? PageWebView)?.passkeys?.let { gate ->
+                    val url = request?.url?.toString()
+                    val lowered = if (mainFrame) {
+                        PasskeyGate.fromWorker(url) { gate.mainFrameRequested(url) }
+                    } else if (request != null && isDocumentRequest(false, request.requestHeaders) && Passkeys.onDevice(url)) {
+                        PasskeyGate.fromWorker(url) { gate.frameRequested(url) }
+                    } else {
+                        true
+                    }
+                    if (!lowered) return passkeyHoldTimedOut()
+                }
                 if (mainFrame) {
                     request!!.url?.toString()?.let {
                         pendingNavigationUrls.add(it)
@@ -4755,11 +4820,15 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun destroy() {
         destroyed = true
         scriptlets?.close()
+        passkeys?.let(PasskeyGate::unregister)
         super.destroy()
     }
 
     /** A private tab's (#86): the page's own text fields ask the keyboard not to learn. */
     var privateTab = false
+
+    /** This tab's WebAuthn mode ([PasskeyGate]); set where the tab builds it. */
+    var passkeys: PasskeyGate? = null
 
     /**
      * A page's own `<input>`/`<textarea>`/`contenteditable` in a private

@@ -397,6 +397,12 @@ private val CHANNEL_SAFE = Regex("[a-z]{8,64}")
 /** What the detector posts once, at document start, so Kotlin has a way to reach it. */
 internal const val BOTTOM_UI_READY = "ready"
 
+/**
+ * A subframe's detector at document start (#524 R1-F1): carries nothing;
+ * Kotlin reads the frame's origin from the message, for [PasskeyGate].
+ */
+internal const val FRAME_STARTED = "frame"
+
 /** The detector's report that the page let a long-press's `contextmenu` through (#84). */
 internal const val CONTEXT_MENU_ALLOWED = "contextmenu 1"
 
@@ -850,7 +856,9 @@ internal fun bottomUiDetectorJs(channel: String, debounceMs: Int = BOTTOM_UI_DEB
     var persisted = prop(proto(w.PageTransitionEvent), 'persisted');
     w.addEventListener('pageshow', function (e) { if (persisted(e)) hear(); }, true);
   }
-  if (w.top !== w) return;
+  // A subframe says it started, before the page's own script (#524
+  // R1-F1): Kotlin reads only the browser's word on its origin.
+  if (w.top !== w) { port.postMessage('$FRAME_STARTED'); return; }
   var P = w.performance, pnow = P && P.now && P.now.bind(P), tsOf = prop(EvP, 'timeStamp');
   if (!(EvP && gopd(EvP, 'timeStamp'))) tsOf = null;
   var said = function (t) {
