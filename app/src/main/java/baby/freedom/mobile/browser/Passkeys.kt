@@ -192,7 +192,11 @@ internal object Passkeys {
  * ([RaisedDocumentReload], R2-F1). The cost is a second load of the
  * first page after a held one; a POST result isn't resent (the reload
  * asks, and is told not to), and stays without WebAuthn until the user
- * reloads it. A `blob:` or `about:blank` document, which can
+ * reloads it. "Since its request" includes a device frame the outgoing
+ * page asks for before the commit: the tab can't tell it from the
+ * incoming document's own, so that document commits held, with no
+ * WebAuthn and no reload, until reloaded by hand
+ * ([DeviceDocumentHold], R5-M1). A `blob:` or `about:blank` document, which can
  * carry its creator's origin, keeps the tab held. The detector's word
  * travels on a pipe of its own, apart from WebAuthn's: an iframe
  * reached only through a redirect hop that calls WebAuthn in its very
@@ -425,7 +429,21 @@ internal class DeviceDocumentHold {
     var held = false
         private set
 
-    /** A device frame or document was asked for since the last main-frame request. */
+    /**
+     * A device frame or document was asked for since the last main-frame
+     * request; the document that request commits is held for it.
+     *
+     * That counts the outgoing page's own frames too (R5-M1): one the
+     * page still on screen asks for between the incoming request and its
+     * commit holds the incoming document, which then commits at `NONE`
+     * with no WebAuthn, and nothing reloads it (the mode stays down) until
+     * the user reloads it by hand or a later clean navigation commits. The
+     * tab can't tell the two apart: the incoming document's own frames
+     * can be asked for in that same window (a preload scan beating
+     * `onPageStarted`), and taking a frame for the outgoing page's would
+     * let a device frame into a document with WebAuthn. So it fails
+     * closed: a usability cost, never a hole.
+     */
     private var since = false
 
     /**

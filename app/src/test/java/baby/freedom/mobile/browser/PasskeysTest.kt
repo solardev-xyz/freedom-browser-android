@@ -130,6 +130,25 @@ class PasskeysTest {
     }
 
     @Test
+    fun `a device frame asked for between a request and its commit holds the incoming document`() {
+        val hold = DeviceDocumentHold()
+        hold.mainFrameRequested("https://a.example/")
+        hold.committed("https://a.example/")
+        assertEquals(false, hold.held)
+        // The user goes on to B; before B commits, A (still on screen)
+        // frames the gateway. The tab can't tell that frame from one of
+        // B's own asked for early, so B commits held: fail closed (R5-M1).
+        hold.mainFrameRequested("https://b.example/")
+        hold.frameRequested("http://localhost:1633/bzz/c/")
+        hold.committed("https://b.example/")
+        assertEquals(true, hold.held)
+        // A reload of B with no device frame asked for clears it.
+        hold.mainFrameRequested("https://b.example/")
+        hold.committed("https://b.example/")
+        assertEquals(false, hold.held)
+    }
+
+    @Test
     fun `a device page stays held through documents with no origin of their own`() {
         val hold = DeviceDocumentHold()
         hold.mainFrameRequested("http://localhost:1633/bzz/a/")
