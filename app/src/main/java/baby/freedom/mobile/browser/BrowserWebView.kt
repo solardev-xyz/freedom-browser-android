@@ -1181,6 +1181,10 @@ fun BrowserWebViewHost(
             }
             // The restored entry's scriptlets (#318), before it loads.
             (wv as? PageWebView)?.scriptlets?.ensure(tab.url)
+            // And its WebAuthn mode (#526 R6-M1): a restored entry a
+            // service worker answers is seen by nothing else before its
+            // document is made.
+            (wv as? PageWebView)?.passkeys?.mainFrameRequested(tab.url)
             val restored = restore.webViewState?.let { wv.restoreState(it) } != null
             if (restored) {
                 tab.canGoBack = wv.canGoBack()
@@ -5464,6 +5468,21 @@ internal class PageWebView(context: Context) : WebView(context) {
         }
     }
 
+    /**
+     * A main-frame load the app starts itself, heading for [target]:
+     * WebAuthn off before it for a document on this device, and a clean
+     * one ends the hold at its commit ([PasskeyGate.mainFrameRequested],
+     * #526 R6-M1). A page a service worker answers reaches neither
+     * `shouldOverrideUrlLoading` (not for a load the browser starts) nor
+     * the interceptor, so without this a typed address, a reload or a
+     * Back/Forward to such a page left the tab held. [target] is the
+     * address itself, the page's for a reload, the history entry's for a
+     * step. Main thread, as every WebView call is.
+     */
+    private fun passkeyLoadStarting(target: String?) {
+        passkeys?.mainFrameRequested(target)
+    }
+
     private fun browserInitiatedLoad(url: String? = null) {
         // This load, not a held put-back, is what the tab is on now.
         // Null only while WebView's own constructor runs.
@@ -5541,6 +5560,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        passkeyLoadStarting(Passkeys.appLoadTarget(url, ::historyEntryUrl))
         scriptlets?.ensure(url)
         super.loadUrl(url)
     }
@@ -5552,6 +5572,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        passkeyLoadStarting(Passkeys.appLoadTarget(url, ::historyEntryUrl))
         scriptlets?.ensure(url)
         super.loadUrl(url, additionalHttpHeaders)
     }
@@ -5563,6 +5584,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         if (!url.startsWith("javascript:", ignoreCase = true)) usersNavigationIsLoad = true
         documents.navigationStarted(url)
         browserInitiatedLoad(url)
+        passkeyLoadStarting(url)
         scriptlets?.ensure(url)
         super.postUrl(url, postData)
     }
@@ -5576,6 +5598,9 @@ internal class PageWebView(context: Context) : WebView(context) {
         baseUrl: String?, data: String, mimeType: String?, encoding: String?, historyUrl: String?,
     ) {
         browserInitiatedLoad()
+        // Never a worker's answer: only the fail-closed side, a document
+        // given an origin on this device.
+        if (Passkeys.onDevice(baseUrl)) passkeyLoadStarting(baseUrl)
         super.loadDataWithBaseURL(baseUrl, data, mimeType, encoding, historyUrl)
     }
 
@@ -5584,6 +5609,7 @@ internal class PageWebView(context: Context) : WebView(context) {
         matchUserAgentTo(url)
         url?.let(documents::navigationStarted)
         browserInitiatedLoad()
+        passkeyLoadStarting(url)
         scriptlets?.ensure(url)
         super.reload()
     }
@@ -5591,6 +5617,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun goBack() {
         historyStepStarting(-1)
         browserInitiatedLoad()
+        passkeyLoadStarting(historyEntryUrl(-1))
         ensureScriptletsForStep(-1)
         super.goBack()
     }
@@ -5598,6 +5625,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun goForward() {
         historyStepStarting(1)
         browserInitiatedLoad()
+        passkeyLoadStarting(historyEntryUrl(1))
         ensureScriptletsForStep(1)
         super.goForward()
     }
@@ -5605,6 +5633,7 @@ internal class PageWebView(context: Context) : WebView(context) {
     override fun goBackOrForward(steps: Int) {
         historyStepStarting(steps)
         browserInitiatedLoad()
+        passkeyLoadStarting(historyEntryUrl(steps))
         ensureScriptletsForStep(steps)
         super.goBackOrForward(steps)
     }

@@ -272,4 +272,112 @@ class PasskeysTest {
         reload.mainFrameRequested("about:blank")
         assertEquals(null, reload.raised())
     }
+
+    @Test
+    fun `an app-started load heads for its own address, or the history entry it steps to`() {
+        val history = mapOf(-1 to "http://localhost:1633/bzz/a/", 1 to "https://sw.example/app")
+        val entry = { steps: Int -> history[steps] }
+        assertEquals("https://sw.example/", Passkeys.appLoadTarget("https://sw.example/", entry))
+        assertEquals("http://localhost:8080/", Passkeys.appLoadTarget("http://localhost:8080/", entry))
+        // The chrome's Back / Forward: the entry it steps to.
+        assertEquals("http://localhost:1633/bzz/a/", Passkeys.appLoadTarget(HISTORY_BACK_JS, entry))
+        assertEquals("https://sw.example/app", Passkeys.appLoadTarget(HISTORY_FORWARD_JS, entry))
+        // No entry that way: nothing.
+        assertEquals(null, Passkeys.appLoadTarget(HISTORY_BACK_JS) { null })
+        // Any other `javascript:` URL loads nothing.
+        assertEquals(null, Passkeys.appLoadTarget("JavaScript:void(0)", entry))
+        assertEquals(null, Passkeys.appLoadTarget("javascript:location='http://localhost:1633/'", entry))
+    }
+
+    /**
+     * The tab's hold and reload as [PasskeyGate] drives them, without a
+     * WebView: the mode is up when the document isn't held (app on screen).
+     */
+    private class GateModel {
+        val hold = DeviceDocumentHold()
+        val reload = RaisedDocumentReload()
+        val raised get() = Passkeys.live(WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER, true, hold.held) ==
+            WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER
+
+        fun requested(url: String?) {
+            hold.mainFrameRequested(url)
+            reload.mainFrameRequested(url)
+        }
+
+        fun committed(url: String): Int? {
+            val before = raised
+            hold.committed(url)
+            return reload.committed(madeLowered = !before, raisedNow = raised)
+        }
+    }
+
+    @Test
+    fun `a service-worker page the app loads after a hold commits clean and is reloaded once`() {
+        // The tab showed a page on the device.
+        val gate = GateModel()
+        gate.requested("http://localhost:1633/bzz/a/")
+        gate.committed("http://localhost:1633/bzz/a/")
+        assertEquals(false, gate.raised)
+        // The user types the address of a page a service worker answers:
+        // no `shouldOverrideUrlLoading`, no interceptor; only the tab's
+        // own `loadUrl` names it (R6-M1).
+        gate.requested(Passkeys.appLoadTarget("https://sw.example/") { null })
+        val ticket = gate.committed("https://sw.example/")
+        assertEquals(true, gate.raised)
+        assertNotNull(ticket)
+        assertEquals(true, gate.reload.take(ticket!!, "https://sw.example/", raised = true))
+        // The gate's reload goes through the tab's `reload()`, which names
+        // the page's own address again: its commit earns no second reload.
+        gate.requested("https://sw.example/")
+        assertEquals(null, gate.committed("https://sw.example/"))
+        assertEquals(true, gate.raised)
+    }
+
+    @Test
+    fun `a page held by the outgoing page's device frame heals on the app's reload`() {
+        val gate = GateModel()
+        gate.requested("https://a.example/")
+        gate.committed("https://a.example/")
+        // A frames the gateway between B's request and its commit (R5-M1).
+        gate.requested("https://sw.example/")
+        gate.hold.frameRequested("http://localhost:1633/bzz/c/")
+        assertEquals(null, gate.committed("https://sw.example/"))
+        assertEquals(false, gate.raised)
+        // The user's reload of B, worker-answered: named by `reload()` itself.
+        gate.requested("https://sw.example/")
+        assertNotNull(gate.committed("https://sw.example/"))
+        assertEquals(true, gate.raised)
+    }
+
+    @Test
+    fun `an app-started load still holds for a document on the device`() {
+        val history = mapOf(-1 to "http://localhost:1633/bzz/a/", 1 to "https://sw.example/")
+        val entry = { steps: Int -> history[steps] }
+        val gate = GateModel()
+        gate.requested("https://sw.example/")
+        gate.committed("https://sw.example/")
+        assertEquals(true, gate.raised)
+        // A typed device address: down before the load starts.
+        gate.requested(Passkeys.appLoadTarget("http://127.0.0.1:8080/", entry))
+        assertEquals(false, gate.raised)
+        gate.committed("http://127.0.0.1:8080/")
+        // Forward to a clean page, then Back to a device entry: down at
+        // once, before its document is made.
+        gate.requested(Passkeys.appLoadTarget(HISTORY_FORWARD_JS, entry))
+        gate.committed("https://sw.example/")
+        assertEquals(true, gate.raised)
+        gate.requested(Passkeys.appLoadTarget(HISTORY_BACK_JS, entry))
+        assertEquals(false, gate.raised)
+        gate.committed("http://localhost:1633/bzz/a/")
+        assertEquals(false, gate.raised)
+        // A `javascript:` URL that loads nothing leaves the hold as it is.
+        gate.requested(Passkeys.appLoadTarget("javascript:void(0)", entry))
+        assertEquals(false, gate.raised)
+        // A clean app-started load whose page then frames the device holds
+        // that page's commit.
+        gate.requested(Passkeys.appLoadTarget("https://sw.example/", entry))
+        gate.hold.frameRequested("http://localhost:1633/bzz/b/")
+        assertEquals(null, gate.committed("https://sw.example/"))
+        assertEquals(false, gate.raised)
+    }
 }

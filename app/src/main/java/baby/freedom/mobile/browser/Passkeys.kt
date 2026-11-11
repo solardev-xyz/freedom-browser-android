@@ -165,6 +165,21 @@ internal object Passkeys {
     fun ownsOrigin(url: String?): Boolean =
         url != null && (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))
 
+    /**
+     * The address a main-frame load the app starts at [url] heads for,
+     * for [PasskeyGate.mainFrameRequested] (#526 R6-M1): [url] itself (an
+     * address-bar submit, a bookmark, a retry), or for the chrome's Back
+     * and Forward ([HISTORY_BACK_JS], [HISTORY_FORWARD_JS]) the history
+     * entry [historyEntry] reads for that step; `null` for any other
+     * `javascript:` URL, which loads nothing.
+     */
+    fun appLoadTarget(url: String, historyEntry: (steps: Int) -> String?): String? = when {
+        url == HISTORY_BACK_JS -> historyEntry(-1)
+        url == HISTORY_FORWARD_JS -> historyEntry(1)
+        url.startsWith("javascript:", ignoreCase = true) -> null
+        else -> url
+    }
+
     /** Sets [settings] to [mode], as [PasskeyGate] does. */
     fun set(settings: WebSettings, mode: Int) {
         runCatching { WebSettingsCompat.setWebAuthenticationSupport(settings, mode) }
@@ -183,7 +198,11 @@ internal object Passkeys {
  * service worker's, which holds every tab); a frame's detector speaking
  * at document start, by its browser-given origin (the one signal that
  * sees an iframe reached through a redirect hop); a pop-up opened by a
- * held page; and commit. A top-level redirect to the device lands in the
+ * held page; a main-frame load the app starts itself (an address-bar
+ * submit, a bookmark, `reload()`, Back and Forward: the tab's
+ * `loadUrl`/`reload`/`goBack` family, R6-M1), by the address it heads
+ * for, which a service worker may answer unseen by either of the first
+ * two; and commit. A top-level redirect to the device lands in the
  * commit at the latest. Raised only at the commit of an `http(s)`
  * main-frame document off the device that had no such frame asked for
  * since its request. That document was made while the mode was down,
@@ -437,7 +456,13 @@ internal class DeviceDocumentHold {
      * page still on screen asks for between the incoming request and its
      * commit holds the incoming document, which then commits at `NONE`
      * with no WebAuthn, and nothing reloads it (the mode stays down) until
-     * the user reloads it by hand or a later clean navigation commits. The
+     * the user reloads it by hand or a later clean navigation commits.
+     * That holds for a page a service worker answers too: the app's own
+     * loads (a reload, Back/Forward, a typed address) reach
+     * [mainFrameRequested] from the tab itself, not only through the
+     * interceptor the worker bypasses (R6-M1). A navigation the page
+     * starts itself that WebView reports to neither callback, answered
+     * by the worker, is still unseen: such a document commits held. The
      * tab can't tell the two apart: the incoming document's own frames
      * can be asked for in that same window (a preload scan beating
      * `onPageStarted`), and taking a frame for the outgoing page's would
