@@ -216,10 +216,11 @@ internal object Passkeys {
  * is: a page opened in the background that checks for passkeys as it
  * loads (webauthn.io does) would lose them. And a document that
  * commits while the app is away (a page still loading as the user
- * leaves, or one landing while the Activity is made again after a
- * rotation) is made without WebAuthn: it is reloaded once as the app
- * comes back and raises the mode, as for a commit that raises it
- * ([RaisedDocumentReload], R3-F1, R3-M2).
+ * leaves, or one landing while the Activity is made again for a
+ * configuration change it doesn't handle itself) is made without
+ * WebAuthn: it is reloaded once as the app comes back and raises the
+ * mode, as for a commit that raises it ([RaisedDocumentReload], R3-F1,
+ * R3-M2).
  *
  * Everything runs on the main thread, the setter included: WebView
  * applies a settings change on its UI thread, blocking a caller from
@@ -316,9 +317,9 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
         applied = mode
         Passkeys.set(settings, mode)
         // Raised outside a commit: the app back on screen (its resume, or
-        // the Activity made again after a rotation, R3-M2). A document
-        // that committed while it was away was made without WebAuthn and
-        // is reloaded once for it (R3-F1).
+        // the Activity made again for a configuration change, R3-M2). A
+        // document that committed while it was away was made without
+        // WebAuthn and is reloaded once for it (R3-F1).
         if (!committing && !before && raised) reload.raised()?.let(::reloadFor)
     }
 
@@ -535,9 +536,17 @@ internal class RaisedDocumentReload {
         return due
     }
 
-    /** The tab asked for a main-frame document: a reload not yet made is superseded. */
+    /**
+     * The tab asked for a main-frame document: a reload not yet made is
+     * superseded, and so is one the app's return would owe (a page that
+     * went on to its next hop while the app was away, a sign-in's
+     * redirect, mustn't have that navigation replaced by a reload). If
+     * it never commits, the page stays without WebAuthn until reloaded
+     * by hand.
+     */
     fun mainFrameRequested() {
         due = 0
+        lowered = false
     }
 
     /**

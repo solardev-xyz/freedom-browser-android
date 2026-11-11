@@ -1304,9 +1304,11 @@ fun BrowserWebViewHost(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            // Also on a rotation's recreation: the Activity is paused and
-            // stopped for it anyway. A page committing meanwhile is
-            // reloaded once the new one resumes ([PasskeyGate], R3-M2).
+            // Also when the Activity is made again for a configuration
+            // change (rotation isn't one: MainActivity handles that
+            // itself): it is paused and stopped for it anyway. A page
+            // committing meanwhile is reloaded once the new one resumes
+            // ([PasskeyGate], R3-M2).
             PasskeyGate.appVisible(false)
         }
     }

@@ -220,11 +220,16 @@ class PasskeysTest {
         reload.committed(madeLowered = true, raisedNow = true)!!.let { assertEquals(true, reload.take(it, "https://a.example/", raised = true)) }
         assertEquals(null, reload.committed(madeLowered = true, raisedNow = false))
         assertNotNull(reload.raised())
+        // A view with no document has nothing to reload.
+        assertEquals(false, reload.take(reload.raised()!!, null, raised = true))
         // A navigation before the reload runs drops it.
         val superseded = reload.raised()!!
         reload.mainFrameRequested()
         assertEquals(false, reload.take(superseded, "https://a.example/", raised = true))
-        // And a view with no document has nothing to reload.
-        assertEquals(false, reload.take(reload.raised()!!, null, raised = true))
+        // And one the page started while the app was away is never replaced
+        // by a reload on its return.
+        assertEquals(null, reload.committed(madeLowered = true, raisedNow = false))
+        reload.mainFrameRequested()
+        assertEquals(null, reload.raised())
     }
 }
