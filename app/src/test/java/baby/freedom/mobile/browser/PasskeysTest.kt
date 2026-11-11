@@ -160,17 +160,17 @@ class PasskeysTest {
         // A commit that didn't raise the mode owes nothing.
         assertEquals(null, reload.committed(raisedNow = false))
         // The first clean page after a held one: one reload.
-        reload.mainFrameRequested("https://webauthn.io/")
+        reload.mainFrameRequested()
         val ticket = reload.committed(raisedNow = true)!!
         assertEquals(true, reload.take(ticket, "https://webauthn.io/", raised = true))
         assertEquals(false, reload.take(ticket, "https://webauthn.io/", raised = true))
         // Its request and commit; the page frames the gateway, which lowers
         // the mode, and the reload's commit raises it again: no second
         // reload, or such a page would reload forever.
-        reload.mainFrameRequested("https://webauthn.io/")
+        reload.mainFrameRequested()
         assertEquals(null, reload.committed(raisedNow = true))
         // The next raise after that is owed one again.
-        reload.mainFrameRequested("https://example.com/")
+        reload.mainFrameRequested()
         assertNotNull(reload.committed(raisedNow = true))
     }
 
@@ -183,18 +183,19 @@ class PasskeysTest {
         assertEquals(false, reload.take(lowered, "https://webauthn.io/", raised = false))
         // The user went on before it ran.
         val superseded = reload.committed(raisedNow = true)!!
-        reload.mainFrameRequested("https://example.com/")
+        reload.mainFrameRequested()
         assertEquals(false, reload.take(superseded, "https://webauthn.io/", raised = true))
         // A later commit's ticket replaces an earlier one.
         val first = reload.committed(raisedNow = true)!!
         reload.committed(raisedNow = false)
         assertEquals(false, reload.take(first, "https://webauthn.io/", raised = true))
-        // A reload that redirects elsewhere isn't taken for its own commit
-        // any longer once the other address is asked for.
+        // A reload that redirects (to a new address each time, say) is
+        // still the reload: its commit earns no reload of its own.
         val redirected = reload.committed(raisedNow = true)!!
         assertEquals(true, reload.take(redirected, "https://a.example/#top", raised = true))
-        reload.mainFrameRequested("https://a.example/")
-        reload.mainFrameRequested("https://b.example/")
+        reload.mainFrameRequested()
+        reload.mainFrameRequested()
+        assertEquals(null, reload.committed(raisedNow = true))
         assertNotNull(reload.committed(raisedNow = true))
     }
 }

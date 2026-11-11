@@ -250,7 +250,7 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
     fun mainFrameRequested(url: String?) {
         hold.mainFrameRequested(url)
         update()
-        reload.mainFrameRequested(url)
+        reload.mainFrameRequested()
     }
 
     /** See [DeviceDocumentHold.frameRequested]. Main thread. */
@@ -457,14 +457,14 @@ internal class RaisedDocumentReload {
     /** The ticket of the reload due, 0 for none. */
     private var due = 0
 
-    /** The address of the reload under way, until its commit. */
-    private var reloading: String? = null
+    /** A reload was made, and its commit hasn't come. */
+    private var reloading = false
 
     /** A main-frame document committed; [raisedNow] if its commit raised the mode. A ticket when it is owed a reload. */
     fun committed(raisedNow: Boolean): Int? {
         due = 0
-        if (reloading != null) {
-            reloading = null
+        if (reloading) {
+            reloading = false
             return null
         }
         if (!raisedNow) return null
@@ -472,24 +472,24 @@ internal class RaisedDocumentReload {
         return due
     }
 
-    /**
-     * The tab asked for a main-frame document at [url]: a reload not yet
-     * made is superseded, and one made is no longer under way once
-     * something else is asked for.
-     */
-    fun mainFrameRequested(url: String?) {
+    /** The tab asked for a main-frame document: a reload not yet made is superseded. */
+    fun mainFrameRequested() {
         due = 0
-        if (reloading != null && withoutFragment(url) != reloading) reloading = null
     }
 
-    /** Whether to reload the document at [url] now for [ticket], with the mode [raised] still. */
+    /**
+     * Whether to reload the document at [url] now for [ticket], with the
+     * mode [raised] still. The next commit is then taken for that
+     * reload's, whatever its address (a reload that redirects, to a new
+     * address each time, mustn't earn a reload of its own): at worst, one
+     * the reload never reaches (a POST result's, not resent) costs the
+     * next raising commit its reload.
+     */
     fun take(ticket: Int, url: String?, raised: Boolean): Boolean {
         if (ticket == 0 || ticket != due) return false
         due = 0
         if (!raised || url == null) return false
-        reloading = withoutFragment(url)
+        reloading = true
         return true
     }
-
-    private fun withoutFragment(url: String?): String? = url?.substringBefore('#')
 }

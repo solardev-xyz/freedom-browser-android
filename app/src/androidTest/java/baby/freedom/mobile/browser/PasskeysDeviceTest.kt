@@ -22,7 +22,9 @@ import java.util.concurrent.TimeUnit
 /**
  * [Passkeys] on a real WebView (#524), as the WebView itself reports the
  * mode back: what a tab gets on this device, that each mode the decision
- * can make actually takes, and that [PasskeyGate] moves it.
+ * can make actually takes, and that [PasskeyGate] moves it; and, read in
+ * a page itself, that the first page after a held one gets WebAuthn
+ * (R2-F1).
  */
 @RunWith(AndroidJUnit4::class)
 class PasskeysDeviceTest {
