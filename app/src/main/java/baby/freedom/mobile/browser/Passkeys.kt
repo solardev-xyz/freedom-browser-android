@@ -256,7 +256,7 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
     fun mainFrameRequested(url: String?) {
         hold.mainFrameRequested(url)
         update()
-        reload.mainFrameRequested()
+        reload.mainFrameRequested(url)
     }
 
     /** See [DeviceDocumentHold.frameRequested]. Main thread. */
@@ -543,10 +543,27 @@ internal class RaisedDocumentReload {
      * redirect, mustn't have that navigation replaced by a reload). If
      * it never commits, the page stays without WebAuthn until reloaded
      * by hand.
+     *
+     * Only for a [url] WebView would make a document of (R4-M2): an
+     * `intent:` or custom-scheme hop never leaves the page (refused
+     * without a gesture, or handed to another app), so the page on
+     * screen keeps what it is owed. An `http(s)` request that turns out
+     * not to replace it (a download, an app link) still drops it: the
+     * tab can't tell those apart here.
      */
-    fun mainFrameRequested() {
+    fun mainFrameRequested(url: String?) {
+        if (!makesDocument(url)) return
         due = 0
         lowered = false
+    }
+
+    private fun makesDocument(url: String?): Boolean =
+        Passkeys.ownsOrigin(url) ||
+            DOCUMENT_SCHEMES.any { url?.startsWith(it, ignoreCase = true) == true }
+
+    private companion object {
+        /** Schemes besides `http(s)` a main-frame navigation can make a document of. */
+        val DOCUMENT_SCHEMES = listOf("about:", "blob:", "data:")
     }
 
     /**
@@ -554,8 +571,8 @@ internal class RaisedDocumentReload {
      * mode [raised] still. [url] is the view's address, `null` when it
      * has no document to reload. That it is still the document the
      * ticket was given for isn't read from [url] (a page's own
-     * `pushState` moves it): every main-frame request and commit since
-     * drops the ticket ([mainFrameRequested], [committed]). The next
+     * `pushState` moves it): every main-frame request for a document and
+     * commit since drops the ticket ([mainFrameRequested], [committed]). The next
      * commit is then taken for that reload's, whatever its address (a
      * reload that redirects, to a new address each time, mustn't earn a
      * reload of its own): at worst, one the reload never reaches (a POST
