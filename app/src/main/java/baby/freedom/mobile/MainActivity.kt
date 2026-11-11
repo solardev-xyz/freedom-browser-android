@@ -3,6 +3,7 @@ package baby.freedom.mobile
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentSender
 import android.content.ServiceConnection
 import android.os.Build
 import android.os.Bundle
@@ -44,6 +45,7 @@ import baby.freedom.mobile.browser.KeyboardShortcutRouter
 import baby.freedom.mobile.browser.PageKeyEvents
 import baby.freedom.mobile.chains.rpc.ColibriReads
 import baby.freedom.mobile.browser.PrivateProfile
+import baby.freedom.mobile.browser.PasskeyGate
 import baby.freedom.mobile.browser.keyboardShortcutGroups
 import baby.freedom.mobile.browser.EthereumProviders
 import baby.freedom.mobile.browser.X402Payments
@@ -1049,6 +1051,35 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      */
     private fun onRecoverNodes() {
         runCatching { binder?.recoverNetwork() }
+    }
+
+    /**
+     * Android's Credential Manager starts the passkey sheet with this, on
+     * the Activity WebView hands it: the pause that follows is the sheet
+     * over Freedom, not Freedom leaving the screen ([PasskeyGate], #524
+     * R1-F2).
+     */
+    override fun startIntentSender(
+        intent: IntentSender?,
+        fillInIntent: Intent?,
+        flagsMask: Int,
+        flagsValues: Int,
+        extraFlags: Int,
+    ) {
+        PasskeyGate.ownWindowStarting()
+        super.startIntentSender(intent, fillInIntent, flagsMask, flagsValues, extraFlags)
+    }
+
+    override fun startIntentSender(
+        intent: IntentSender?,
+        fillInIntent: Intent?,
+        flagsMask: Int,
+        flagsValues: Int,
+        extraFlags: Int,
+        options: Bundle?,
+    ) {
+        PasskeyGate.ownWindowStarting()
+        super.startIntentSender(intent, fillInIntent, flagsMask, flagsValues, extraFlags, options)
     }
 
     override fun onDestroy() {

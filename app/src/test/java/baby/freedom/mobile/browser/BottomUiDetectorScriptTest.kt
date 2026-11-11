@@ -472,13 +472,14 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
-    fun `in a subframe it only removes the channel object`() = page {
+    fun `in a subframe it removes the channel object and only says it started`() = page {
         eval("top = {}")
         documentStart()
         assertTrue(eval("!('$channel' in window)") as Boolean)
         firstPaint()
         assertEquals(0, num("readies"))
-        assertEquals(0, sent)
+        // Only that it started, for its origin (#524 R1-F1).
+        assertEquals(FRAME_STARTED, Context.toString(eval("sent.join('|')")))
         assertEquals(0, num("channelListeners.length"))
         assertTrue(eval("mutationCb === null") as Boolean)
         // …and reports the page's say on a long-press (#84): the press may land in an iframe.
@@ -659,12 +660,12 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
-    fun `a verdict is reported in a subframe too, and nothing else`() = page {
+    fun `a verdict is reported in a subframe too, and nothing else but its start`() = page {
         eval("top = {}")
         documentStart()
         eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, false)")
         assertEquals(CONTEXT_MENU_ALLOWED, verdicts())
-        assertEquals(1, sent)
+        assertEquals(2, sent) // and its start (#524 R1-F1)
     }
 
     // ---- audible media (#91) -------------------------------------------

@@ -76,6 +76,7 @@ internal enum class SettingsSection {
     Downloads,
     Browsing,
     Permissions,
+    Passkeys,
     Tor,
     Adblock,
     Wallet,
@@ -99,7 +100,7 @@ internal enum class SettingsSection {
         DefaultBrowser -> if (isDefaultBrowser) SettingsPage.About else SettingsPage.DefaultBrowser
         Appearance -> SettingsPage.Appearance
         Downloads -> SettingsPage.Downloads
-        Browsing, Permissions, Tor -> SettingsPage.Privacy
+        Browsing, Permissions, Passkeys, Tor -> SettingsPage.Privacy
         Adblock -> SettingsPage.Adblock
         Wallet, Chains -> SettingsPage.Wallet
         Ens, Rpc -> SettingsPage.Names

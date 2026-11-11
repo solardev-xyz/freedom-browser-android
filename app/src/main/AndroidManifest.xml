@@ -15,6 +15,12 @@
       permission, no prompt.
     -->
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+    <!--
+      Passkeys (#524): as a browser, Freedom's WebView hands Credential
+      Manager the page's own origin rather than Freedom's app origin
+      (Android 14+). Normal permission, no prompt.
+    -->
+    <uses-permission android:name="android.permission.CREDENTIAL_MANAGER_SET_ORIGIN" />
 
     <!--
       Site permissions (#81). Requested at runtime only after the user

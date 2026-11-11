@@ -320,6 +320,7 @@ internal fun SettingsScreen(
     val appLanguage = rememberAppLanguage()
     val defaultBrowser = rememberDefaultBrowserState()
     val isDefaultBrowser = defaultBrowser.isDefault
+    val passkeys = remember(context) { Passkeys.availability(context) }
 
     // Each card's rows, as the page shows them right now (see [SettingsRow]).
     val sectionRows: Map<SettingsSection, List<SettingsRow>> = mapOf(
@@ -329,6 +330,7 @@ internal fun SettingsScreen(
         SettingsSection.Downloads to downloadSettingsRows(askWhereToSave),
         SettingsSection.Browsing to browsingDataRows(),
         SettingsSection.Permissions to sitePermissionRows(permissionEntries, dappGrants, walletAccounts, chains),
+        SettingsSection.Passkeys to passkeyRows(passkeys),
         SettingsSection.Tor to torRows(torEnabled, torStartOnLaunch, torExternalProxy),
         SettingsSection.Adblock to
             adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
@@ -524,6 +526,11 @@ internal fun SettingsScreen(
             radicle = radicle,
             onOpenRadicle = onOpenRadicle,
             onOpenNodes = onOpenNodes,
+        )
+        SettingsSection.Passkeys -> PasskeysSection(
+            visible = visible,
+            availability = passkeys,
+            onOpen = { openPasskeyManagerSettings(context) },
         )
         SettingsSection.Tor -> TorSettingsSection(
             visible = visible,
@@ -803,6 +810,7 @@ private fun sectionTitle(section: SettingsSection): String = when (section) {
     SettingsSection.Downloads -> SECTION_DOWNLOADS
     SettingsSection.Browsing -> SECTION_BROWSING
     SettingsSection.Permissions -> SECTION_PERMISSIONS
+    SettingsSection.Passkeys -> SECTION_PASSKEYS
     SettingsSection.Tor -> SECTION_TOR
     SettingsSection.Adblock -> SECTION_ADBLOCK
     SettingsSection.Wallet -> SECTION_WALLET
