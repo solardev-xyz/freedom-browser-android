@@ -472,7 +472,7 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
-    fun `in a subframe it only removes the channel object`() = page {
+    fun `in a subframe it removes the channel object and only says it started`() = page {
         eval("top = {}")
         documentStart()
         assertTrue(eval("!('$channel' in window)") as Boolean)
@@ -660,7 +660,7 @@ class BottomUiDetectorScriptTest {
     }
 
     @Test
-    fun `a verdict is reported in a subframe too, and nothing else`() = page {
+    fun `a verdict is reported in a subframe too, and nothing else but its start`() = page {
         eval("top = {}")
         documentStart()
         eval("pressAndHold({ isTrusted: true, defaultPrevented: false }, false)")

@@ -1289,13 +1289,14 @@ fun BrowserWebViewHost(
     // on screen. Page script keeps running with the app away, and
     // Credential Manager starts its sheet even from the background: a
     // page's timer must not raise it over another app. Lowered on the
-    // stop itself, before any recomposition. Started, not resumed: the
-    // passkey sheet itself only pauses the app ([PasskeyGate]).
+    // pause itself, before any recomposition, except the pause the
+    // passkey sheet causes ([PasskeyGate.appPaused]); and on the stop.
     DisposableEffect(lifecycleOwner) {
-        PasskeyGate.appVisible(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        PasskeyGate.appVisible(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> PasskeyGate.appVisible(true)
+                Lifecycle.Event.ON_RESUME -> PasskeyGate.appVisible(true)
+                Lifecycle.Event.ON_PAUSE -> PasskeyGate.appPaused()
                 Lifecycle.Event.ON_STOP -> PasskeyGate.appVisible(false)
                 else -> Unit
             }

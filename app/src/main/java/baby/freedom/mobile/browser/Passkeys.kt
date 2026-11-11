@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebSettings
 import androidx.webkit.WebSettingsCompat
@@ -163,7 +164,7 @@ internal object Passkeys {
     fun ownsOrigin(url: String?): Boolean =
         url != null && (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true))
 
-    /** Sets [settings] to [mode], as [apply] does. */
+    /** Sets [settings] to [mode], as [PasskeyGate] does. */
     fun set(settings: WebSettings, mode: Int) {
         runCatching { WebSettingsCompat.setWebAuthenticationSupport(settings, mode) }
             .onFailure { Log.w(TAG, "WebAuthn mode not set", it) }
@@ -177,30 +178,36 @@ internal object Passkeys {
  * **Documents on this device** (R1-F1). Lowered before such a document
  * is answered, by whichever signal sees it first: a navigation, main
  * frame or iframe, to a host of this device ([Passkeys.onDevice]) at
- * `shouldOverrideUrlLoading` (every frame, redirect hops of a main frame
- * included); the interceptor's document request (the tab's own, and a
+ * `shouldOverrideUrlLoading` (where WebView calls it); the interceptor's document request (the tab's own, and a
  * service worker's, which holds every tab); a frame's detector speaking
  * at document start, by its browser-given origin (the one signal that
  * sees an iframe reached through a redirect hop); a pop-up opened by a
- * held page; and commit. Raised only at the commit of an `http(s)`
+ * held page; and commit. A top-level redirect to the device lands in the
+ * commit at the latest. Raised only at the commit of an `http(s)`
  * main-frame document off the device that had no such frame asked for
  * since its request. A `blob:` or `about:blank` document, which can
  * carry its creator's origin, keeps the tab held. The detector's word
- * travels on a pipe of its own: an iframe reached only through a
- * redirect hop that calls WebAuthn in its very first task may land
- * before it, a window of milliseconds left open.
+ * travels on a pipe of its own, apart from WebAuthn's: an iframe
+ * reached only through a redirect hop that calls WebAuthn in its very
+ * first script may get its request in before the word lands. That race
+ * is unmeasured (#524 R1).
  *
- * **The app away** (R1-F2). Lowered on the Activity's stop and raised on
- * its start ([appVisible]): page script keeps running in the background,
- * and Credential Manager would raise its sheet over whatever app is in
- * front. The stop, not the pause: the passkey sheet is an activity over
- * Freedom and pauses it. A request already in flight keeps the mode it
- * started with (Chromium reads it once per request), but a document that
- * makes its first WebAuthn call while lowered is turned down for good
- * (the frame's authenticator is bound to nothing; NotSupportedError, or
- * a request that never settles), until it is reloaded. That is why tabs
- * not on screen aren't lowered while the app is: every tab opened in the
- * background whose page checks for passkeys as it loads would lose them.
+ * **The app away** (R1-F2). Lowered on the Activity's pause and raised on
+ * its resume ([appVisible]): page script keeps running in the background,
+ * and Credential Manager starts its sheet even then, over whatever app
+ * is in front. Not on the pause the passkey sheet itself causes: it is
+ * an activity over Freedom, started through Freedom's own
+ * `startIntentSender` ([ownWindowStarting], [appPaused]), and a page's
+ * request right after it settles must still go through. The stop lowers
+ * the mode in any case. A request already in flight keeps the mode it
+ * started with (Chromium reads it once per request, CredManHelper at
+ * 155.0.8059.84). But a document that calls WebAuthn while lowered gets
+ * nothing from it until it is reloaded: seen on WebView 133, a request
+ * that never settles (and "A request is already pending" for every one
+ * after it), or NotSupportedError for a page that first asked while
+ * lowered. That is why tabs not on screen aren't lowered while the app
+ * is: a page opened in the background that checks for passkeys as it
+ * loads (webauthn.io does) would lose them.
  *
  * Everything runs on the main thread, the setter included: WebView
  * applies a settings change on its UI thread, blocking a caller from
@@ -271,7 +278,32 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
             gates.remove(gate)
         }
 
-        /** The app came on screen or left it (the Activity's start and stop). Main thread. */
+        /** When Freedom last started a window of another app's over itself ([ownWindowStarting]). */
+        private var ownWindowAt = Long.MIN_VALUE / 2
+
+        /** How long after [ownWindowStarting] a pause is taken to be that window's. */
+        private const val OWN_WINDOW_MS = 3_000L
+
+        /**
+         * Freedom is starting another app's window over itself: Credential
+         * Manager's passkey sheet ([android.app.Activity.startIntentSender]).
+         * Main thread.
+         */
+        fun ownWindowStarting() {
+            ownWindowAt = SystemClock.uptimeMillis()
+        }
+
+        /**
+         * The Activity paused: Freedom leaving the screen (Home, Recents,
+         * another app), unless it is the sheet Freedom itself just
+         * started ([ownWindowStarting]), which must keep the mode it
+         * asked with. The stop lowers it either way. Main thread.
+         */
+        fun appPaused() {
+            if (SystemClock.uptimeMillis() - ownWindowAt > OWN_WINDOW_MS) appVisible(false)
+        }
+
+        /** The app came on screen or left it (the Activity's resume, and pause or stop). Main thread. */
         fun appVisible(shown: Boolean) {
             if (visible == shown) return
             visible = shown
