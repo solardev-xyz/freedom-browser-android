@@ -1457,14 +1457,15 @@ char *ant_publisher_capacity(const char *config_json,
  *     paths, and a v1 update (bee-js upload shape: payload
  *     timestamp_be8 || reference of the playlist's manifest). A viewer
  *     plays /bzz/<channel reference>/stream.m3u8, which re-resolves the
- *     feed; the web player and the Android Watch tab read this.
+ *     feed. No viewer in this repository reads it any more (#217).
  *   "solar-punk": POST /bytes for segments and the playlist, segments
  *     and EXT-X-MAP listed by bare 64-hex reference (a viewer fetches
  *     each from <its gateway>/bytes/<ref>), and a v2 update (bee-js
  *     uploadPayload shape: the SOC wraps the playlist's own root chunk).
  *     GET /soc/{owner}/{id} and GET /feeds/{owner}/{topic} then both
  *     return the playlist text, on any bee gateway and on ant; this is
- *     what Solar Punk's viewers read. The channel reference does not
+ *     what Solar Punk's viewers, the web player and both AntStream apps
+ *     read, and what the apps publish (#217). The channel reference does not
  *     resolve to the playlist through /bzz.
  *
  * A feed manifest is created once at start with POST /feeds; its
@@ -1489,10 +1490,13 @@ char *ant_publisher_capacity(const char *config_json,
  *     "notes":           "iPhone 15 Pro / LTE",
  *     "reap_ms":         60000,                      // end by itself after 60 s with no media; 0 = never (default)
  *     "ladder":          true,                       // master playlist + ladder time markers; false (default)
- *     "width":           640,                        // the master's RESOLUTION, left out unless both set
+ *     "width":           640,                        // the starting size (catalog rung, master RESOLUTION); ant_publisher_set_rendition changes it
  *     "height":          360,
  *     "recovery_path":   "<app support>/antstream/broadcast-recovery.json", // crash recovery; "" = none (default)
- *     "resume":          false                       // continue the broadcast saved there; see below
+ *     "resume":          false,                      // continue the broadcast saved there; see below
+ *     "info":            {"title": "Morning walk",   // stream info: the account's catalog entry; see below
+ *                         "description": "...", "thumbnail": "<64 hex>",
+ *                         "scheduled_start_ms": 1792224000000}
  *   }
  *
  * "topic_text" is the topic as a Solar Punk catalog entry names it: the
@@ -1568,7 +1572,14 @@ char *ant_publisher_capacity(const char *config_json,
  * sequence, the dating clock, "recording" (every entry listed so
  * far; gap entries have "gap": true) and "shape" ("live", or "closing" /
  * "recording" once a stop began closing the broadcast). It is removed once the recording
- * is the feed's head, and kept when the recording or its update fails.
+ * is the feed's head and, with "info", the closing "vod" catalog entry
+ * has landed; it is kept when the recording, its update or that catalog
+ * entry fails. Kept for the catalog entry alone (the recording is the
+ * head; marked as soon as the recording lands, before that entry is
+ * written), it is marked "recorded": true: its viewers already have the
+ * recording, a new broadcast need not wait for it, and ending it only
+ * writes that catalog entry, or none when the catalog's head is newer
+ * than the broadcast (an announcement made since, a later broadcast).
  * A fresh broadcast with the same path replaces it at its first feed
  * update. The whole list is rewritten each time, about 250 bytes an
  * entry (some 450 KB after an hour at 2 s segments). A failure to write
@@ -1596,8 +1607,38 @@ char *ant_publisher_capacity(const char *config_json,
  * "live" (a stop had begun closing it, so a live viewer may already have
  * stopped) is only finalized: the run starts stopped, refuses segments,
  * and writes the closing window and the recording, or, if the recording
- * is already the head, only removes the entry. "resume" with
+ * is already the head, writes only the closing "vod" catalog entry (with
+ * "info", when a stop before did not land it and the catalog's head is
+ * not that entry already) and removes the entry. "resume" with
  * "start_index" is an error.
+ *
+ * "info" is the broadcaster's stream info (issue #220), every field
+ * optional: "title" (empty is the channel's name), "description",
+ * "thumbnail" (a reference from ant_stream_thumbnail_upload) and
+ * "scheduled_start_ms" (Unix ms). With it, the broadcast keeps the
+ * account's catalog feed (topic text "antstream-catalog", owner the
+ * account) holding one Solar Punk catalog entry for the channel, a v2
+ * update whose payload is the JSON array [entry]: owner (40 hex, no
+ * 0x), topic (the topic text), title, description, state ("live", then
+ * "vod" at stop), mediatype "video", timestamp (Unix ms), index (the
+ * feed index of the newest playlist, at stop the recording's), duration
+ * (seconds of media), thumbnail, scheduledStartTime (ISO 8601) and
+ * renditions (one rung: "<n>p", width, height, topic, bandwidth and
+ * avgBandwidth measured from the segments; at stop also index and
+ * duration), the shape Solar Punk's player lists a channel from when its
+ * catalog is { owner, topic: "antstream-catalog" }. The live entry goes
+ * up once the first feed update landed, again at once when
+ * ant_publisher_set_info changes the info, and again when something else
+ * in it changed, at most once a minute, never while paused; the "vod"
+ * entry after the recording at stop. Each write reads the catalog
+ * feed's head once (?exact=true) and writes after it. "solar-punk" with
+ * a text topic without a "/" only (the entry names the channel by its
+ * topic text); otherwise nothing is written and "catalog_error" says
+ * why. Catalog writes run in their own task, never in front of a
+ * playlist or feed update, and their failures stay out of "errors".
+ * A "resume" run started without "info" takes the info the recovery
+ * entry saved (and its "width"/"height" when those are left out), so
+ * ending a killed broadcast also replaces its "live" entry with "vod".
  *
  * An interruption pauses a broadcast, it never ends it (issue #172):
  * see ant_publisher_pause / ant_publisher_resume. It ends on
@@ -1619,7 +1660,8 @@ char *ant_publisher_capacity(const char *config_json,
  * collapse (26/316). See crates/ant-ffi/ANTSTREAM_BENCH.md.
  *
  * Returns immediately; the loop drives itself on the node's runtime.
- * Only one broadcast at a time per handle. Returns true on success,
+ * Only one broadcast at a time per handle, and none while
+ * ant_stream_catalog_publish is writing. Returns true on success,
  * false with an allocated message in *out_err (free with
  * ant_free_string).
  */
@@ -1718,7 +1760,23 @@ int ant_publisher_resume(const AntHandle *handle, char **out_err);
  *    "paused":false,"segments_withheld":0,"reaped":false,
  *    "ladder_group":"","master_reference":"","markers_written":0,
  *    "ladder_failures":0,"ladder_error":"","recovery_error":"",
- *    "batch_full_refusals":0,"batch_unusable_refusals":0,"batch_error":""}
+ *    "batch_full_refusals":0,"batch_unusable_refusals":0,"batch_error":"",
+ *    "catalog_writes":3,"catalog_failures":0,"catalog_error":"",
+ *    "catalog_state":"live","catalog_index":12,
+ *    "timings":{"segment":{"count":21,"p50_ms":900,"p95_ms":2100,
+ *               "max_ms":2400},"head_of_line":{...},"playlist":{...},
+ *               "recovery":{...},"feed":{...},"update":{...},
+ *               "marker":{...}}}
+ *
+ * "timings" says where the broadcast's time goes (issue #212), each
+ * stage as a run count and its p50/p95/max in ms: "segment" one
+ * segment's upload (the newest 2048), "head_of_line" a landed media
+ * segment waiting to be folded into a playlist (the segments before it
+ * still uploading, or the previous update still going out), "playlist"
+ * the playlist's upload, "recovery" writing the "recovery_path" entry,
+ * "feed" the feed update's POST /soc, "update" all three of those
+ * together (the committer's critical path), and "marker" one ladder
+ * marker write (off that path). A stage that never ran is all zeros.
  *
  * "paused" is ant_publisher_pause in force; "segments_withheld" counts
  * the media segments outages withheld (never uploaded, never listed);
@@ -1744,6 +1802,13 @@ int ant_publisher_resume(const AntHandle *handle, char **out_err);
  * Neither is a network failure and no retry fixes them, so a host names
  * them as the storage plan's problem. Each is also in "errors" and
  * "error_count", and a refused media segment in "segments_failed".
+ * "catalog_writes" counts the catalog entries that landed ("info" at
+ * start, ant_publisher_set_info), "catalog_state" and "catalog_index"
+ * the newest one's state and catalog feed index ("" and null before
+ * one landed); a catalog write that failed or was skipped counts in
+ * "catalog_failures" and shows as "catalog_error" (also why a run with
+ * info writes no catalog at all), never in "errors": the channel plays
+ * without its entry.
  *
  * "lag_ms" is the live-edge lag the on-screen indicator shows: how far
  * behind live a viewer is right now, i.e. the age of the newest segment
@@ -1756,6 +1821,85 @@ int ant_publisher_resume(const AntHandle *handle, char **out_err);
  * second. Returns NULL + an error when this node is not broadcasting.
  */
 char *ant_publisher_progress(const AntHandle *handle, char **out_err);
+
+/*
+ * Replace the running broadcast's stream info (issue #220): info_json is
+ * the "info" object of ant_publisher_start's config ({"title",
+ * "description", "thumbnail", "scheduled_start_ms"}, every field
+ * optional). The catalog entry is rewritten with it at once while live
+ * (before the first feed update landed, it waits for that), and the
+ * closing "vod" entry at stop carries it. Non-blocking: the write runs in
+ * the broadcast's background; progress "catalog_*" reports it. On a run
+ * that writes no catalog (a "bzz" channel, a raw topic) nothing is
+ * written and "catalog_error" says why. Returns 0, or -1 with an
+ * allocated message in *out_err (no broadcast, invalid JSON, a thumbnail
+ * that is not a 64-hex reference).
+ */
+int ant_publisher_set_info(const AntHandle *handle,
+                           const char *info_json,
+                           char **out_err);
+
+/*
+ * The running broadcast's frame changed size (issue #228): the phone was
+ * turned while live and the capture restarted its writer at width x
+ * height (a portrait 360x640 turned into a landscape 640x360, say).
+ * Everything written from now on names the new size: the catalog
+ * entry's rung (rewritten at once), the ladder master playlist's
+ * RESOLUTION (rewritten at the next commit) and the recovery entry, so a
+ * resume continues in it. Call it before pushing the new writer's
+ * initialization segment; the segments need nothing from it (that init
+ * segment is its own EXT-X-MAP behind an EXT-X-DISCONTINUITY, in push
+ * order). The starting size is "width"/"height" in the start config.
+ * Only the iOS app calls it today. Non-blocking. Returns 0, or -1 with
+ * an allocated message in *out_err (no broadcast, either side 0).
+ */
+int ant_publisher_set_rendition(const AntHandle *handle,
+                                uint32_t width,
+                                uint32_t height,
+                                char **out_err);
+
+/*
+ * Announce an upcoming broadcast (issue #220): write the channel's
+ * "scheduled" catalog entry (title, description, thumbnail,
+ * scheduledStartTime; the fields as at "info" above) as the next update
+ * of the account's catalog feed. config_json:
+ *
+ *   {"gateway": "http://127.0.0.1:1633", "batch_id": "0x<64 hex>",
+ *    "channel": "Kitchen", "topic_text": "antstream",
+ *    "info": {"title": "...", "description": "...", "thumbnail": "<64 hex>",
+ *             "scheduled_start_ms": 1792224000000},   // required here
+ *    "width": 480, "height": 640, "bitrate_kbps": 900} // optional: the rung
+ *
+ * The next broadcast replaces the entry with its "live" one. Refused
+ * while a broadcast runs on this handle (it owns the catalog then: use
+ * ant_publisher_set_info) or another announcement is out; while it is
+ * out, ant_publisher_start is refused, so the two never write the same
+ * catalog index. BLOCKING: a catalog head read, an upload and a
+ * feed update, each bounded by the 60 s publish deadline; call it off the
+ * main thread. Returns an allocated JSON string {"index": n, "entry":
+ * {...}} (free with ant_free_string), or NULL with an allocated message
+ * in *out_err.
+ */
+char *ant_stream_catalog_publish(const AntHandle *handle,
+                                 const char *config_json,
+                                 char **out_err);
+
+/*
+ * Upload a stream thumbnail (issue #220): a JPEG (or PNG) image, best
+ * downscaled to about 640 px on its long side, a few tens of KB. It goes
+ * up the way Solar Punk's admin uploads one (POST /bzz of the one file
+ * "thumbnail.jpg"), so their player's /bzz/<ref>/ and the AntStream
+ * player both show it. gateway and batch_id as in the publisher config.
+ * BLOCKING (one upload, 60 s deadline). Returns the reference, 64 hex, as
+ * an allocated string for "info"."thumbnail" (free with ant_free_string),
+ * or NULL with an allocated message in *out_err.
+ */
+char *ant_stream_thumbnail_upload(const AntHandle *handle,
+                                  const char *gateway,
+                                  const char *batch_id,
+                                  const uint8_t *data,
+                                  size_t len,
+                                  char **out_err);
 
 /*
  * End the broadcast and return its final report as an allocated JSON
@@ -1798,14 +1942,18 @@ char *ant_publisher_progress(const AntHandle *handle, char **out_err);
  * ant_publisher_start; a stop gives up on it after that one, a
  * finalizing resumed run a minute after the stop), then the
  * closing window and the recording (an upload and a feed update each,
- * four more rounds) can still be finishing in the background past that,
+ * four more rounds), then the closing catalog entry ("info"; one more
+ * upload and feed update, plus a catalog head read if none was read yet)
+ * can still be finishing in the background past that,
  * with the report returned honestly either way. Call it off the main
  * thread. "feed_index" is final either way: a broadcast still going
  * when the call returns writes no further feed update, so a closing
  * window or recording landing late never takes the index handed out
  * as the next "start_index" (it then stays off the feed; a late
  * recording still plays by its own reference, which this report does
- * not carry).
+ * not carry). The same holds for the catalog feed: a closing entry not
+ * yet written then is skipped (in "catalog_error"), so the next
+ * broadcast's entry never collides with it.
  *
  * Calling it on a broadcast that already finished on its own (reaped)
  * returns that broadcast's report. Once a stop call has returned and released
