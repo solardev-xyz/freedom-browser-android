@@ -214,7 +214,12 @@ internal object Passkeys {
  * after it), or NotSupportedError for a page that first asked while
  * lowered. That is why tabs not on screen aren't lowered while the app
  * is: a page opened in the background that checks for passkeys as it
- * loads (webauthn.io does) would lose them.
+ * loads (webauthn.io does) would lose them. And a document that
+ * commits while the app is away (a page still loading as the user
+ * leaves, or one landing while the Activity is made again after a
+ * rotation) is made without WebAuthn: it is reloaded once as the app
+ * comes back and raises the mode, as for a commit that raises it
+ * ([RaisedDocumentReload], R3-F1, R3-M2).
  *
  * Everything runs on the main thread, the setter included: WebView
  * applies a settings change on its UI thread, blocking a caller from
@@ -230,12 +235,12 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
 
     private var applied: Int? = null
 
+    /** The reload owed to a document made while the mode was down; before [update] first runs. */
+    private val reload = RaisedDocumentReload()
+
     init {
         update()
     }
-
-    /** The reload owed to a document the commit raised the mode for. */
-    private val reload = RaisedDocumentReload()
 
     private val raised: Boolean
         get() = applied == WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER
@@ -268,17 +273,35 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
     fun committed(url: String?): Int? {
         hold.committed(url)
         val before = raised
-        update()
-        return reload.committed(raisedNow = !before && raised)
+        committing = true
+        try {
+            update()
+        } finally {
+            committing = false
+        }
+        return reload.committed(madeLowered = !before, raisedNow = raised)
     }
 
     /**
      * [committed] for a main-frame document of [view]'s, reloading it
      * once, after this commit's callbacks, when the commit raised the
-     * mode: still that document then, and the mode still up. Main thread.
+     * mode: still that document then, and the mode still up. A document
+     * that commits while the mode stays down (the app away, R3-F1) is
+     * reloaded the same way once the mode comes up ([update]). Main thread.
      */
     fun committed(url: String?, view: WebView) {
-        val ticket = committed(url) ?: return
+        page = view
+        reloadFor(committed(url) ?: return)
+    }
+
+    /** The tab's WebView, from its first main-frame commit: the one [reloadFor] reloads. */
+    private var page: WebView? = null
+
+    /** Inside [committed]'s own [update], which hands out its ticket itself. */
+    private var committing = false
+
+    private fun reloadFor(ticket: Int) {
+        val view = page ?: return
         // Not `view.post`, which waits for a tab in the background to be
         // attached to the window.
         main.post {
@@ -289,8 +312,14 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
     private fun update() {
         val mode = Passkeys.live(capable, visible, hold.held) ?: return
         if (mode == applied) return
+        val before = raised
         applied = mode
         Passkeys.set(settings, mode)
+        // Raised outside a commit: the app back on screen (its resume, or
+        // the Activity made again after a rotation, R3-M2). A document
+        // that committed while it was away was made without WebAuthn and
+        // is reloaded once for it (R3-F1).
+        if (!committing && !before && raised) reload.raised()?.let(::reloadFor)
     }
 
     companion object {
@@ -450,6 +479,12 @@ internal class DeviceDocumentHold {
  * Never for the commit of that reload itself: a page that frames
  * something on the device lowers the mode again after its commit,
  * and its reload's commit raises it again, which would reload forever.
+ *
+ * The same for a document that committed while the mode stayed down
+ * for the app being away, once the app comes back ([raised], R3-F1).
+ * Not for one made down whose commit happens only after the mode came
+ * back up (the app returning in the instant between the two): the
+ * commit is the earliest the tab hears of the document.
  */
 internal class RaisedDocumentReload {
     private var tickets = 0
@@ -460,14 +495,42 @@ internal class RaisedDocumentReload {
     /** A reload was made, and its commit hasn't come. */
     private var reloading = false
 
-    /** A main-frame document committed; [raisedNow] if its commit raised the mode. A ticket when it is owed a reload. */
-    fun committed(raisedNow: Boolean): Int? {
+    /**
+     * The document on screen was made while the mode was down and hasn't
+     * been reloaded for it since: a raise that isn't a commit's (the app
+     * back on screen, R3-F1) owes it a reload.
+     */
+    private var lowered = false
+
+    /**
+     * A main-frame document committed: [madeLowered] if the mode was down
+     * as it was made (before this commit's own update), [raisedNow] if
+     * the mode is up after it. A ticket when it is owed a reload now.
+     */
+    fun committed(madeLowered: Boolean, raisedNow: Boolean): Int? {
         due = 0
-        if (reloading) {
-            reloading = false
+        val ofReload = reloading
+        reloading = false
+        lowered = madeLowered
+        if (!lowered || !raisedNow) return null
+        // The commit of the reload itself raised the mode again (a page
+        // that frames something on the device): no reload of its own.
+        if (ofReload) {
+            lowered = false
             return null
         }
-        if (!raisedNow) return null
+        due = ++tickets
+        return due
+    }
+
+    /**
+     * The mode came up outside a commit. Only the app coming back on
+     * screen does that, never the page itself, so the reload's own commit
+     * may earn one here too: it can't loop. A ticket when the document on
+     * screen is owed a reload.
+     */
+    fun raised(): Int? {
+        if (!lowered) return null
         due = ++tickets
         return due
     }
@@ -478,17 +541,22 @@ internal class RaisedDocumentReload {
     }
 
     /**
-     * Whether to reload the document at [url] now for [ticket], with the
-     * mode [raised] still. The next commit is then taken for that
-     * reload's, whatever its address (a reload that redirects, to a new
-     * address each time, mustn't earn a reload of its own): at worst, one
-     * the reload never reaches (a POST result's, not resent) costs the
-     * next raising commit its reload.
+     * Whether to reload the view's document now for [ticket], with the
+     * mode [raised] still. [url] is the view's address, `null` when it
+     * has no document to reload. That it is still the document the
+     * ticket was given for isn't read from [url] (a page's own
+     * `pushState` moves it): every main-frame request and commit since
+     * drops the ticket ([mainFrameRequested], [committed]). The next
+     * commit is then taken for that reload's, whatever its address (a
+     * reload that redirects, to a new address each time, mustn't earn a
+     * reload of its own): at worst, one the reload never reaches (a POST
+     * result's, not resent) costs the next raising commit its reload.
      */
     fun take(ticket: Int, url: String?, raised: Boolean): Boolean {
         if (ticket == 0 || ticket != due) return false
         due = 0
         if (!raised || url == null) return false
+        lowered = false
         reloading = true
         return true
     }

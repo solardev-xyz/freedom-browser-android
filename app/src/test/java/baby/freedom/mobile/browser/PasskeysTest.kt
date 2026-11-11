@@ -158,20 +158,20 @@ class PasskeysTest {
     fun `a document the commit raised the mode for is reloaded once, never for its own reload`() {
         val reload = RaisedDocumentReload()
         // A commit that didn't raise the mode owes nothing.
-        assertEquals(null, reload.committed(raisedNow = false))
+        assertEquals(null, reload.committed(madeLowered = false, raisedNow = true))
         // The first clean page after a held one: one reload.
         reload.mainFrameRequested()
-        val ticket = reload.committed(raisedNow = true)!!
+        val ticket = reload.committed(madeLowered = true, raisedNow = true)!!
         assertEquals(true, reload.take(ticket, "https://webauthn.io/", raised = true))
         assertEquals(false, reload.take(ticket, "https://webauthn.io/", raised = true))
         // Its request and commit; the page frames the gateway, which lowers
         // the mode, and the reload's commit raises it again: no second
         // reload, or such a page would reload forever.
         reload.mainFrameRequested()
-        assertEquals(null, reload.committed(raisedNow = true))
+        assertEquals(null, reload.committed(madeLowered = true, raisedNow = true))
         // The next raise after that is owed one again.
         reload.mainFrameRequested()
-        assertNotNull(reload.committed(raisedNow = true))
+        assertNotNull(reload.committed(madeLowered = true, raisedNow = true))
     }
 
     @Test
@@ -179,24 +179,52 @@ class PasskeysTest {
         val reload = RaisedDocumentReload()
         // A device frame lowered the mode before the reload ran: reloading
         // would make the page again without WebAuthn.
-        val lowered = reload.committed(raisedNow = true)!!
+        val lowered = reload.committed(madeLowered = true, raisedNow = true)!!
         assertEquals(false, reload.take(lowered, "https://webauthn.io/", raised = false))
         // The user went on before it ran.
-        val superseded = reload.committed(raisedNow = true)!!
+        val superseded = reload.committed(madeLowered = true, raisedNow = true)!!
         reload.mainFrameRequested()
         assertEquals(false, reload.take(superseded, "https://webauthn.io/", raised = true))
         // A later commit's ticket replaces an earlier one.
-        val first = reload.committed(raisedNow = true)!!
-        reload.committed(raisedNow = false)
+        val first = reload.committed(madeLowered = true, raisedNow = true)!!
+        reload.committed(madeLowered = false, raisedNow = true)
         assertEquals(false, reload.take(first, "https://webauthn.io/", raised = true))
         // A reload that redirects (to a new address each time, say) is
         // still the reload: its commit earns no reload of its own.
-        val redirected = reload.committed(raisedNow = true)!!
+        val redirected = reload.committed(madeLowered = true, raisedNow = true)!!
         assertEquals(true, reload.take(redirected, "https://a.example/#top", raised = true))
         reload.mainFrameRequested()
         reload.mainFrameRequested()
-        assertEquals(null, reload.committed(raisedNow = true))
-        assertNotNull(reload.committed(raisedNow = true))
+        assertEquals(null, reload.committed(madeLowered = true, raisedNow = true))
+        assertNotNull(reload.committed(madeLowered = true, raisedNow = true))
+    }
+
+    @Test
+    fun `a document made while the app was away is reloaded once when it comes back`() {
+        val reload = RaisedDocumentReload()
+        // Committed while the app is away: the mode stays down, nothing yet.
+        reload.mainFrameRequested()
+        assertEquals(null, reload.committed(madeLowered = true, raisedNow = false))
+        // The app back on screen raises it: that document is owed its reload, once.
+        val ticket = reload.raised()!!
+        assertEquals(true, reload.take(ticket, "https://webauthn.io/", raised = true))
+        assertEquals(null, reload.raised())
+        // A document made with the mode up owes nothing when it comes back.
+        reload.mainFrameRequested()
+        assertEquals(null, reload.committed(madeLowered = false, raisedNow = false))
+        assertEquals(null, reload.raised())
+        // The app left during that reload, and it committed while away: owed
+        // again on the next return (only the user brings the app back, so
+        // this can't loop).
+        reload.mainFrameRequested()
+        reload.committed(madeLowered = true, raisedNow = true)!!.let { assertEquals(true, reload.take(it, "https://a.example/", raised = true)) }
+        assertEquals(null, reload.committed(madeLowered = true, raisedNow = false))
+        assertNotNull(reload.raised())
+        // A navigation before the reload runs drops it.
+        val superseded = reload.raised()!!
+        reload.mainFrameRequested()
+        assertEquals(false, reload.take(superseded, "https://a.example/", raised = true))
+        // And a view with no document has nothing to reload.
+        assertEquals(false, reload.take(reload.raised()!!, null, raised = true))
     }
 }
-

@@ -115,7 +115,8 @@ class PasskeysDeviceTest {
     /**
      * R2-F1: the page that the commit raises the mode for was made while
      * it was down, and has no WebAuthn — read in the page itself, not
-     * off the setting — until the gate's one reload.
+     * off the setting — until the gate's one reload. So has one that
+     * commits while the app is away, until its return (R3-F1).
      */
     @Test
     fun the_first_page_after_a_held_one_gets_webauthn_through_one_reload() {
@@ -186,6 +187,22 @@ class PasskeysDeviceTest {
             load("https://passkeys.test/c", starts = 2)
             assertEquals(events.toString(), "\"function true\"", api())
             assertEquals(2, events.count { it == "start https://passkeys.test/c" })
+            // R3-F1: a page committing while the app is away is made
+            // without WebAuthn; the app's return raises the mode and
+            // reloads it once.
+            instrumentation.runOnMainSync { PasskeyGate.appVisible(false) }
+            load("https://passkeys.test/d", starts = 1)
+            assertEquals("\"undefined true\"", api())
+            instrumentation.runOnMainSync { PasskeyGate.appVisible(true) }
+            val deadline = SystemClock.uptimeMillis() + 10_000
+            while (SystemClock.uptimeMillis() < deadline) {
+                val seen = synchronized(events) { events.toList() }
+                if (seen.count { it == "start https://passkeys.test/d" } >= 2 && seen.last() == "finish https://passkeys.test/d") break
+                SystemClock.sleep(50)
+            }
+            SystemClock.sleep(1_000)
+            assertEquals(events.toString(), "\"function true\"", api())
+            assertEquals(2, events.count { it == "start https://passkeys.test/d" })
         } finally {
             instrumentation.runOnMainSync {
                 PasskeyGate.unregister(gate)
