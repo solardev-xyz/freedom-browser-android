@@ -43,9 +43,19 @@ import androidx.webkit.WebViewFeature
  * Older ones don't: on WebView 133 a dweb page's request, `rp.id`
  * `freedom.baby` included, reaches Credential Manager. So browser mode
  * waits for a WebView with that refusal: absent from Chromium 145, and
- * seen refusing dweb pages on Vanadium 155 (#524), the floor until a
- * closer version is confirmed. Below it, or when the version can't be
- * read, WebAuthn stays off.
+ * present and enabled by default at tag 155.0.8059.84, and seen
+ * refusing dweb pages on Vanadium 155 (#524): the floor until a closer
+ * version is confirmed. Below it, or when the version can't be read,
+ * WebAuthn stays off.
+ *
+ * Not covered: that refusal judges the tab's *top-level* page. An https
+ * page can embed a dweb page in an iframe and delegate it
+ * `publickey-credentials-get`/`-create` with `allow=`. Whether the
+ * WebView then still sees the top page as SECURE, and lets the dweb
+ * frame's request through, is untested (#524). A dweb site's own
+ * service worker can serve its documents with any headers, so a
+ * `Permissions-Policy` on the documents Freedom serves wouldn't close
+ * it either.
  */
 internal object Passkeys {
     private const val TAG = "Passkeys"
@@ -77,10 +87,14 @@ internal object Passkeys {
         else -> WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER
     }
 
+    /**
+     * Android's version first: below 14 no WebView update helps, so
+     * Settings mustn't suggest one.
+     */
     fun availability(featureSupported: Boolean, webViewMajor: Int?, sdkInt: Int): Availability = when {
+        sdkInt < Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> Availability.NeedsAndroid14
         !featureSupported || webViewMajor == null || webViewMajor < MIN_WEBVIEW_MAJOR ->
             Availability.WebViewUnsupported
-        sdkInt < Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> Availability.NeedsAndroid14
         else -> Availability.On
     }
 

@@ -58,6 +58,9 @@ class PasskeysTest {
         assertEquals(Passkeys.Availability.WebViewUnsupported, Passkeys.availability(true, floor - 1, 36))
         assertEquals(Passkeys.Availability.WebViewUnsupported, Passkeys.availability(true, null, 36))
         assertEquals(Passkeys.Availability.NeedsAndroid14, Passkeys.availability(true, floor, 33))
+        // Below Android 14 no WebView update helps: Settings says Android, not WebView.
+        assertEquals(Passkeys.Availability.NeedsAndroid14, Passkeys.availability(true, 133, 33))
+        assertEquals(Passkeys.Availability.NeedsAndroid14, Passkeys.availability(false, null, 30))
         assertEquals(Passkeys.Availability.On, Passkeys.availability(true, floor, 34))
     }
 
