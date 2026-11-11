@@ -1,7 +1,12 @@
 package baby.freedom.mobile.browser
 
+import android.graphics.Bitmap
 import android.os.Build
+import android.os.SystemClock
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.webkit.WebSettingsCompat
@@ -11,6 +16,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 /**
  * [Passkeys] on a real WebView (#524), as the WebView itself reports the
@@ -102,4 +109,88 @@ class PasskeysDeviceTest {
         assertEquals(WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER, readBack { Passkeys.set(it.settings, on) })
         assertEquals(WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_NONE, readBack { Passkeys.set(it.settings, off) })
     }
+
+    /**
+     * R2-F1: the page that the commit raises the mode for was made while
+     * it was down, and has no WebAuthn — read in the page itself, not
+     * off the setting — until the gate's one reload.
+     */
+    @Test
+    fun the_first_page_after_a_held_one_gets_webauthn_through_one_reload() {
+        assumeTrue(WebViewFeature.isFeatureSupported(WebViewFeature.WEB_AUTHENTICATION))
+        val events = java.util.Collections.synchronizedList(mutableListOf<String>())
+        var reloads = true
+        lateinit var view: WebView
+        lateinit var gate: PasskeyGate
+        instrumentation.runOnMainSync {
+            PasskeyGate.appVisible(true)
+            view = WebView(instrumentation.targetContext)
+            view.settings.javaScriptEnabled = true
+            gate = PasskeyGate(view.settings, WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER)
+            PasskeyGate.register(gate)
+            view.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    if (request.url.host != "passkeys.test") return null
+                    val url = request.url.toString()
+                    if (request.isForMainFrame) PasskeyGate.fromWorker(url) { gate.mainFrameRequested(url) }
+                    return WebResourceResponse("text/html", "utf-8", "<!doctype html><title>t</title>".byteInputStream())
+                }
+
+                override fun onPageStarted(v: WebView, url: String?, favicon: Bitmap?) {
+                    events += "start $url"
+                    if (reloads) gate.committed(url, v) else gate.committed(url)
+                }
+
+                override fun onPageFinished(v: WebView, url: String?) {
+                    events += "finish $url"
+                }
+            }
+        }
+        fun api(): String {
+            val answer = LinkedBlockingQueue<String>()
+            instrumentation.runOnMainSync {
+                view.evaluateJavascript("typeof PublicKeyCredential + ' ' + isSecureContext") { answer.add(it) }
+            }
+            return answer.poll(5, TimeUnit.SECONDS) ?: "none"
+        }
+        fun load(url: String, starts: Int) {
+            instrumentation.runOnMainSync { view.loadUrl(url) }
+            val deadline = SystemClock.uptimeMillis() + 10_000
+            while (SystemClock.uptimeMillis() < deadline) {
+                val seen = synchronized(events) { events.toList() }
+                val lastStart = seen.lastIndexOf("start $url")
+                if (seen.count { it == "start $url" } >= starts && seen.drop(lastStart).contains("finish $url")) break
+                SystemClock.sleep(50)
+            }
+            // Room for a reload that shouldn't come.
+            SystemClock.sleep(1_000)
+        }
+        try {
+            load("https://passkeys.test/a", starts = 1)
+            assertEquals("\"function true\"", api())
+            // A gateway frame holds the tab.
+            instrumentation.runOnMainSync { gate.frameRequested("http://localhost:1633/bzz/abc/") }
+            // Without the reload, the clean page after it comes up without
+            // WebAuthn although the mode is back up.
+            reloads = false
+            load("https://passkeys.test/b", starts = 1)
+            assertEquals("\"undefined true\"", api())
+            var mode = -1
+            instrumentation.runOnMainSync { mode = WebSettingsCompat.getWebAuthenticationSupport(view.settings) }
+            assertEquals(WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER, mode)
+            // With it: made twice, the second time with WebAuthn, and no more.
+            instrumentation.runOnMainSync { gate.frameRequested("http://localhost:1633/bzz/abc/") }
+            reloads = true
+            load("https://passkeys.test/c", starts = 2)
+            assertEquals(events.toString(), "\"function true\"", api())
+            assertEquals(2, events.count { it == "start https://passkeys.test/c" })
+        } finally {
+            instrumentation.runOnMainSync {
+                PasskeyGate.unregister(gate)
+                PasskeyGate.appVisible(false)
+                view.destroy()
+            }
+        }
+    }
 }
+

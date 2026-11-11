@@ -3197,8 +3197,10 @@ private fun buildRefreshableWebView(
                 failedLoad = null
                 pendingCertErrors.clear()
                 certRefusal.committed(url)
-                // WebAuthn back only for a document off this device (#524 R1-F1).
-                (view as? PageWebView)?.passkeys?.committed(url)
+                // WebAuthn back only for a document off this device (#524
+                // R1-F1). This document was made while it was off, and
+                // has none: reloaded once, after this callback (R2-F1).
+                (view as? PageWebView)?.let { page -> page.passkeys?.committed(url, page) }
                 // Page info's cleanup mark (#442) lasts this one load.
                 SiteData.committed(state.id, url)
                 // The user's own navigation landing — their address,

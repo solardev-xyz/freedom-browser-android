@@ -7,6 +7,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.webkit.WebSettings
+import android.webkit.WebView
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -185,7 +186,13 @@ internal object Passkeys {
  * held page; and commit. A top-level redirect to the device lands in the
  * commit at the latest. Raised only at the commit of an `http(s)`
  * main-frame document off the device that had no such frame asked for
- * since its request. A `blob:` or `about:blank` document, which can
+ * since its request. That document was made while the mode was down,
+ * and WebView decides a document's WebAuthn as it makes it, so it has
+ * none: the tab reloads it once, right after the commit
+ * ([RaisedDocumentReload], R2-F1). The cost is a second load of the
+ * first page after a held one; a POST result isn't resent (the reload
+ * asks, and is told not to), and stays without WebAuthn until the user
+ * reloads it. A `blob:` or `about:blank` document, which can
  * carry its creator's origin, keeps the tab held. The detector's word
  * travels on a pipe of its own, apart from WebAuthn's: an iframe
  * reached only through a redirect hop that calls WebAuthn in its very
@@ -227,6 +234,12 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
         update()
     }
 
+    /** The reload owed to a document the commit raised the mode for. */
+    private val reload = RaisedDocumentReload()
+
+    private val raised: Boolean
+        get() = applied == WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER
+
     /** See [DeviceDocumentHold.openedBy]. Main thread. */
     fun openedBy(opener: PasskeyGate) {
         hold.openedBy(opener.hold)
@@ -237,6 +250,7 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
     fun mainFrameRequested(url: String?) {
         hold.mainFrameRequested(url)
         update()
+        reload.mainFrameRequested(url)
     }
 
     /** See [DeviceDocumentHold.frameRequested]. Main thread. */
@@ -245,10 +259,31 @@ internal class PasskeyGate(private val settings: WebSettings, private val capabl
         update()
     }
 
-    /** See [DeviceDocumentHold.committed]. Main thread. */
-    fun committed(url: String?) {
+    /**
+     * See [DeviceDocumentHold.committed]. Main thread. A ticket for
+     * [RaisedDocumentReload.take] when this commit raised the mode: the document it
+     * committed was made while the mode was down, and has no WebAuthn
+     * (R2-F1).
+     */
+    fun committed(url: String?): Int? {
         hold.committed(url)
+        val before = raised
         update()
+        return reload.committed(raisedNow = !before && raised)
+    }
+
+    /**
+     * [committed] for a main-frame document of [view]'s, reloading it
+     * once, after this commit's callbacks, when the commit raised the
+     * mode: still that document then, and the mode still up. Main thread.
+     */
+    fun committed(url: String?, view: WebView) {
+        val ticket = committed(url) ?: return
+        // Not `view.post`, which waits for a tab in the background to be
+        // attached to the window.
+        main.post {
+            if (!view.isDestroyed && reload.take(ticket, view.url, raised)) view.reload()
+        }
     }
 
     private fun update() {
@@ -397,4 +432,64 @@ internal class DeviceDocumentHold {
             // `blob:` one) may have a device page's.
             (held && !Passkeys.ownsOrigin(url))
     }
+}
+
+/**
+ * The one reload a document needs after the commit that raised its
+ * tab's WebAuthn mode (#524 R2-F1); see [PasskeyGate].
+ *
+ * WebView decides whether a document has WebAuthn (`PublicKeyCredential`)
+ * as it makes it, before `onPageStarted`, where the mode can first come
+ * back up. So the first document off the device after a held one comes
+ * up without it, and only a reload gives it the API. The mode isn't
+ * raised any earlier, at the clean document's request, because the held
+ * document is still on screen until the commit (for good, if the
+ * navigation never commits: a `204`, a download, Stop), and nothing
+ * would keep it, or a blank frame it makes, from WebAuthn meanwhile.
+ *
+ * Never for the commit of that reload itself: a page that frames
+ * something on the device lowers the mode again after its commit,
+ * and its reload's commit raises it again, which would reload forever.
+ */
+internal class RaisedDocumentReload {
+    private var tickets = 0
+
+    /** The ticket of the reload due, 0 for none. */
+    private var due = 0
+
+    /** The address of the reload under way, until its commit. */
+    private var reloading: String? = null
+
+    /** A main-frame document committed; [raisedNow] if its commit raised the mode. A ticket when it is owed a reload. */
+    fun committed(raisedNow: Boolean): Int? {
+        due = 0
+        if (reloading != null) {
+            reloading = null
+            return null
+        }
+        if (!raisedNow) return null
+        due = ++tickets
+        return due
+    }
+
+    /**
+     * The tab asked for a main-frame document at [url]: a reload not yet
+     * made is superseded, and one made is no longer under way once
+     * something else is asked for.
+     */
+    fun mainFrameRequested(url: String?) {
+        due = 0
+        if (reloading != null && withoutFragment(url) != reloading) reloading = null
+    }
+
+    /** Whether to reload the document at [url] now for [ticket], with the mode [raised] still. */
+    fun take(ticket: Int, url: String?, raised: Boolean): Boolean {
+        if (ticket == 0 || ticket != due) return false
+        due = 0
+        if (!raised || url == null) return false
+        reloading = withoutFragment(url)
+        return true
+    }
+
+    private fun withoutFragment(url: String?): String? = url?.substringBefore('#')
 }

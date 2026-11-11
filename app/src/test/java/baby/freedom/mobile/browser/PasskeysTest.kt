@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.webkit.WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER
 import androidx.webkit.WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_NONE
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 /** Which WebAuthn mode a tab's WebView gets (#524), and what Settings says about it. */
@@ -152,4 +153,49 @@ class PasskeysTest {
         popup.committed("https://webauthn.io/")
         assertEquals(false, popup.held)
     }
+
+    @Test
+    fun `a document the commit raised the mode for is reloaded once, never for its own reload`() {
+        val reload = RaisedDocumentReload()
+        // A commit that didn't raise the mode owes nothing.
+        assertEquals(null, reload.committed(raisedNow = false))
+        // The first clean page after a held one: one reload.
+        reload.mainFrameRequested("https://webauthn.io/")
+        val ticket = reload.committed(raisedNow = true)!!
+        assertEquals(true, reload.take(ticket, "https://webauthn.io/", raised = true))
+        assertEquals(false, reload.take(ticket, "https://webauthn.io/", raised = true))
+        // Its request and commit; the page frames the gateway, which lowers
+        // the mode, and the reload's commit raises it again: no second
+        // reload, or such a page would reload forever.
+        reload.mainFrameRequested("https://webauthn.io/")
+        assertEquals(null, reload.committed(raisedNow = true))
+        // The next raise after that is owed one again.
+        reload.mainFrameRequested("https://example.com/")
+        assertNotNull(reload.committed(raisedNow = true))
+    }
+
+    @Test
+    fun `a reload owed is dropped when the mode is down again or another document is asked for`() {
+        val reload = RaisedDocumentReload()
+        // A device frame lowered the mode before the reload ran: reloading
+        // would make the page again without WebAuthn.
+        val lowered = reload.committed(raisedNow = true)!!
+        assertEquals(false, reload.take(lowered, "https://webauthn.io/", raised = false))
+        // The user went on before it ran.
+        val superseded = reload.committed(raisedNow = true)!!
+        reload.mainFrameRequested("https://example.com/")
+        assertEquals(false, reload.take(superseded, "https://webauthn.io/", raised = true))
+        // A later commit's ticket replaces an earlier one.
+        val first = reload.committed(raisedNow = true)!!
+        reload.committed(raisedNow = false)
+        assertEquals(false, reload.take(first, "https://webauthn.io/", raised = true))
+        // A reload that redirects elsewhere isn't taken for its own commit
+        // any longer once the other address is asked for.
+        val redirected = reload.committed(raisedNow = true)!!
+        assertEquals(true, reload.take(redirected, "https://a.example/#top", raised = true))
+        reload.mainFrameRequested("https://a.example/")
+        reload.mainFrameRequested("https://b.example/")
+        assertNotNull(reload.committed(raisedNow = true))
+    }
 }
+
