@@ -2236,6 +2236,12 @@ private fun buildRefreshableWebView(
             // the user allowed pop-ups — otherwise it is blocked and
             // named in a notice the user can open it from.
             javaScriptCanOpenWindowsAutomatically = true
+            // Passkeys (#524): WebAuthn in browser mode on Android 14+,
+            // through the passkey manager picked in Android settings —
+            // never in a private tab, where a passkey made would outlive
+            // the session in that manager, and only on a WebView recent
+            // enough to refuse it on dweb pages ([Passkeys]).
+            Passkeys.apply(context, this, privateTab = state.private)
         }
 
         this.onSearchSelection = onSearchSelection

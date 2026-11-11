@@ -17,7 +17,7 @@ class SettingsPagesTest {
             assertEquals(listOf(SettingsSection.Appearance), sections(SettingsPage.Appearance))
             assertEquals(listOf(SettingsSection.Downloads), sections(SettingsPage.Downloads))
             assertEquals(
-                listOf(SettingsSection.Browsing, SettingsSection.Permissions, SettingsSection.Tor),
+                listOf(SettingsSection.Browsing, SettingsSection.Permissions, SettingsSection.Passkeys, SettingsSection.Tor),
                 sections(SettingsPage.Privacy),
             )
             assertEquals(listOf(SettingsSection.Adblock), sections(SettingsPage.Adblock))
