@@ -138,7 +138,7 @@ private fun isAddressHex(s: String) = s.length == 40 && s.all { it in '0'..'9' |
  * only the node's own chequebook, the one ant loaded or adopted. So
  * during a first buy or connect the only `transfer`s ant can sign go to
  * the node's chequebooks. Recheck this on every ant bump (last: ant
- * 0.5.60..0.5.71). 0.5.60..0.5.68 added only the `/v0/cache` routes,
+ * 0.5.60..0.5.78). 0.5.60..0.5.68 added only the `/v0/cache` routes,
  * none of which touches the chain. 0.5.69 added a chequebook withdraw
  * (`POST /chequebook/withdraw?amount=`, `ant_storage_settlement_withdraw_amount`):
  * it takes only an amount and sends `withdraw(uint256)` to the node's
@@ -153,7 +153,17 @@ private fun isAddressHex(s: String) = s.length == 40 && s.all { it in '0'..'9' |
  * `GET /settlements/{peer}`, which now skip a damaged stored figure; the
  * rest is inbound cheque checks, SOC and postage validation, frame
  * reading and the hive queue, and ant-chain moved only its version, so
- * it added no route and no transfer either. If ant ever gains a route that
+ * it added no route and no transfer either. 0.5.72..0.5.78 added only
+ * read routes to ant-gateway (`GET /stamps/{id}/chunks/{address}`,
+ * `GET /stewardship/{ref}/stamps`, and `/v0/manifest/{addr}/…` listing
+ * pages) and, to ant-ffi, the AntStream publisher's catalog calls
+ * (`ant_publisher_set_info`, `ant_publisher_set_rendition`,
+ * `ant_stream_catalog_publish`, `ant_stream_thumbnail_upload`), which
+ * at most upload under a caller's batch. ant-chain's funding now reports an
+ * unread wallet balance as unknown rather than 0, and ant-ffi's
+ * settlement calls skip the wallet reads while the chequebook is full;
+ * nothing new signs, so no paying route and no transfer either. If ant
+ * ever gains a route that
  * pays a caller-chosen address (a cash-out to a named beneficiary), a request
  * racing a first buy could send up to its confirmed deposit to an
  * address of its choice, so the first deploy would need pinning too.
