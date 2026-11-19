@@ -253,6 +253,25 @@ class SwarmProvider(
      */
     private val joins = Semaphore(MAX_CONCURRENT_JOINS)
 
+    /**
+     * Each origin's share of [joins]: at most [MAX_JOINS_PER_ORIGIN] of
+     * them, so one site's burst of slow joins can't hold every slot and
+     * leave another site's reads waiting out their deadline. Held for an
+     * origin only while it has a read waiting or joining.
+     */
+    private val originJoins = HashMap<String, OriginJoins>()
+
+    private class OriginJoins {
+        val slots = Semaphore(MAX_JOINS_PER_ORIGIN)
+        var users = 0
+    }
+
+    /** How many origins have a join share held: for tests. */
+    internal fun joinShareOrigins(): Int = synchronized(originJoins) { originJoins.size }
+
+    /** The bytes [origin]'s current window has charged or reserved: for tests. */
+    internal fun budgetBytes(origin: String): Long = synchronized(budgets) { budgets[origin]?.bytes ?: 0 }
+
     /** Upload tag → the origin that made it: nobody else may read its progress. Session only. */
     private val tagOwners = ConcurrentHashMap<Long, String>()
 
@@ -1125,9 +1144,12 @@ class SwarmProvider(
      * here it gets what is left of [DATA_READ_DEADLINE_MS] less the
      * [PREFLIGHT_TIMEOUT_MS] re-probe a cut-short join may still need, so the
      * page still gets a real answer before its own timer gives up. At most
-     * [MAX_CONCURRENT_JOINS] joins run at once across all pages ([joins]);
-     * a read past that waits, suspended, for a slot within the same
-     * deadline, and is -32603 if none frees in time.
+     * [MAX_CONCURRENT_JOINS] joins run at once across all pages ([joins]),
+     * and at most [MAX_JOINS_PER_ORIGIN] of them for one origin, so one
+     * site can't hold every slot; a read past either waits, suspended, for
+     * a slot within the same deadline, and is -32603 if none frees in time.
+     * A read that never got a slot (out of time, or cancelled because its
+     * page went) joined nothing, and its reservation is handed back.
      */
     private suspend fun readData(origin: String, params: JSONObject): Reply {
         val started = System.nanoTime()
@@ -1157,14 +1179,28 @@ class SwarmProvider(
             }
             root.payload.copyOf(expected)
         } else {
-            if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
+            val reserved = (expected - raw.size).toLong().coerceAtLeast(0)
+            val window = if (reserved > 0) {
+                val (refusal, window) = reserveBudget(origin, reserved)
+                refusal?.let { return it }
+                window
+            } else {
+                null
+            }
             // Room is kept for [cutShort]'s `GET /node`, so a join cut at its
             // deadline still answers inside [DATA_READ_DEADLINE_MS].
             fun left() = DATA_READ_DEADLINE_MS - PREFLIGHT_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000
-            // A free join slot ([joins]) is waited for within the same
-            // deadline; the join then gets whatever is left of it.
-            withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) { joins.acquire() }
-                ?: return Reply.Err(INTERNAL, "Data can't be read: too many Swarm reads are in progress. Try again.")
+            // A free join slot (the origin's share, then [joins]) is waited
+            // for within the same deadline; the join then gets whatever is
+            // left of it. A read that never gets one — out of time, or its
+            // page gone — had nothing joined, so its reservation is handed back.
+            var slot = false
+            try {
+                slot = withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) { acquireJoin(origin); true } ?: false
+            } finally {
+                if (!slot && window != null) unreserveBudget(origin, window, reserved)
+            }
+            if (!slot) return Reply.Err(INTERNAL, "Data can't be read: too many Swarm reads are in progress. Try again.")
             val answer = try {
                 withContext(io) {
                     node.request(
@@ -1181,7 +1217,7 @@ class SwarmProvider(
             } finally {
                 // withContext waits for the blocking call even when cancelled,
                 // so the slot is free only once its IO thread is.
-                joins.release()
+                releaseJoin(origin)
             }
             // As [chunk]: bee says "read chunk failed" with a 500 for a chunk it can't find.
             if (answer.status == 404 || (answer.status == 500 && answer.message().trim().equals("read chunk failed", ignoreCase = true))) {
@@ -1302,7 +1338,7 @@ class SwarmProvider(
             }
             socRefusal?.let { return it }
             val expected = size.toInt()
-            if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
+            if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong()).first?.let { return it }
             val answer = try {
                 withContext(io) {
                     node.request("GET", "/bytes/${soc.cac.address.swarmHex()}", emptyMap(), null, READ_TIMEOUT_MS, maxBytes = expected)
@@ -1371,13 +1407,58 @@ class SwarmProvider(
      * so parallel reads can't all fit and then each download what only one
      * of them may return (desktop's `reservePermissionFreeReadBytes`).
      */
-    private suspend fun reserveBudget(origin: String, bytes: Long): Reply.Err? {
+    private suspend fun reserveBudget(origin: String, bytes: Long): Pair<Reply.Err?, Budget?> {
         val limits = readLimits(origin)
-        val fits = synchronized(budgets) {
+        val window = synchronized(budgets) {
             val bucket = bucket(origin)
-            (bucket.bytes + bytes <= limits.second).also { if (it) bucket.bytes += bytes }
+            if (bucket.bytes + bytes <= limits.second) bucket.also { it.bytes += bytes } else null
         }
-        return if (fits) null else budgetExceeded(limits)
+        return if (window != null) null to window else budgetExceeded(limits) to null
+    }
+
+    /**
+     * Hand back [bytes] [reserveBudget] took from [window] for a read that
+     * never ran: only to that same window, if it's still [origin]'s (one
+     * that has run out since started afresh without them).
+     */
+    private fun unreserveBudget(origin: String, window: Budget, bytes: Long) {
+        synchronized(budgets) {
+            if (budgets[origin] === window) window.bytes = (window.bytes - bytes).coerceAtLeast(0)
+        }
+    }
+
+    /**
+     * Take a join slot for [origin]: one of its share
+     * ([MAX_JOINS_PER_ORIGIN]), then one of [joins]. Cancellable while it
+     * waits, taking nothing; [releaseJoin] gives both back.
+     */
+    private suspend fun acquireJoin(origin: String) {
+        val share = synchronized(originJoins) { originJoins.getOrPut(origin) { OriginJoins() }.also { it.users++ } }
+        var held = false
+        try {
+            share.slots.acquire()
+            try {
+                joins.acquire()
+                held = true
+            } finally {
+                if (!held) share.slots.release()
+            }
+        } finally {
+            if (!held) dropShare(origin, share)
+        }
+    }
+
+    private fun releaseJoin(origin: String) {
+        joins.release()
+        val share = synchronized(originJoins) { originJoins.getValue(origin) }
+        share.slots.release()
+        dropShare(origin, share)
+    }
+
+    private fun dropShare(origin: String, share: OriginJoins) {
+        synchronized(originJoins) {
+            if (--share.users == 0) originJoins.remove(origin)
+        }
     }
 
     /** The most bytes one window lets [origin] read. */
@@ -1658,6 +1739,9 @@ class SwarmProvider(
 
         /** [joins]: at most this many `swarm_readData` joins hold an IO thread at once. */
         internal const val MAX_CONCURRENT_JOINS = 8
+
+        /** One origin's share of [MAX_CONCURRENT_JOINS] ([originJoins]): the rest stay open to other sites. */
+        internal const val MAX_JOINS_PER_ORIGIN = 2
 
         /** The least a join is started with once it has its slot. */
         private const val MIN_JOIN_MS = 5_000L

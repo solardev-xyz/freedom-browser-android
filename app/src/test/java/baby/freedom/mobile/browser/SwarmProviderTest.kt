@@ -7,7 +7,9 @@ import baby.freedom.mobile.wallet.VaultLockedException
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
@@ -877,8 +879,10 @@ class SwarmProviderTest {
             }
         }
         val count = cap + 12
-        val reads = (1..count).map {
-            async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        // Spread over enough sites that their shares together cover every slot.
+        val sites = (0 until count).map { "https://s${it % (cap / SwarmProvider.MAX_JOINS_PER_ORIGIN + 2)}.example" }
+        val reads = sites.map { origin ->
+            async(Dispatchers.IO) { provider.request(origin, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
         }
         val deadline = System.currentTimeMillis() + 5_000
         while (inJoin.get() < cap && System.currentTimeMillis() < deadline) Thread.sleep(10)
@@ -891,6 +895,70 @@ class SwarmProviderTest {
         assertEquals(count, joins())
         // A join that waited for its slot still answers inside the 290 s budget.
         assertTrue(node.capTimeouts.all { it.second + 10_000 <= 290_000 })
+        assertEquals("shares are let go of once their reads are done", 0, provider.joinShareOrigins())
+    }
+
+    @Test
+    fun `one site's slow joins can't take every slot, so another site's read joins beside them`() = runBlocking {
+        val slowRef = plantBlob(ByteArray(4097) { 6 })
+        val ref = plantBlob(ByteArray(4097) { 8 })
+        val release = java.util.concurrent.CountDownLatch(1)
+        val slowJoins = java.util.concurrent.atomic.AtomicInteger()
+        node.onRequest = { _, path ->
+            if (path == "/bytes/$slowRef") {
+                slowJoins.incrementAndGet()
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        fun read(origin: String, reference: String) = async(Dispatchers.IO) {
+            provider.request(origin, "swarm_readData", dataParams(reference)) { SwarmProvider.Answer.REJECTED }
+        }
+        // A burst of slow reads from one site, well past the global cap.
+        val slow = (1..SwarmProvider.MAX_CONCURRENT_JOINS * 3).map { read(other, slowRef) }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (slowJoins.get() < SwarmProvider.MAX_JOINS_PER_ORIGIN && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        Thread.sleep(200)
+        assertEquals("one site holds only its share", SwarmProvider.MAX_JOINS_PER_ORIGIN, slowJoins.get())
+        // Another site's read isn't held behind them.
+        val mine = withTimeoutOrNull(2_000) { read(site, ref).await() }
+        assertTrue("got $mine", mine is SwarmProvider.Reply.Ok)
+        release.countDown()
+        assertTrue(slow.map { it.await() }.all { it is SwarmProvider.Reply.Ok })
+        assertEquals(0, provider.joinShareOrigins())
+    }
+
+    @Test
+    fun `a read cancelled while it waits for a join slot hands its reserved bytes back`() = runBlocking {
+        val blob = ByteArray(100_000) { 7 }
+        val ref = plantBlob(blob)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val joining = java.util.concurrent.atomic.AtomicInteger()
+        node.onRequest = { _, path ->
+            if (path.startsWith("/bytes/")) {
+                joining.incrementAndGet()
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        val share = SwarmProvider.MAX_JOINS_PER_ORIGIN
+        val holding = (1..share).map {
+            async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (joining.get() < share && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        val held = provider.budgetBytes(other)
+        val waiting = async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        // Its root chunk (span + 4096 bytes) is paid for whatever happens; the rest is reserved.
+        val root = 8L + 4096
+        while (provider.budgetBytes(other) < held + blob.size && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertEquals("the waiting read reserved its blob", held + blob.size, provider.budgetBytes(other))
+        Thread.sleep(100)
+        assertEquals("still waiting for a slot, not joining", share, joining.get())
+        waiting.cancelAndJoin()
+        assertEquals("nothing was joined for it, so only its root stays charged", held + root, provider.budgetBytes(other))
+        release.countDown()
+        assertTrue(holding.map { it.await() }.all { it is SwarmProvider.Reply.Ok })
+        assertEquals(share, joins())
+        assertEquals(0, provider.joinShareOrigins())
     }
 
     // -------------------------------------------------------------------

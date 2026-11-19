@@ -34,11 +34,13 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -153,6 +155,9 @@ object SwarmProviders {
     private val promptLocks = HashMap<Long, Mutex>()
     private val pending = HashMap<Long, MutableSet<SwarmPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
+
+    /** `swarm_readData` calls still running, by the document that made them: main thread only. */
+    private val reads = DocumentJobs()
 
     /** The pages' messaging subscriptions; set by [init]. */
     @Volatile
@@ -470,6 +475,10 @@ object SwarmProviders {
                 }
                 val id = request.id
                 val method = request.method
+                // A read waiting for a join slot (or joining) is dropped once
+                // its document goes: nobody is left to answer, and its
+                // slot and reserved bytes go back to the pages still open.
+                if (method == "swarm_readData") reads.add(coroutineContext.job, tab.id, doc)
                 val result = try {
                     val p = provider ?: throw IllegalStateException("provider not ready")
                     val approved = { approved(reply, id) }
@@ -486,6 +495,7 @@ object SwarmProviders {
                 answer(reply, id, result)
                 if (method == "swarm_subscribe") confirmLater(result)
             } finally {
+                reads.remove(coroutineContext.job)
                 ticket.release()
             }
         }
@@ -817,6 +827,7 @@ object SwarmProviders {
         documents[tab.id] = doc
         committedOrigins[tab.id] = providerOriginKey(url)
         withdraw(tab.id)
+        reads.cancelOutgoing(tab.id, doc)
         // The outgoing document's subscriptions go with it.
         subscriptions?.cancelWhere { it.tab == tab.id && it.document != doc }
     }
@@ -824,6 +835,7 @@ object SwarmProviders {
     /** The tab closed. */
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
+        reads.cancelTab(tabId)
         subscriptions?.cancelWhere { it.tab == tabId }
         manifestChecks.remove(tabId)
         documents.remove(tabId)
@@ -1483,4 +1495,36 @@ internal fun swarmProviderJs(channel: String): String {
   } catch (e) {}
 })();
 """.trimIndent()
+}
+
+/**
+ * Jobs filed under the tab and document that started them, so they can be
+ * cancelled once that document is no longer the tab's. One thread only
+ * (the bridge's main thread).
+ */
+internal class DocumentJobs {
+    private val jobs = HashMap<Job, Pair<Long, Int>>()
+
+    fun add(job: Job, tab: Long, document: Int) {
+        jobs[job] = tab to document
+    }
+
+    fun remove(job: Job) {
+        jobs.remove(job)
+    }
+
+    /** Tab [tab] committed [current]: cancel every job of its other documents. */
+    fun cancelOutgoing(tab: Long, current: Int) = cancelWhere { it.first == tab && it.second != current }
+
+    /** Tab [tab] closed: cancel all of its jobs. */
+    fun cancelTab(tab: Long) = cancelWhere { it.first == tab }
+
+    /** How many jobs are filed: for tests. */
+    fun size() = jobs.size
+
+    private fun cancelWhere(match: (Pair<Long, Int>) -> Boolean) {
+        val gone = jobs.filterValues(match).keys.toList()
+        gone.forEach { jobs.remove(it) }
+        gone.forEach { it.cancel() }
+    }
 }
