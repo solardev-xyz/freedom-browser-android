@@ -113,6 +113,10 @@
     <string name="errorpage_page_swarm_other">The Swarm node refused the request (HTTP %1$s).</string>
     <!-- A line of the details box. %1$s is an HTTP status code. -->
     <string name="errorpage_page_swarm_other_detail">HTTP %1$s from the Swarm node</string>
+    <!-- An IPFS load\'s errorpage_page_swarm_other. %1$s is an HTTP status code. -->
+    <string name="errorpage_page_ipfs_other">The IPFS node refused the request (HTTP %1$s).</string>
+    <!-- A line of the details box. %1$s is an HTTP status code. -->
+    <string name="errorpage_page_ipfs_other_detail">HTTP %1$s from the IPFS node</string>
     <string name="errorpage_page_swarm_not_found_title">Content not found yet</string>
     <string name="errorpage_page_swarm_not_found">Your Swarm node couldn\'t find this content on the network. It may not have spread through the network yet, or it may no longer be stored.</string>
     <string name="errorpage_page_swarm_one_peer">Your Swarm node is connected to only 1 peer, too few to find this content. It keeps connecting in the background.</string>

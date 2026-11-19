@@ -131,6 +131,8 @@ internal val HEADERS_TO_STRIP = setOf(
     // [nameResolutionErrorIn] and [NodeApiGuard.isRefusal]).
     NAME_RESOLUTION_ERROR_HEADER.lowercase(),
     NodeApiGuard.REFUSAL_HEADER.lowercase(),
+    // Likewise our own word that a page's path isn't in its site (#536).
+    SWARM_PATH_NOT_FOUND_HEADER.lowercase(),
     // Would let a gateway-served worker script claim a scope wider than
     // its own path on the virtual origin (#355; desktop drops it too).
     "service-worker-allowed",
@@ -161,6 +163,20 @@ internal fun gatewayResponseHeaders(fields: Map<String?, List<String>?>): Map<St
  * already *is* the error page (see [nameResolutionRefusal]).
  */
 internal const val NAME_RESOLUTION_ERROR_HEADER = "X-Name-Resolution-Error"
+
+/**
+ * Header on a main-frame Swarm 404 the interceptor fetched (#536) whose
+ * body is ant's `path address not found`, final by [GatewayProbe]'s own
+ * rule (answered within [GatewayProbe.WARM_404_MS], or the attempt before
+ * said the same): the site's manifest has no such path. Tells
+ * `onReceivedHttpError` to show "Page not found" for a link inside a
+ * site, which never goes through the probe, rather than "not found yet".
+ */
+internal const val SWARM_PATH_NOT_FOUND_HEADER = "X-Swarm-Path-Not-Found"
+
+/** Whether a main-frame HTTP error's headers carry [SWARM_PATH_NOT_FOUND_HEADER]. */
+internal fun swarmPathNotFoundIn(headers: Map<String, String>?): Boolean =
+    headers?.keys?.any { it.equals(SWARM_PATH_NOT_FOUND_HEADER, ignoreCase = true) } == true
 
 /**
  * The [ErrorPage] code in a main-frame HTTP error's headers if the
@@ -4377,12 +4393,14 @@ private fun buildRefreshableWebView(
                 if (!isDwebPageUrl(failed)) return
 
                 val status = errorResponse?.statusCode ?: 0
-                // The probe already waited out transient 404s and 5xx
-                // ([GatewayProbe.TRANSIENT_5XX]) — if we got one here,
-                // the gateway answered but the content
-                // genuinely isn't available (misspelled hash, etc). A
-                // synthesized 502 is the interceptor telling us the
-                // gateway socket itself is gone (node not running).
+                // The probe (for a typed or opened address) and the
+                // fetch's own retries already waited out transient 404s
+                // and 5xx ([GatewayProbe.TRANSIENT_5XX]) — if we got one
+                // here, the gateway answered but the content genuinely
+                // isn't available (misspelled hash, a path the site
+                // lacks, etc). A synthesized 502 is the interceptor
+                // telling us the gateway socket itself is gone (node
+                // not running).
                 val display = displayFor(failed, state).ifBlank { failed }
                 // The interceptor's refusal of an ENS document (#99) is
                 // already the error page, served in place — loading
@@ -4401,11 +4419,17 @@ private fun buildRefreshableWebView(
                 val errorCode =
                     if (status == 502) "ERR_CONNECTION_REFUSED"
                     else "swarm_content_not_found"
+                // A link inside a site to a path its manifest lacks never
+                // went through the probe; the fetch tagged it (#536).
+                val pathNotFound = status == 404 && swarmPathNotFoundIn(errorResponse?.responseHeaders)
                 val page = ErrorPage.url(
                     errorCode = errorCode,
                     displayUrl = display,
                     protocol = protocolForErrorPage(failed),
                     retryUrl = retryUrlFor(failed),
+                    swarmFailure = if (pathNotFound) {
+                        ErrorPage.SwarmFailure.of(GatewayProbe.Outcome.PathNotFound)
+                    } else null,
                 )
                 Log.i(LOG_TAG, "main-frame HTTP $status for $failed → error page")
                 state.clearEnsOverride()
@@ -6792,6 +6816,10 @@ private sealed class FetchAttempt {
     data class Response(
         val response: WebResourceResponse,
         val transient: Boolean,
+        /** A main-frame Swarm 404 with ant's `path address not found` body ([fetchOnce] reads it ahead). */
+        val missingPath: Boolean = false,
+        /** Its headers came within [GatewayProbe.WARM_404_MS]: from a manifest the node held. */
+        val warm: Boolean = false,
     ) : FetchAttempt()
 
     /** Recoverable I/O failure — worth another attempt. */
@@ -6827,6 +6855,9 @@ internal fun fetchWithRetry(
     abandon: AbandonSignal? = null,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
+    // The previous answer was a cold `path address not found` still
+    // awaiting the next one's confirmation, as in [GatewayProbe.probe].
+    var coldMissingPath = false
     fun abandoned(): WebResourceResponse {
         lastResponse?.data?.let { runCatching { it.close() } }
         Log.i(LOG_TAG, "abandoned by the page: $originalUrl")
@@ -6857,6 +6888,14 @@ internal fun fetchWithRetry(
                     runCatching { attempt.response.data?.close() }
                     return abandoned()
                 }
+                if (attempt.missingPath && (attempt.warm || coldMissingPath)) {
+                    // The site has no such page: no retry will find it.
+                    Log.i(LOG_TAG, "path not in manifest: $originalUrl")
+                    attempt.response.responseHeaders =
+                        (attempt.response.responseHeaders.orEmpty()) + (SWARM_PATH_NOT_FOUND_HEADER to "1")
+                    return attempt.response
+                }
+                coldMissingPath = attempt.missingPath
                 if (!attempt.transient) return attempt.response
                 lastResponse = attempt.response
                 Log.i(
@@ -6910,6 +6949,7 @@ private fun fetchOnce(
     val unwatch = abandon?.onAbandon { deadline?.abandon() }
     return try {
         val target = URL(targetUrl)
+        val asked = System.nanoTime()
         // Redirects are followed hop by hop through TorRouting.
         val conn = TorRouting.openFollowingRedirects(target, hops = deadline) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
@@ -6918,6 +6958,7 @@ private fun fetchOnce(
             forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }
         val status = conn.responseCode
+        val headersMs = (System.nanoTime() - asked) / 1_000_000
         deadline?.headersReceived()
         if (deadline?.expired == true) {
             // Disconnected by the deadline just as the headers came in.
@@ -6950,7 +6991,17 @@ private fun fetchOnce(
 
         val headers = gatewayResponseHeaders(conn.headerFields)
 
-        val raw = if (status in 200..399) conn.inputStream else conn.errorStream
+        var raw = if (status in 200..399) conn.inputStream else conn.errorStream
+        // A navigation's 404 from ant says whether the site lacks the
+        // path (#536): its short body is read ahead and handed on whole.
+        var missingPath = false
+        if (raw != null && status == 404 && req.isForMainFrame && conn.requestMethod != "HEAD" &&
+            GatewayUrls.extractBase(targetUrl)?.protocol == "bzz"
+        ) {
+            val head = readAhead(raw, MISSING_PATH_PEEK_BYTES)
+            missingPath = GatewayProbe.missingPathBody(String(head, Charsets.UTF_8))
+            raw = java.io.SequenceInputStream(ByteArrayInputStream(head), raw)
+        }
         val body = DisconnectOnCloseInputStream(
             raw ?: ByteArrayInputStream(ByteArray(0)),
             conn,
@@ -6995,7 +7046,12 @@ private fun fetchOnce(
                 webViewSeekProof(body, range),
             )
         }
-        FetchAttempt.Response(response, transient = status in policy.retryStatuses)
+        FetchAttempt.Response(
+            response,
+            transient = status in policy.retryStatuses,
+            missingPath = missingPath,
+            warm = headersMs < GatewayProbe.WARM_404_MS,
+        )
     } catch (t: Throwable) {
         if (abandon?.abandoned == true) {
             FetchAttempt.Abandoned
@@ -7010,6 +7066,21 @@ private fun fetchOnce(
         unwatch?.invoke()
         deadline?.headersReceived()
     }
+}
+
+/** How much of a navigation's Swarm 404 body [fetchOnce] reads ahead: ant's JSON is far shorter. */
+private const val MISSING_PATH_PEEK_BYTES = 1_024
+
+/** Up to [max] bytes of [input], fewer only at its end. */
+private fun readAhead(input: java.io.InputStream, max: Int): ByteArray {
+    val buf = ByteArray(max)
+    var n = 0
+    while (n < max) {
+        val r = input.read(buf, n, max - n)
+        if (r < 0) break
+        n += r
+    }
+    return buf.copyOf(n)
 }
 
 private fun failedAttempt(t: Throwable, targetUrl: String, media: Boolean): FetchAttempt =

@@ -188,6 +188,8 @@ object ErrorPage {
         "page_swarm_other_title" to R.string.errorpage_page_swarm_other_title,
         "page_swarm_other" to R.string.errorpage_page_swarm_other,
         "page_swarm_other_detail" to R.string.errorpage_page_swarm_other_detail,
+        "page_ipfs_other" to R.string.errorpage_page_ipfs_other,
+        "page_ipfs_other_detail" to R.string.errorpage_page_ipfs_other_detail,
         "page_swarm_not_found_title" to R.string.errorpage_page_swarm_not_found_title,
         "page_swarm_not_found" to R.string.errorpage_page_swarm_not_found,
         "page_swarm_one_peer" to R.string.errorpage_page_swarm_one_peer,

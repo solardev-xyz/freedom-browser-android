@@ -291,6 +291,27 @@ class GatewayProbeTest {
     }
 
     @Test
+    fun `a peers body trickled under the read timeout is cut at the side request's cap`() = runBlocking {
+        // One byte every 300 ms: each read() comes well inside the 1 s
+        // read timeout, so only a cap on the whole request can end it.
+        server.respondWith { req ->
+            if (req.path == "/peers") Response(200, body = "{\"peers\":[" + "{},".repeat(50) + "{}]}", trickleMs = 300L)
+            else Response(503)
+        }
+        val started = System.nanoTime()
+        val outcome = GatewayProbe().probe(
+            headUrl = "${server.baseUrl}/bzz/abc",
+            delaysMs = longArrayOf(0L),
+            overallTimeoutMs = 0L,
+            peersUrl = "${server.baseUrl}/peers",
+            sideRequestTimeoutMs = 1_000L,
+        )
+        val ms = (System.nanoTime() - started) / 1_000_000
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = 503, peers = null), outcome)
+        assertTrue("took $ms ms: the trickle ran on past the cap", ms < 2_000)
+    }
+
+    @Test
     fun `the probe HEADs the page itself, not the site root`() {
         val base = "http://127.0.0.1:1633/bzz/$HASH"
         assertEquals("$base/docs/a.html", GatewayProbe.probeTarget("$base/docs/a.html?x=1#top"))
@@ -464,6 +485,8 @@ private data class Response(
     val body: String = "",
     /** Pause this long before writing headers (to simulate slow peers). */
     val hangMs: Long = 0L,
+    /** Write the body one byte at a time, this far apart. */
+    val trickleMs: Long = 0L,
 )
 
 /**
@@ -550,7 +573,18 @@ private class StubHttpServer(private val requestedPort: Int = 0) {
             append("\r\n")
         }
         out.write(head.toByteArray(Charsets.UTF_8))
-        if (bodyBytes.isNotEmpty() && !isHead) out.write(bodyBytes)
+        if (bodyBytes.isNotEmpty() && !isHead) {
+            if (r.trickleMs > 0) {
+                out.flush()
+                for (b in bodyBytes) {
+                    Thread.sleep(r.trickleMs)
+                    out.write(b.toInt())
+                    out.flush()
+                }
+            } else {
+                out.write(bodyBytes)
+            }
+        }
         out.flush()
     }
 

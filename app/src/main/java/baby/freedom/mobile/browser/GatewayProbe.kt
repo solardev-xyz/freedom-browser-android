@@ -3,6 +3,11 @@ package baby.freedom.mobile.browser
 import android.util.Log
 import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -12,6 +17,7 @@ import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import java.io.InputStream
 import java.net.ConnectException
+import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.UnknownHostException
@@ -96,6 +102,7 @@ class GatewayProbe {
         peersUrl: String? = null,
         quick404Ms: Long = QUICK_404_MS,
         warm404Ms: Long = WARM_404_MS,
+        sideRequestTimeoutMs: Long = SIDE_REQUEST_TIMEOUT_MS,
     ): Outcome {
         val started = System.currentTimeMillis()
         var attempt = 0
@@ -133,7 +140,7 @@ class GatewayProbe {
                     lastStatus = attemptResult.status
                     val missingPath = attemptResult.status == 404 &&
                         attemptMs < quick404Ms &&
-                        isMissingPath(headUrl)
+                        isMissingPath(headUrl, sideRequestTimeoutMs)
                     try {
                         coroutineContext.ensureActive()
                     } catch (_: CancellationException) {
@@ -174,7 +181,7 @@ class GatewayProbe {
             }
 
             if (System.currentTimeMillis() - started >= overallTimeoutMs) {
-                val peers = peersUrl?.let { countPeers(it) }
+                val peers = peersUrl?.let { countPeers(it, sideRequestTimeoutMs) }
                 try {
                     coroutineContext.ensureActive()
                 } catch (_: CancellationException) {
@@ -187,32 +194,43 @@ class GatewayProbe {
     }
 
     /** Whether a GET of [url] answers ant's "no such path in the manifest" 404. */
-    private suspend fun isMissingPath(url: String): Boolean {
-        val body = sideRequest(url, MISSING_PATH_BODY_BYTES) ?: return false
+    private suspend fun isMissingPath(url: String, timeoutMs: Long): Boolean {
+        val body = sideRequest(url, MISSING_PATH_BODY_BYTES, timeoutMs) ?: return false
         return missingPathBody(body)
     }
 
     /** The node's connected peer count from its `/peers`, or `null`. */
-    private suspend fun countPeers(url: String): Int? {
-        val body = sideRequest(url, PEERS_BODY_BYTES) ?: return null
+    private suspend fun countPeers(url: String, timeoutMs: Long): Int? {
+        val body = sideRequest(url, PEERS_BODY_BYTES, timeoutMs) ?: return null
         return peerCount(body)
     }
 
     /**
      * A short GET beside the probe's own HEAD (a 404's body, the peer
-     * count), capped at [SIDE_REQUEST_TIMEOUT_MS] so a slow node can't
-     * stall a probe iteration for a whole attempt timeout. The body, up
-     * to [maxBytes] (a longer one is cut, which [missingPathBody] and
-     * [peerCount] then fail to parse), or `null` on any failure.
+     * count). The body, up to [maxBytes] (a longer one is cut, which
+     * [missingPathBody] and [peerCount] then fail to parse), or `null` on
+     * any failure.
+     *
+     * [timeoutMs] ([SIDE_REQUEST_TIMEOUT_MS]) bounds the whole request,
+     * redirects and body included, not each step of it: a blocking
+     * `HttpURLConnection` call can't be interrupted by a coroutine
+     * timeout, and its own connect/read timeouts apply per hop and per
+     * `read()`, so a node trickling its body (or redirecting) could hold
+     * it many times over. The work runs on a thread of its own; at the
+     * deadline (or when the probe is cancelled) this returns `null` at
+     * once and [SideRequestCut] disconnects the connection from another
+     * thread, so the worker fails too rather than read on unwatched.
      */
-    private suspend fun sideRequest(url: String, maxBytes: Int): String? = try {
-        withContext(Dispatchers.IO) {
-            withTimeout(SIDE_REQUEST_TIMEOUT_MS) {
-                val conn = TorRouting.openFollowingRedirects(URL(url)) {
+    private suspend fun sideRequest(url: String, maxBytes: Int, timeoutMs: Long): String? {
+        val cut = SideRequestCut()
+        val work = sideScope.async {
+            try {
+                val conn = TorRouting.openFollowingRedirects(URL(url), hops = cut) {
                     requestMethod = "GET"
-                    connectTimeout = SIDE_REQUEST_TIMEOUT_MS.toInt()
-                    readTimeout = SIDE_REQUEST_TIMEOUT_MS.toInt()
+                    connectTimeout = timeoutMs.toInt()
+                    readTimeout = timeoutMs.toInt()
                 }
+                cut.reading(conn)
                 try {
                     val code = conn.responseCode
                     val stream = if (code >= 400) conn.errorStream else conn.inputStream
@@ -220,14 +238,79 @@ class GatewayProbe {
                 } finally {
                     runCatching { conn.disconnect() }
                 }
+            } catch (_: Exception) {
+                null
             }
         }
-    } catch (_: CancellationException) {
-        // The side request's own cap: just no answer. The probe's own
-        // cancellation is checked by the caller right after.
-        null
-    } catch (_: Exception) {
-        null
+        return try {
+            withTimeoutOrNull(timeoutMs) { work.await() }
+        } catch (_: CancellationException) {
+            // The probe itself was cancelled: no answer, and the caller
+            // checks its own cancellation right after.
+            null
+        } finally {
+            if (!work.isCompleted) {
+                Log.i(TAG, "side request cut at ${timeoutMs}ms: $url")
+                cut.abort()
+                work.cancel()
+            }
+        }
+    }
+
+    /**
+     * Ends a [sideRequest] from outside its blocking worker: [abort]
+     * disconnects whichever connection the worker is on, on a thread of
+     * its own (a `disconnect()` can block as long as the read it ends),
+     * and keeps doing so until the worker moves on, since a disconnect
+     * landing before a hop's `connect()` is a no-op. A hop started after
+     * the abort is refused outright.
+     */
+    private class SideRequestCut : TorRouting.HopWatcher {
+        @Volatile private var current: HttpURLConnection? = null
+        @Volatile private var aborted = false
+
+        override fun connecting(conn: HttpURLConnection, routes: Int, fallback: Boolean, tunnel: Boolean) {
+            if (aborted) throw SocketTimeoutException("side request cut")
+            current = conn
+        }
+
+        override fun connected(conn: HttpURLConnection) {
+            current = conn
+            if (aborted) disconnectAside(conn)
+        }
+
+        override fun answered(conn: HttpURLConnection) {
+            current = conn
+            if (aborted) disconnectAside(conn)
+        }
+
+        /** The worker reads the body of [conn]. */
+        fun reading(conn: HttpURLConnection) {
+            current = conn
+            if (aborted) disconnectAside(conn)
+        }
+
+        fun abort() {
+            aborted = true
+            current?.let { disconnectAside(it) }
+            // A disconnect before `connect()` is a no-op: cut again a
+            // few times while the worker may still be getting there.
+            sideScope.launch {
+                repeat(RECUT_TIMES) {
+                    delay(RECUT_MS)
+                    current?.let { disconnectAside(it) }
+                }
+            }
+        }
+
+        private fun disconnectAside(conn: HttpURLConnection) {
+            sideScope.launch { runCatching { conn.disconnect() } }
+        }
+
+        private companion object {
+            const val RECUT_MS = 250L
+            const val RECUT_TIMES = 20
+        }
     }
 
     private fun readCapped(input: InputStream, maxBytes: Int): String {
@@ -311,8 +394,14 @@ class GatewayProbe {
          */
         const val WARM_404_MS: Long = 1_000
 
-        /** Cap on the follow-up requests (a 404's body, the peer count). */
+        /**
+         * Cap on each follow-up request (a 404's body, the peer count),
+         * from its start to its last byte, redirects included ([sideRequest]).
+         */
         const val SIDE_REQUEST_TIMEOUT_MS: Long = 5_000
+
+        /** Where [sideRequest]'s blocking work and its cuts run, apart from the probe. */
+        private val sideScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         /** The message Bee and ant give a manifest lookup that misses. */
         private const val MISSING_PATH_MESSAGE = "path address not found"
