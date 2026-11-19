@@ -793,6 +793,22 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aFailedDepositWithNoTransferOutSaysWhyWithoutTheRpcToo() {
+        // No transfer let out: the plain failure, with the RPC taken out as well.
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.chequebookHex = chequebook
+        ops.walletPlur = milliBzz.toString()
+        ops.onDeposit = {
+            SwarmNode.GatewayAnswer(502, """{"code":502,"message":"chain tx: deposit transfer: https://rpc.example/key123 refused"}""")
+        }
+        val e = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+        assertFalse(e is DepositMaybeSentException)
+        assertEquals("chain tx: deposit transfer: the Gnosis RPC refused", e.message)
+        node.dispose()
+    }
+
+    @Test
     fun aDepositNeedsARunningLightNode() {
         val ops = FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() }
         val node = SwarmNode(config, ops)
@@ -1052,6 +1068,13 @@ class SwarmNodeTest {
         val t = assertThrows(RuntimeException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }
         assertFalse(t is DepositMaybeSentException)
         assertEquals("chain transaction timed out", t.message)
+        // ant's own reason, not the guard's, when ant didn't answer 502, even if
+        // the guard refused something meanwhile.
+        ops.onTopUp = {
+            assertFalse(SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap.add(java.math.BigInteger.ONE)))))
+            SwarmNode.GatewayAnswer(400, """{"code":400,"message":"not enough xDAI: send 0.02 xDAI more"}""")
+        }
+        assertEquals("not enough xDAI: send 0.02 xDAI more", assertThrows(RuntimeException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }.message)
         ops.onDeposit = { SwarmNode.GatewayAnswer(201, "{\"transactionHash\":\"0xabc\"}") }
         assertEquals("{\"transactionHash\":\"0xabc\"}", node.depositChequebook(chequebook, milliBzz))
         node.dispose()
@@ -1142,6 +1165,16 @@ class SwarmNodeTest {
             var wall = 1_790_856_000_000L
             val node = lightNode(ops, dir.path, wallClock = { wall })
             fun spend(n: SwarmNode) = org.json.JSONObject(n.creditSpend()).getString("dayPlur")
+            assertEquals("0", spend(node))
+            // Gone for a few unchanged readings in one hour (none saved): only
+            // this process's last reading knows bb wasn't listed.
+            ops.settlementsBody = body("aa" to 100)
+            repeat(3) {
+                wall += CreditSpend.SAMPLE_MS
+                spend(node)
+            }
+            wall += CreditSpend.SAMPLE_MS
+            ops.settlementsBody = body("aa" to 100, "bb" to 110)
             assertEquals("0", spend(node))
             ops.settlementsBody = body("aa" to 100)
             repeat(3 * 24 * 12) {

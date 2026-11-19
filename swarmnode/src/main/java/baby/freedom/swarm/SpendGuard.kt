@@ -271,7 +271,8 @@ class SpendPermit(val plan: SpendPlan) {
      */
     @Synchronized
     fun admit(requestJson: String): Boolean {
-        val ok = !closed && lets(requestJson)
+        if (closed) return false
+        val ok = lets(requestJson)
         if (!ok) refusedAny = true
         return ok
     }
@@ -300,7 +301,7 @@ class SpendPermit(val plan: SpendPlan) {
     @Synchronized
     fun used(slot: Slot): Boolean = slot in used
 
-    /** Whether this permit refused a broadcast ant asked for. */
+    /** Whether this permit refused a broadcast while it was open (not counting stragglers after [close]). */
     @Synchronized
     fun refusedAny(): Boolean = refusedAny
 

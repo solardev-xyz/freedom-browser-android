@@ -943,7 +943,9 @@ class SwarmNode internal constructor(
         if (!transferOut && answer?.code !in 200..299) {
             throw RuntimeException(
                 when {
-                    permit.refusedAny() -> SwarmStrings.get(R.string.swarmnode_deposit_refused)
+                    // ant reports the guard's refusal as an RPC error, a 502;
+                    // any other answer carries ant's own reason.
+                    answer?.code == 502 && permit.refusedAny() -> SwarmStrings.get(R.string.swarmnode_deposit_refused)
                     answer == null -> SwarmStrings.get(R.string.swarmnode_deposit_not_sent, SwarmStrings.get(R.string.swarmnode_gateway_no_answer))
                     else -> message ?: SwarmStrings.get(R.string.swarmnode_deposit_failed_http, answer.code)
                 },

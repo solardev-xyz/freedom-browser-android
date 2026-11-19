@@ -160,7 +160,7 @@ class ChequebookTest {
         assertTrue(creditSpendNote(week), creditSpendNote(week).contains("2026"))
         // What a reading can't date is named (#566 R1-F1, R1-F3).
         assertTrue(creditSpendNote(week), creditSpendNote(week).contains("A peer's first payment usually isn't counted"))
-        assertTrue(creditSpendNote(week), creditSpendNote(week).contains("disconnected or the node was off"))
+        assertTrue(creditSpendNote(week), creditSpendNote(week).contains("the few minutes before it disconnected, nor anything paid while the node was off"))
         // No history for this chequebook yet (or no chequebook).
         val none = creditSpendFrom(JSONObject("""{"chequebook":"$chequebook"}"""))!!
         assertEquals("Not counted yet", creditSpendText(none) { it.dayPlur })
