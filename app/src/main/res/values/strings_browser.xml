@@ -220,6 +220,13 @@
     <string name="browser_tabs_private_empty_title">No private tabs</string>
     <string name="browser_tabs_private_empty_hint">Pages you open in private tabs aren\'t kept in your history, and their cookies and site data are deleted when you close your last private tab.</string>
     <string name="browser_tabs_reopen">Reopen</string>
+    <!-- The switcher's ⋮ menu item (#546): opens the list of recently closed tabs, any of which can be reopened. -->
+    <string name="browser_tabs_recently_closed">Recently closed</string>
+    <!-- A row of the Recently closed list for one close that took several tabs (Close all tabs, Close other tabs); tapping it reopens them all. -->
+    <plurals name="browser_tabs_recently_closed_group">
+        <item quantity="one">%d tab</item>
+        <item quantity="other">%d tabs</item>
+    </plurals>
     <string name="browser_tabs_close_switcher">Close tab switcher</string>
     <!-- TalkBack's name for the switcher's ⋮ menu button. -->
     <string name="browser_tabs_menu">More tab options</string>

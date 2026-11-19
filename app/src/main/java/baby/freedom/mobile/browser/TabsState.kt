@@ -87,7 +87,9 @@ class TabsState(
      *
      * [index] is where it stood in the list when it was closed, not
      * counting tabs the same close took that don't come back (private
-     * or empty ones), so it lands between the same neighbours.
+     * or empty ones), so it lands between the same neighbours — also
+     * when entries are reopened out of order from the *Recently closed*
+     * list ([takeFromStack]).
      * [webViewState] is the closed WebView's own
      * [android.webkit.WebView.saveState] bundle (null if the host
      * couldn't take one); the host hands it to the replacement
@@ -101,7 +103,7 @@ class TabsState(
      * isn't fetched again on reopen.
      */
     class ClosedTab(
-        val index: Int,
+        index: Int,
         val url: String,
         val title: String,
         val addressBarText: String,
@@ -113,7 +115,15 @@ class TabsState(
         // Closed before its WebView was built (#460): what it was to be
         // built from, which it comes back with as it was.
         val pendingRestore: BrowserState.PendingRestore? = null,
-    )
+    ) {
+        /**
+         * Rewritten when an entry closed before this one is reopened
+         * first ([takeFromStack]), so this one still lands between the
+         * same neighbours.
+         */
+        var index: Int = index
+            internal set
+    }
 
     /**
      * One entry of the reopen stack: the tabs one close took away — a
@@ -202,14 +212,24 @@ class TabsState(
     }
 
     /**
-     * [group] is still on the reopen stack: not reopened (by its notice
-     * or Reopen) or forgotten ([forgetClosedTabs]) yet. Observable.
+     * [group] is still on the reopen stack: not reopened (by its notice,
+     * Reopen or the *Recently closed* list) or forgotten
+     * ([forgetClosedTabs]) yet. Observable.
      */
     fun isOnReopenStack(group: ClosedGroup): Boolean = closedTabs.any { it === group }
 
     /** There is a closed tab [reopenClosedTab] can bring back. */
     val canReopenClosedTab: Boolean
         get() = closedTabs.isNotEmpty()
+
+    /**
+     * The reopen stack, most recently closed first: the switcher's
+     * *Recently closed* list (#546), one entry per close — a bulk close
+     * is one entry, as Reopen brings it back whole. Private tabs are
+     * never on it (#86). Observable.
+     */
+    val recentlyClosed: List<ClosedGroup>
+        get() = closedTabs.asReversed().toList()
 
     /**
      * Hook installed by the [BrowserWebViewHost] so the find bar can drive
@@ -778,8 +798,17 @@ class TabsState(
      * now if it's one of them, else the last one back), or null if
      * there was nothing to reopen.
      */
-    fun reopenClosedTab(): BrowserState? {
-        val group = closedTabs.removeLastOrNull() ?: return null
+    fun reopenClosedTab(): BrowserState? = closedTabs.lastOrNull()?.let(::reopenClosedTab)
+
+    /**
+     * Reopen [group] from the *Recently closed* list (#546), as Reopen
+     * would if it were the most recent: a single tab comes back active,
+     * a bulk close as [reopenClosedTab] has it. Null, with nothing
+     * changed, if [group] is no longer on the stack (reopened or
+     * forgotten meanwhile) — not some other entry in its place.
+     */
+    fun reopenClosedTab(group: ClosedGroup): BrowserState? {
+        if (!takeFromStack(group)) return null
         return reopen(group)
     }
 
@@ -792,8 +821,74 @@ class TabsState(
      * closed, otherwise the tab on screen now stays on screen.
      */
     fun reopenClosed(group: ClosedGroup): Boolean {
-        if (!closedTabs.remove(group)) return false
+        if (!takeFromStack(group)) return false
         reopen(group, undo = true)
+        return true
+    }
+
+    /**
+     * Take [group] off the reopen stack for [reopen], or false if it
+     * isn't on it.
+     *
+     * Each entry's [ClosedTab.index]es are places in the list as it was
+     * when that entry closed. Reopening the newest entry first (Reopen,
+     * Ctrl+Shift+T) undoes the closes in turn, so those places hold.
+     * The *Recently closed* list (#546) can bring back an older entry
+     * while newer ones are still closed: its places then still count
+     * tabs those later closes took, and theirs don't count its tabs.
+     * So both are rewritten as if the later closes were undone, [group]
+     * put back, and the later closes done again — tabs a, b, c, d with
+     * any of them closed one after another come back a, b, c, d
+     * whichever is reopened first, and the rest by Reopen. The blank
+     * tab a close left in place of the last tabs counts as [reopen]
+     * counts it: a later close's is gone while that close is undone and
+     * back once it is done again; [group]'s own stays until [group] is
+     * put back, as it does when the later closes are reopened first.
+     */
+    private fun takeFromStack(group: ClosedGroup): Boolean {
+        val at = closedTabs.indexOfFirst { it === group }
+        if (at < 0) return false
+        val later = closedTabs.subList(at + 1, closedTabs.size).toList()
+        if (later.isNotEmpty()) {
+            val list: MutableList<Any> = tabs.toMutableList()
+            // Undo the later closes, newest first, as reopening them
+            // would — which drops each one's own untouched placeholder
+            // before putting its tabs back. Where it stood (after which
+            // element, null: first) is kept so closing that entry again
+            // puts it back for the closes after it to count.
+            val placeholders = HashMap<ClosedGroup, Pair<BrowserState, Any?>>()
+            for (entry in later.asReversed()) {
+                val p = entry.placeholderId?.let { id ->
+                    list.indexOfFirst { it is BrowserState && it.id == id && it.isUntouched() }
+                } ?: -1
+                if (p >= 0) {
+                    placeholders[entry] = (list[p] as BrowserState) to list.getOrNull(p - 1)
+                    list.removeAt(p)
+                }
+                for (closed in entry.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
+            }
+            // Put [group] back where it closed from, as [reopen] does:
+            // its own untouched placeholder goes first. Only now — the
+            // later closes were counted with it still open, as undoing
+            // them newest first leaves it until [group]'s turn.
+            group.placeholderId?.let { id ->
+                list.removeAll { it is BrowserState && it.id == id && it.isUntouched() }
+            }
+            for (closed in group.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
+            // Close the later ones again, oldest first. Each tab's place
+            // is its place in the list as it stands at its own close:
+            // the tabs of entries closed after it are still open then,
+            // and reopening newest first puts them back before it.
+            for (entry in later) {
+                entry.tabs.forEach { closed -> closed.index = list.indexOf(closed) }
+                list.removeAll(entry.tabs.toSet())
+                placeholders[entry]?.let { (placeholder, after) ->
+                    list.add(if (after == null) 0 else list.indexOf(after) + 1, placeholder)
+                }
+            }
+            group.tabs.forEach { closed -> closed.index = list.indexOf(closed) }
+        }
+        closedTabs.removeAt(at)
         return true
     }
 
