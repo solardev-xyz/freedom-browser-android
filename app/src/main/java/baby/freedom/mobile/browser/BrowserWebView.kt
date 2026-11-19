@@ -1720,6 +1720,12 @@ fun BrowserWebViewHost(
                 // (and keep reconnecting) for as long as the process is
                 // cached, with no page to deliver to.
                 for (tab in tabs.tabs) SwarmProviders.onDocumentStarted(tab, url = null)
+                // Its Radicle reads too (#533): queued and running ones
+                // would otherwise hold their per-tab places and `:node`'s
+                // slots until their own wait or deadline ran out, and
+                // their prompts stay up for a page that's gone. Tab ids
+                // aren't reused within a process, so closing is final.
+                for (tab in tabs.tabs) RadicleProviders.onTabClosed(tab.id)
                 // The tabs go too, private ones included (#316): the
                 // process can outlive them (the :node service keeps it),
                 // and a private tab still counted would keep emptying
