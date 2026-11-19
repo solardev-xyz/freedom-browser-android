@@ -31,7 +31,7 @@
     <div class="c container">
       <h1 id="title"></h1>
       <p id="description"></p>
-      <p id="auto-retry" role="status" hidden></p>
+      <p id="auto-retry" hidden></p>
       <div class="b">
         <button id="retry-btn" class="btn p"></button>
         <button id="continue-btn" class="btn w" hidden></button>
@@ -216,7 +216,12 @@
               title: fmt('page_swarm_not_found_title'),
               description,
               detail,
-              recoverable: true,
+              // Only a probe that ran out of time retries on its own. A
+              // page without a reason is a load that failed after the
+              // probe let it through (an IPFS path its root doesn't
+              // have, say): retrying it every 30 s would never end,
+              // since such a page never continues a streak.
+              recoverable: swarmReason === 'not_found',
             };
           }
         }
@@ -228,14 +233,17 @@
       // waits stay short; the count lives in sessionStorage because each
       // retry lands on a new copy of this page, and the app says
       // (`streak=1`) whether this page continues that count. Try Again
-      // starts it over. The countdown only runs while the page is
+      // starts it over. Unlike desktop, a page without a reason doesn't
+      // retry on its own (see describeSwarmFailure). The countdown only runs while the page is
       // visible: WebView's timers keep running in a tab in the
       // background, or with the app in the background, and a retry
       // there would be a 5-minute probe nobody is waiting for.
       const AUTO_RETRY_DELAYS_S = [30, 60, 120, 300, 300, 300];
       // A count older than this belongs to an earlier visit.
       const AUTO_RETRY_STREAK_MS = 30 * 60000;
-      const autoRetryKey = 'freedom:auto-retry:' + (retryUrl || '');
+      // One key for every address: `streak=1` already says the previous
+      // page retried this same one, and no address is left in storage.
+      const autoRetryKey = 'freedom:auto-retry';
       const autoRetryEl = document.getElementById('auto-retry');
       const autoRetryStopBtn = document.getElementById('auto-retry-stop');
       // null: none; else { state: 'counting' | 'retrying' | 'stopped' |
