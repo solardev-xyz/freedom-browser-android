@@ -53,9 +53,43 @@ class TabsRecentlyClosedTest {
         assertEquals(listOf(listOf("d"), listOf("b")), tabs.listed)
         assertEquals("d", tabs.reopenClosedTab()?.title)
         assertEquals("b", tabs.reopenClosedTab()?.title)
-        // Each went back to the place it closed from (the second tab,
-        // every time), among the tabs open now.
-        assertEquals(listOf("a", "b", "d", "c"), tabs.titles)
+        // Each went back between the neighbours it closed from.
+        assertEquals(listOf("a", "b", "c", "d"), tabs.titles)
+    }
+
+    @Test
+    fun `tabs reopened from the list in any order come back in their old order`() {
+        // b then c closed (both from the second place), and c then b
+        // (from the third place, then the second), each reopened in
+        // either order, as well as a bulk close between them.
+        for (closeCFirst in listOf(false, true)) for (reopenOlderFirst in listOf(false, true)) {
+            val tabs = fourTabs()
+            if (closeCFirst) { tabs.closeTab(2); tabs.closeTab(1) } else { tabs.closeTab(1); tabs.closeTab(1) }
+            assertEquals(listOf("a", "d"), tabs.titles)
+            val order = if (reopenOlderFirst) tabs.recentlyClosed.asReversed() else tabs.recentlyClosed
+            for (entry in order) tabs.reopenClosedTab(entry)
+            assertEquals("closeCFirst=$closeCFirst reopenOlderFirst=$reopenOlderFirst", listOf("a", "b", "c", "d"), tabs.titles)
+        }
+        val tabs = fourTabs()
+        tabs.closeTab(1) // b
+        tabs.switchTo(1) // c
+        tabs.closeOtherTabs(tabs.active) // a and d
+        assertEquals(listOf("c"), tabs.titles)
+        tabs.reopenClosedTab(tabs.recentlyClosed[1]) // b, before the bulk close
+        assertEquals(listOf("b", "c"), tabs.titles)
+        tabs.reopenClosedTab()
+        assertEquals(listOf("a", "b", "c", "d"), tabs.titles)
+    }
+
+    @Test
+    fun `an undo of an older close lands where it was too`() {
+        val tabs = fourTabs()
+        val b = tabs.closeTab(1, offerUndo = true).undo!!
+        tabs.closeTab(1) // c, by Ctrl+W
+        assertTrue(tabs.reopenClosed(b))
+        assertEquals(listOf("a", "b", "d"), tabs.titles)
+        tabs.reopenClosedTab()
+        assertEquals(listOf("a", "b", "c", "d"), tabs.titles)
     }
 
     @Test

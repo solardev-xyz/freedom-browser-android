@@ -3150,6 +3150,17 @@ fun BrowserScreen(
                     tabsClosedNotice?.cancel()
                     tabsClosedNotice = scope.launch {
                         val undo = closed.undo
+                        // Brought back or dropped some other way meanwhile
+                        // (Reopen, the *Recently closed* list #546, Delete
+                        // browsing data): its Undo would do nothing now, so
+                        // the notice goes with it.
+                        val notice = coroutineContext.job
+                        val gone = undo?.let { group ->
+                            launch {
+                                snapshotFlow { tabs.isOnReopenStack(group) }.first { !it }
+                                notice.cancel()
+                            }
+                        }
                         try {
                             val result = snackbarHostState.showSnackbar(
                                 message = if (closed.single) {
@@ -3162,6 +3173,7 @@ fun BrowserScreen(
                             )
                             if (result == SnackbarResult.ActionPerformed && undo != null) tabs.reopenClosed(undo)
                         } finally {
+                            gone?.cancel()
                             // Held on the reopen stack only while its Undo is up.
                             undo?.let(tabs::undoWithdrawn)
                         }

@@ -87,7 +87,9 @@ class TabsState(
      *
      * [index] is where it stood in the list when it was closed, not
      * counting tabs the same close took that don't come back (private
-     * or empty ones), so it lands between the same neighbours.
+     * or empty ones), so it lands between the same neighbours — also
+     * when entries are reopened out of order from the *Recently closed*
+     * list ([takeFromStack]).
      * [webViewState] is the closed WebView's own
      * [android.webkit.WebView.saveState] bundle (null if the host
      * couldn't take one); the host hands it to the replacement
@@ -101,7 +103,7 @@ class TabsState(
      * isn't fetched again on reopen.
      */
     class ClosedTab(
-        val index: Int,
+        index: Int,
         val url: String,
         val title: String,
         val addressBarText: String,
@@ -113,7 +115,15 @@ class TabsState(
         // Closed before its WebView was built (#460): what it was to be
         // built from, which it comes back with as it was.
         val pendingRestore: BrowserState.PendingRestore? = null,
-    )
+    ) {
+        /**
+         * Rewritten when an entry closed before this one is reopened
+         * first ([takeFromStack]), so this one still lands between the
+         * same neighbours.
+         */
+        var index: Int = index
+            internal set
+    }
 
     /**
      * One entry of the reopen stack: the tabs one close took away — a
@@ -798,7 +808,7 @@ class TabsState(
      * forgotten meanwhile) — not some other entry in its place.
      */
     fun reopenClosedTab(group: ClosedGroup): BrowserState? {
-        if (!closedTabs.remove(group)) return null
+        if (!takeFromStack(group)) return null
         return reopen(group)
     }
 
@@ -811,8 +821,55 @@ class TabsState(
      * closed, otherwise the tab on screen now stays on screen.
      */
     fun reopenClosed(group: ClosedGroup): Boolean {
-        if (!closedTabs.remove(group)) return false
+        if (!takeFromStack(group)) return false
         reopen(group, undo = true)
+        return true
+    }
+
+    /**
+     * Take [group] off the reopen stack for [reopen], or false if it
+     * isn't on it.
+     *
+     * Each entry's [ClosedTab.index]es are places in the list as it was
+     * when that entry closed. Reopening the newest entry first (Reopen,
+     * Ctrl+Shift+T) undoes the closes in turn, so those places hold.
+     * The *Recently closed* list (#546) can bring back an older entry
+     * while newer ones are still closed: its places then still count
+     * tabs those later closes took, and theirs don't count its tabs.
+     * So both are rewritten as if the later closes were undone, [group]
+     * put back, and the later closes done again — tabs a, b, c, d with
+     * b then c closed come back a, b, c, d whichever is reopened first.
+     */
+    private fun takeFromStack(group: ClosedGroup): Boolean {
+        val at = closedTabs.indexOfFirst { it === group }
+        if (at < 0) return false
+        val later = closedTabs.subList(at + 1, closedTabs.size).toList()
+        if (later.isNotEmpty()) {
+            // The open tabs as [reopen] will see them: without this
+            // entry's untouched placeholder, which it drops.
+            val placeholderId = group.placeholderId?.let { id ->
+                tabs.firstOrNull { it.id == id && it.isUntouched() }?.id
+            }
+            val list: MutableList<Any> = tabs.filter { it.id != placeholderId }.toMutableList()
+            // Undo the later closes, newest first, as reopening them would.
+            for (entry in later.asReversed()) {
+                for (closed in entry.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
+            }
+            // Put [group] back where it closed from.
+            for (closed in group.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
+            // Close the later ones again, oldest first: each tab's place
+            // counts the list without the entries closed after its own.
+            for ((n, entry) in later.withIndex()) {
+                val after = later.subList(n + 1, later.size).flatMapTo(HashSet()) { it.tabs }
+                val places = entry.tabs.map { closed ->
+                    list.subList(0, list.indexOf(closed)).count { it !in after }
+                }
+                entry.tabs.forEachIndexed { i, closed -> closed.index = places[i] }
+                list.removeAll(entry.tabs.toSet())
+            }
+            group.tabs.forEach { closed -> closed.index = list.indexOf(closed) }
+        }
+        closedTabs.removeAt(at)
         return true
     }
 
