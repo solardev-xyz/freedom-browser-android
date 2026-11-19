@@ -11,7 +11,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import android.os.SystemClock
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -24,6 +28,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import kotlinx.coroutines.delay
 
 /**
  * The "Open without gateway" pill (#537), desktop's address-bar pill
@@ -35,15 +40,32 @@ import baby.freedom.mobile.R
  *
  * The destination is spelled out for TalkBack; on screen the pill keeps
  * to its label, since a `bzz://` reference is 64 hex characters.
+ *
+ * The page decides when the pill appears, and its tap is the user's own
+ * submit (which lifts the tab's declined-download and prompt blocks), so
+ * a press that began before it had been on screen, left alone, for
+ * [PromptTapGuard.PROTECTION_MS] — or one through another app's window —
+ * is dropped ([protectedPress]), re-armed for each new offer
+ * ([offerKey]). Unlike [rememberArmedTapGuard] it doesn't hide other
+ * apps' overlays: it is up for as long as a gateway page is.
  */
 @Composable
 internal fun GatewayOfferPill(
     protocol: String,
     destination: String,
+    /** The offer the pill is for: a new one re-arms the tap guard. */
+    offerKey: Any?,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val described = stringResource(R.string.gateway_offer_open_described, destination)
+    val tap = remember(offerKey) { ArmedTapGuard(PromptTapGuard(SystemClock::uptimeMillis)) }
+    LaunchedEffect(tap) {
+        withFrameNanos { }
+        tap.guard.onShown()
+        while (!tap.guard.accepts()) delay(tap.guard.remainingMs().coerceAtLeast(1))
+        tap.armed = true
+    }
     Surface(
         onClick = onOpen,
         shape = RoundedCornerShape(50),
@@ -51,6 +73,8 @@ internal fun GatewayOfferPill(
         contentColor = MaterialTheme.colorScheme.onSurface,
         shadowElevation = 2.dp,
         modifier = modifier
+            .restartsTapGuard(tap.guard)
+            .protectedPress(tap)
             .heightIn(min = 48.dp)
             .testTag("gateway-offer-pill")
             .semantics {

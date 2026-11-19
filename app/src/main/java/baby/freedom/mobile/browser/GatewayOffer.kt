@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import baby.freedom.mobile.ens.Base32
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
+import kotlinx.coroutines.Job
 
 /**
  * "Open without gateway" (#537), desktop's `src/main/gateway-offer.js`
@@ -259,6 +260,13 @@ internal class GatewayOfferTab {
 
     private var seq = 0
 
+    /** The lookup the screen is running for this tab, cancelled once it answers for nothing. */
+    var running: Job? = null
+        set(value) {
+            field?.cancel()
+            field = value
+        }
+
     /**
      * The gateway URL "always" last sent this tab away from, which it may
      * come back to once — a Back the page took itself (`history.back()`,
@@ -279,6 +287,7 @@ internal class GatewayOfferTab {
      */
     fun committed(url: String?, traversal: Boolean): Lookup? {
         seq += 1
+        running = null
         offer = null
         pending = null
         val at = url.orEmpty()
@@ -330,6 +339,7 @@ internal class GatewayOfferTab {
      */
     fun loadStarted() {
         seq += 1
+        running = null
         pending = null
     }
 

@@ -316,4 +316,29 @@ class GatewayOfferTest {
         tab.loadStarted()
         assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
     }
+
+    @Test
+    fun `a link the page follows while always looks the name up is not overridden`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.loadStarted() // `shouldOverrideUrlLoading`: the user tapped a link
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+    }
+
+    @Test
+    fun `a superseded lookup is cancelled`() {
+        val tab = GatewayOfferTab()
+        val first = kotlinx.coroutines.Job()
+        tab.running = first
+        tab.committed("https://other.eth.limo/", traversal = false)
+        assertTrue(first.isCancelled)
+        val second = kotlinx.coroutines.Job()
+        tab.running = second
+        tab.loadStarted()
+        assertTrue(second.isCancelled)
+        val third = kotlinx.coroutines.Job()
+        tab.running = third
+        tab.running = kotlinx.coroutines.Job()
+        assertTrue(third.isCancelled)
+    }
 }

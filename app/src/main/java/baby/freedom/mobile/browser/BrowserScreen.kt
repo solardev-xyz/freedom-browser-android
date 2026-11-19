@@ -2062,7 +2062,8 @@ fun BrowserScreen(
             .collect { pending ->
                 for ((tab, lookup) in pending) {
                     if (!tab.gatewayOffer.take(lookup)) continue
-                    scope.launch {
+                    // One per tab: the next commit or load cancels it.
+                    tab.gatewayOffer.running = scope.launch {
                         val shape = lookup.shape
                         val direct = GatewayOffer.offerWithoutLookup(shape)
                         val result = if (direct != null || shape.ensName == null) {
@@ -3005,6 +3006,7 @@ fun BrowserScreen(
                 GatewayOfferPill(
                     protocol = protocol,
                     destination = destination,
+                    offerKey = gatewayOffer,
                     onOpen = {
                         // The page's current address, read at the tap.
                         state.gatewayOffer.destination()?.let { submit(state, it) }

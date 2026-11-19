@@ -3816,6 +3816,9 @@ private fun buildRefreshableWebView(
                 // Scriptlets for the page it's heading to (#318), before a
                 // service worker can answer it unseen by the interceptor.
                 if (request.isForMainFrame) scriptlets?.ensure(target)
+                // A link the page follows: a gateway lookup still out for
+                // it answers for nothing now (#537).
+                if (request.isForMainFrame && !request.isRedirect) state.gatewayOffer.loadStarted()
                 // Before the navigation starts, in any frame, redirect hops
                 // included (#524 R1-F1): WebAuthn off for a document on
                 // this device ([PasskeyGate]).
