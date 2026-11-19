@@ -59,9 +59,9 @@ import org.json.JSONObject
  * read not checking out doesn't count: it says nothing about the others.
  *
  * Only the wallet's and the Swarm node's own reads count directly. A
- * site's read ([RoutingContext.site]: `window.ethereum`, `web3://`,
- * an x402 offer's token contract) is one the site chose — a call that takes the prover long
- * to prove, or never proves, under a 2 s wait — so its miss or failure
+ * site's read ([RoutingContext.site]: `window.ethereum`, `web3://`) is
+ * one the site chose — a contract's code or storage that takes the prover
+ * long to prove, or never proves, under a 2 s wait — so its miss or failure
  * proves nothing about the prover, and on its own would let any site
  * take the tier away from the wallet. It only asks for a **canary**: a
  * proven `latest` block, which no page shapes, run in the background
@@ -71,7 +71,7 @@ import org.json.JSONObject
  *
  * Nor may pages take the tier's slots: a page's read the router stopped
  * waiting for keeps its slot in the background (up to [backgroundMs]),
- * so a site looping slow calls would otherwise hold all [maxInFlight]
+ * so a site looping slow reads would otherwise hold all [maxInFlight]
  * and every wallet read would find Colibri busy. Sites together get at
  * most [maxPageInFlight] of them (as [baby.freedom.mobile.node.RouterReadSlots]
  * does for Myotis); a page read past that share moves straight on to the
