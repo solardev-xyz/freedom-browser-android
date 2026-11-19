@@ -31,9 +31,12 @@ import org.json.JSONObject
  * `finalized`, a numbered or hashed block's state, or any other block
  * goes to the next tier, as does a `null` receipt, transaction or block,
  * which says only that the prover didn't find it, never a proven "no",
- * and a receipt or transaction whose hash isn't the one asked about (the
- * prover's index of where a transaction is isn't checked: a lying one
- * could prove another transaction's receipt). `eth_blockNumber` is
+ * and a receipt or transaction whose hash isn't the one asked about. The
+ * pinned core (v3.0.0) already ties those to the hash asked for: it
+ * checks the proven transaction hashes to it (`c4_tx_verify_tx_hash`)
+ * and that the receipt names that transaction (`c4_tx_verify_receipt_data`),
+ * so this re-check is defence in depth, as on desktop (#1060), against a
+ * core that ever stops doing so, not a gap that's open. `eth_blockNumber` is
  * answered from a proven `latest` block, no older than
  * [EnsColibri.MAX_LATEST_AGE_SECONDS]. At most [maxInFlight] reads
  * at once: past that the router moves straight on rather than queueing
@@ -251,6 +254,9 @@ internal class ColibriChainSource(
         if (status.optString("status") == "revert") throw Unanswered("the verifier reported a revert for $method")
         val raw = status.opt("result")
         if (raw == null || raw == JSONObject.NULL) throw Unanswered("no proven answer for $method")
+        // Defence in depth: the core already ties a by-hash proof to the
+        // hash asked for (`c4_tx_verify_tx_hash`), so this only fails if a
+        // later core stops doing so.
         BY_HASH[method]?.let { field ->
             val answered = (raw as? JSONObject)?.opt(field) as? String
             val requested = params.opt(0) as? String

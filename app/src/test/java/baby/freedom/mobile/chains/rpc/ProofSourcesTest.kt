@@ -250,8 +250,9 @@ class ProofSourcesTest {
                 JSONObject().put("status", "0x1").put("blockNumber", "0x10").apply { if (of != null) put("transactionHash", of) },
             ),
         )
-        // The prover's own index says where a transaction is: a lying one
-        // could prove another transaction's (successful) receipt.
+        // The pinned core already refuses a proof of another transaction
+        // (`c4_tx_verify_tx_hash`), so this answer is staged: it checks the
+        // defence-in-depth re-check, should a later core ever pass one.
         for (v in listOf(receipt(other), receipt(null))) {
             try {
                 colibri(v).request(1, "eth_getTransactionReceipt", JSONArray().put(hash), emptyList())
