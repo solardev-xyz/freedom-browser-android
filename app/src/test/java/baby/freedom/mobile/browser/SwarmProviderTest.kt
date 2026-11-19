@@ -7,7 +7,9 @@ import baby.freedom.mobile.wallet.VaultLockedException
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
@@ -98,11 +100,20 @@ class SwarmProviderTest {
         val chunks = HashMap<String, ByteArray>()
         /** Whole blobs by root reference, as `GET /bytes` joins them. */
         val blobs = HashMap<String, ByteArray>()
+        /** `GET /bytes` answers that stand in for the join failing, by root reference. */
+        val blobFailures = HashMap<String, SwarmProvider.Http.Answer>()
+        /** `GET /bytes` joins whose body breaks off after the 200, as Android's stack throws it, by root reference. */
+        val blobsCutShort = HashSet<String>()
+        /** The node stops as it breaks off a [blobsCutShort] join (switched off mid-body). */
+        var stopOnCut = false
         /** Each capped request's path and cap. */
         val caps: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
+        /** Each capped request's path and timeout. */
+        val capTimeouts: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
 
         override fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int, maxBytes: Int): SwarmProvider.Http.Answer {
             caps += path to maxBytes
+            capTimeouts += path to timeoutMs
             return super.request(method, path, headers, body, timeoutMs, maxBytes)
         }
         var beeMode = "light"
@@ -164,6 +175,12 @@ class SwarmProviderTest {
                     chunks[address.swarmHex()] = wire
                     json(JSONObject().put("reference", address.swarmHex()), 201)
                 }
+                method == "GET" && bare.startsWith("/bytes/") && bare.removePrefix("/bytes/") in blobsCutShort -> {
+                    if (stopOnCut) up = false
+                    throw SwarmProvider.Http.AnswerCutShort(java.net.ProtocolException("unexpected end of stream"))
+                }
+                method == "GET" && bare.startsWith("/bytes/") && blobFailures.containsKey(bare.removePrefix("/bytes/")) ->
+                    blobFailures.getValue(bare.removePrefix("/bytes/"))
                 method == "GET" && bare.startsWith("/bytes/") -> blobs[bare.removePrefix("/bytes/")]
                     ?.let { SwarmProvider.Http.Answer(200, emptyMap(), it) } ?: notFound()
                 method == "GET" && bare.startsWith("/chunks/") -> chunks[bare.removePrefix("/chunks/")]
@@ -635,6 +652,313 @@ class SwarmProviderTest {
         assertEquals(5000uL, SwarmProvider.dataSize(5000uL))
         assertEquals(5000uL, SwarmProvider.dataSize((0x81uL shl 56) or 5000uL))
         assertEquals((0x80uL shl 56) or 5000uL, SwarmProvider.dataSize((0x80uL shl 56) or 5000uL))
+    }
+
+    // -------------------------------------------------------------------
+    // Whole-blob reads (#538)
+    // -------------------------------------------------------------------
+
+    /**
+     * A blob of [data] whose root chunk has [span]: [data] itself when it
+     * fits one chunk, else a root standing in for a [data]-sized tree that
+     * the node joins from [FakeNode.blobs]. Its reference.
+     */
+    private fun plantBlob(data: ByteArray, span: ULong = data.size.toULong()): String {
+        val root = if (span <= 4096u) SwarmChunks.cac(data, span) else SwarmChunks.cac(data.copyOf(4096), span)
+        val ref = root.address.swarmHex()
+        node.chunks[ref] = root.data()
+        if (span > 4096u) node.blobs[ref] = data
+        return ref
+    }
+
+    private fun dataParams(reference: String) = JSONObject().put("reference", reference)
+
+    @Test
+    fun `readData needs no connection, reads a one-chunk blob from its root and a larger one by a join`() {
+        val small = plantBlob("hello swarm".toByteArray())
+        val read = okJson(call("swarm_readData", dataParams(small), origin = other))
+        assertEquals("hello swarm", String(Base64.getDecoder().decode(read.getString("data"))))
+        assertEquals("base64", read.getString("encoding"))
+        assertEquals("a blob in its root chunk is never joined", 0, joins())
+
+        val bigData = ByteArray(10_000) { (it * 7).toByte() }
+        val big = plantBlob(bigData)
+        val joined = okJson(call("swarm_readData", dataParams(big), origin = other))
+        assertArrayEquals(bigData, Base64.getDecoder().decode(joined.getString("data")))
+        assertEquals(1, joins())
+        assertEquals("the join is held to the blob's size", "/bytes/$big" to 10_000, node.caps.single())
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `a join cut short at its deadline still answers inside the 290 s budget`() {
+        val big = plantBlob(ByteArray(10_000) { 1 })
+        assertTrue(call("swarm_readData", dataParams(big), origin = other) is SwarmProvider.Reply.Ok)
+        val join = node.capTimeouts.single().second
+        // The join, then cutShort's 10 s `GET /node`, all inside the 290 s
+        // DATA_READ_DEADLINE_MS that keeps clear of the page's 300 s timer.
+        assertTrue("join gets $join ms", join + 10_000 <= 290_000)
+        assertTrue("but nearly all of what is left: $join ms", join > 270_000)
+    }
+
+    @Test
+    fun `readData is checked like readChunk`() {
+        val ref = plantBlob("x".toByteArray())
+        assertEquals("invalid_reference", err(call("swarm_readData", dataParams("0x" + ref))).reason)
+        // An encrypted reference (64 bytes) is not read for pages yet.
+        assertEquals("invalid_reference", err(call("swarm_readData", dataParams(ref + ref))).reason)
+        assertEquals("invalid_reference", err(call("swarm_readData", JSONObject())).reason)
+        assertEquals("unsupported_option", err(call("swarm_readData", dataParams(ref).put("options", JSONObject().put("x", 1)))).reason)
+        val missing = err(call("swarm_readData", dataParams("a".repeat(64))))
+        assertEquals(-32602, missing.code)
+        assertEquals("chunk_not_found", missing.reason)
+        node.chunks["b".repeat(64)] = node.chunks.getValue(ref)
+        assertEquals("chunk_type_mismatch", err(call("swarm_readData", dataParams("b".repeat(64)))).reason)
+        node.up = false
+        assertEquals("node-stopped", err(call("swarm_readData", dataParams(ref))).reason)
+    }
+
+    @Test
+    fun `a chunk missing under the root is chunk_not_found, and a join of the wrong size is refused`() {
+        val ref = plantBlob(ByteArray(8000) { 3 })
+        node.blobs.remove(ref)
+        assertEquals("chunk_not_found", err(call("swarm_readData", dataParams(ref))).reason)
+        // bee's own word for a chunk it can't find, as a 500.
+        node.blobs[ref] = ByteArray(8000)
+        node.blobFailures[ref] = SwarmProvider.Http.Answer(500, emptyMap(), JSONObject().put("message", "read chunk failed").toString().toByteArray())
+        assertEquals("chunk_not_found", err(call("swarm_readData", dataParams(ref))).reason)
+        node.blobFailures[ref] = SwarmProvider.Http.Answer(500, emptyMap(), JSONObject().put("message", "joiner broke").toString().toByteArray())
+        assertEquals(-32603, err(call("swarm_readData", dataParams(ref))).code)
+        node.blobFailures.clear()
+        node.blobs[ref] = ByteArray(8001)
+        val long = err(call("swarm_readData", dataParams(ref)))
+        assertEquals(-32603, long.code)
+        assertTrue(long.message, long.message.contains("more than 8000 bytes"))
+        node.blobs[ref] = ByteArray(7999)
+        val short = err(call("swarm_readData", dataParams(ref)))
+        assertTrue(short.message, short.message.contains("7999 bytes for a 8000-byte blob"))
+    }
+
+    @Test
+    fun `a join bee breaks off after its 200 is -32603, not a stopped node`() {
+        val ref = plantBlob(ByteArray(8000) { 3 })
+        node.blobsCutShort += ref
+        val e = err(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals(-32603, e.code)
+        assertTrue(e.message, e.message.contains("broke off"))
+        assertEquals(null, e.reason)
+        // The node is still there: the next read joins it whole.
+        node.blobsCutShort.clear()
+        ok(call("swarm_readData", dataParams(ref), origin = other))
+    }
+
+    @Test
+    fun `a join cut short by the node stopping part-way is node-stopped`() {
+        val ref = plantBlob(ByteArray(8000) { 4 })
+        node.blobsCutShort += ref
+        node.stopOnCut = true
+        val e = err(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals(4900, e.code)
+        assertEquals("node-stopped", e.reason)
+    }
+
+    @Test
+    fun `a root that isn't the requested chunk costs no bytes, as on desktop`() {
+        val cac = SwarmChunks.cac(ByteArray(4096) { 4 })
+        repeat(100) { i ->
+            val wrong = "%064x".format(i + 1)
+            node.chunks[wrong] = cac.data()
+            assertEquals("chunk_type_mismatch", err(call("swarm_readData", dataParams(wrong), origin = other)).reason)
+        }
+        // Charged, those 100 roots (410 KB) would leave no room for 200 KiB in a 512 KiB window.
+        val ref = plantBlob(ByteArray(200 * 1024) { 5 })
+        ok(call("swarm_readData", dataParams(ref), origin = other))
+    }
+
+    @Test
+    fun `a one-chunk blob is held to its root's span`() {
+        val held = plantBlob(ByteArray(4096) { 9 }, span = 2u)
+        assertArrayEquals(byteArrayOf(9, 9), Base64.getDecoder().decode(okJson(call("swarm_readData", dataParams(held))).getString("data")))
+        val short = plantBlob(ByteArray(10) { 9 }, span = 100u)
+        val e = err(call("swarm_readData", dataParams(short)))
+        assertEquals(-32603, e.code)
+        assertTrue(e.message, e.message.contains("10 bytes for a 100-byte blob"))
+        assertEquals(0, joins())
+    }
+
+    @Test
+    fun `a blob larger than the byte budget is data_too_large before the node joins it`() {
+        val bigData = ByteArray(1024 * 1024) { it.toByte() }
+        val ref = plantBlob(bigData)
+        val e = err(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals(-32602, e.code)
+        assertEquals("data_too_large", e.reason)
+        assertEquals(512 * 1024, e.data!!.getInt("limit"))
+        assertEquals(1024 * 1024, e.data!!.getInt("actual"))
+        assertEquals("never asked for", 0, joins())
+
+        // A connected site's 5 MiB budget fits it.
+        connect(other)
+        assertArrayEquals(bigData, Base64.getDecoder().decode(okJson(call("swarm_readData", dataParams(ref), origin = other)).getString("data")))
+        assertEquals(1, joins())
+
+        // Past even that, with the redundancy level cleared from the span: still refused unjoined.
+        val huge = plantBlob(ByteArray(4096), span = (0x81uL shl 56) or (6uL * 1024u * 1024u))
+        val tooBig = err(call("swarm_readData", dataParams(huge), origin = other))
+        assertEquals("data_too_large", tooBig.reason)
+        assertEquals(6 * 1024 * 1024, tooBig.data!!.getInt("actual"))
+        assertEquals(1, joins())
+    }
+
+    @Test
+    fun `readData reserves its size first, so a second one that doesn't fit never reaches the node`() {
+        val ref = plantBlob(ByteArray(300 * 1024) { 1 })
+        ok(call("swarm_readData", dataParams(ref), origin = other))
+        val e = err(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals("rate_limited", e.reason)
+        assertEquals(512 * 1024, e.data!!.getInt("maxBytes"))
+        assertEquals("only the first read was joined", 1, joins())
+        // The refused read still paid for its root chunk, and the reads share the window with readChunk.
+        now += SwarmProvider.BUDGET_WINDOW_MS
+        ok(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals(2, joins())
+    }
+
+    @Test
+    fun `readData is one request against the read budget, whatever its size`() {
+        val ref = plantBlob("tiny".toByteArray())
+        repeat(119) { ok(call("swarm_readChunk", JSONObject().put("reference", ref), origin = other)) }
+        ok(call("swarm_readData", dataParams(ref), origin = other))
+        val limited = err(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals("rate_limited", limited.reason)
+        assertEquals(120, limited.data!!.getInt("maxRequests"))
+    }
+
+    @Test
+    fun `parallel readData calls can't together pass the byte budget`() = runBlocking {
+        val ref = plantBlob(ByteArray(200 * 1024) { 2 })
+        val release = java.util.concurrent.CountDownLatch(1)
+        val arrived = java.util.concurrent.atomic.AtomicInteger()
+        val finished = java.util.concurrent.atomic.AtomicInteger()
+        // Every join is held until all the reads have either reached the node or been refused.
+        node.onRequest = { _, path ->
+            if (path.startsWith("/bytes/")) {
+                arrived.incrementAndGet()
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        val reads = (1..8).map {
+            async(Dispatchers.IO) {
+                provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED }
+                    .also { finished.incrementAndGet() }
+            }
+        }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (arrived.get() + finished.get() < 8 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertEquals("two 200 KiB blobs fit a 512 KiB window, a third doesn't", 2, arrived.get())
+        release.countDown()
+        val replies = reads.map { it.await() }
+        assertEquals(2, replies.count { it is SwarmProvider.Reply.Ok })
+        assertEquals(6, replies.count { (it as? SwarmProvider.Reply.Err)?.reason == "rate_limited" })
+        assertEquals(2, joins())
+    }
+
+    @Test
+    fun `no more than MAX_CONCURRENT_JOINS joins hold an IO thread at once, and the rest wait their turn`() = runBlocking {
+        // Just over one chunk: each reserves only a few KiB, so the budget alone wouldn't bound them.
+        val ref = plantBlob(ByteArray(4097) { 5 })
+        val cap = SwarmProvider.MAX_CONCURRENT_JOINS
+        val release = java.util.concurrent.CountDownLatch(1)
+        val inJoin = java.util.concurrent.atomic.AtomicInteger()
+        val most = java.util.concurrent.atomic.AtomicInteger()
+        node.onRequest = { _, path ->
+            if (path.startsWith("/bytes/")) {
+                most.accumulateAndGet(inJoin.incrementAndGet(), ::maxOf)
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                inJoin.decrementAndGet()
+            }
+        }
+        val count = cap + 12
+        // Spread over enough sites that their shares together cover every slot.
+        val sites = (0 until count).map { "https://s${it % (cap / SwarmProvider.MAX_JOINS_PER_ORIGIN + 2)}.example" }
+        val reads = sites.map { origin ->
+            async(Dispatchers.IO) { provider.request(origin, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (inJoin.get() < cap && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        Thread.sleep(200)
+        assertEquals("the rest wait for a slot, holding no thread", cap, inJoin.get())
+        release.countDown()
+        val replies = reads.map { it.await() }
+        assertEquals("every queued read still joins once a slot frees", count, replies.count { it is SwarmProvider.Reply.Ok })
+        assertEquals(cap, most.get())
+        assertEquals(count, joins())
+        // A join that waited for its slot still answers inside the 290 s budget.
+        assertTrue(node.capTimeouts.all { it.second + 10_000 <= 290_000 })
+        assertEquals("shares are let go of once their reads are done", 0, provider.joinShareOrigins())
+    }
+
+    @Test
+    fun `one site's slow joins can't take every slot, so another site's read joins beside them`() = runBlocking {
+        val slowRef = plantBlob(ByteArray(4097) { 6 })
+        val ref = plantBlob(ByteArray(4097) { 8 })
+        val release = java.util.concurrent.CountDownLatch(1)
+        val slowJoins = java.util.concurrent.atomic.AtomicInteger()
+        node.onRequest = { _, path ->
+            if (path == "/bytes/$slowRef") {
+                slowJoins.incrementAndGet()
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        fun read(origin: String, reference: String) = async(Dispatchers.IO) {
+            provider.request(origin, "swarm_readData", dataParams(reference)) { SwarmProvider.Answer.REJECTED }
+        }
+        // A burst of slow reads from one site, well past the global cap.
+        val slow = (1..SwarmProvider.MAX_CONCURRENT_JOINS * 3).map { read(other, slowRef) }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (slowJoins.get() < SwarmProvider.MAX_JOINS_PER_ORIGIN && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        Thread.sleep(200)
+        assertEquals("one site holds only its share", SwarmProvider.MAX_JOINS_PER_ORIGIN, slowJoins.get())
+        // Another site's read isn't held behind them.
+        val mine = withTimeoutOrNull(2_000) { read(site, ref).await() }
+        assertTrue("got $mine", mine is SwarmProvider.Reply.Ok)
+        release.countDown()
+        assertTrue(slow.map { it.await() }.all { it is SwarmProvider.Reply.Ok })
+        assertEquals(0, provider.joinShareOrigins())
+    }
+
+    @Test
+    fun `a read cancelled while it waits for a join slot hands its reserved bytes back`() = runBlocking {
+        val blob = ByteArray(100_000) { 7 }
+        val ref = plantBlob(blob)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val joining = java.util.concurrent.atomic.AtomicInteger()
+        node.onRequest = { _, path ->
+            if (path.startsWith("/bytes/")) {
+                joining.incrementAndGet()
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        val share = SwarmProvider.MAX_JOINS_PER_ORIGIN
+        val holding = (1..share).map {
+            async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (joining.get() < share && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        val held = provider.budgetBytes(other)
+        val waiting = async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        // Its root chunk (span + 4096 bytes) is paid for whatever happens; the rest is reserved.
+        val root = 8L + 4096
+        while (provider.budgetBytes(other) < held + blob.size && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertEquals("the waiting read reserved its blob", held + blob.size, provider.budgetBytes(other))
+        Thread.sleep(100)
+        assertEquals("still waiting for a slot, not joining", share, joining.get())
+        waiting.cancelAndJoin()
+        assertEquals("nothing was joined for it, so only its root stays charged", held + root, provider.budgetBytes(other))
+        release.countDown()
+        assertTrue(holding.map { it.await() }.all { it is SwarmProvider.Reply.Ok })
+        assertEquals(share, joins())
+        assertEquals(0, provider.joinShareOrigins())
     }
 
     // -------------------------------------------------------------------
@@ -1267,10 +1591,10 @@ class SwarmProviderTest {
             cx.evaluateString(
                 scope,
                 """
-                var sent = [], handler = null;
+                var sent = [], handler = null, delays = [];
                 var window = {
                   location: { protocol: 'https:' },
-                  setTimeout: function () { return 1; }, clearTimeout: function () {},
+                  setTimeout: function (f, ms) { delays.push(ms); return 1; }, clearTimeout: function () {},
                   Promise: Promise, Error: Error, Map: Map, Uint8Array: Uint8Array, ArrayBuffer: ArrayBuffer,
                   BigInt: undefined,
                   btoa: function (s) { var o = ''; for (var i = 0; i < s.length; i++) o += s.charCodeAt(i) + ','; return o; },
@@ -1296,6 +1620,12 @@ class SwarmProviderTest {
             assertEquals(2, bad.getJSONObject("params").getJSONObject("data").getJSONArray("data").length())
             assertEquals("undefined", cx.evaluateString(scope, "typeof window.abcdefghij", "gone", 1, null).toString())
             assertEquals("true", cx.evaluateString(scope, "String(window.swarm.isFreedomBrowser)", "flag", 1, null).toString())
+            cx.evaluateString(scope, "window.swarm.readData({ reference: 'ab' });", "readData", 1, null)
+            assertEquals("swarm_readData", JSONObject(cx.evaluateString(scope, "sent[3]", "sent", 1, null).toString()).getString("method"))
+            // A blob of up to 5 MiB joined from the network gets the page's long timeout, as on desktop.
+            assertEquals("300000", cx.evaluateString(scope, "String(delays[delays.length - 1])", "delay", 1, null).toString())
+            cx.evaluateString(scope, "window.swarm.readChunk({ reference: 'ab' });", "readChunk", 1, null)
+            assertEquals("60000", cx.evaluateString(scope, "String(delays[delays.length - 1])", "delay", 1, null).toString())
 
         } finally {
             RhinoContext.exit()

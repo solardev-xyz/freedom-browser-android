@@ -34,11 +34,13 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -153,6 +155,9 @@ object SwarmProviders {
     private val promptLocks = HashMap<Long, Mutex>()
     private val pending = HashMap<Long, MutableSet<SwarmPromptRequest>>()
     private val blockedTabs = HashSet<Long>()
+
+    /** `swarm_readData` calls still running, by the document that made them: main thread only. */
+    private val reads = DocumentJobs()
 
     /** The pages' messaging subscriptions; set by [init]. */
     @Volatile
@@ -470,6 +475,15 @@ object SwarmProviders {
                 }
                 val id = request.id
                 val method = request.method
+                // A read still waiting for a join slot is dropped once its
+                // document goes: nobody is left to answer, and its place and
+                // reserved bytes go back to the pages still open. (One already
+                // joining keeps its slot until bee answers; its bytes stand.)
+                // A document that went while this was parsed was swept already.
+                if (method == "swarm_readData") {
+                    if (doc != STALE_DOCUMENT && (documents[tab.id] ?: 0) != doc) return@launch
+                    reads.add(coroutineContext.job, tab.id, doc)
+                }
                 val result = try {
                     val p = provider ?: throw IllegalStateException("provider not ready")
                     val approved = { approved(reply, id) }
@@ -486,6 +500,7 @@ object SwarmProviders {
                 answer(reply, id, result)
                 if (method == "swarm_subscribe") confirmLater(result)
             } finally {
+                reads.remove(coroutineContext.job)
                 ticket.release()
             }
         }
@@ -817,6 +832,7 @@ object SwarmProviders {
         documents[tab.id] = doc
         committedOrigins[tab.id] = providerOriginKey(url)
         withdraw(tab.id)
+        reads.cancelOutgoing(tab.id, doc)
         // The outgoing document's subscriptions go with it.
         subscriptions?.cancelWhere { it.tab == tab.id && it.document != doc }
     }
@@ -824,6 +840,7 @@ object SwarmProviders {
     /** The tab closed. */
     fun onTabClosed(tabId: Long) {
         withdraw(tabId)
+        reads.cancelTab(tabId)
         subscriptions?.cancelWhere { it.tab == tabId }
         manifestChecks.remove(tabId)
         documents.remove(tabId)
@@ -955,19 +972,36 @@ internal object GatewayHttp : SwarmProvider.Http {
             }
             val status = conn.responseCode
             val stream = if (status >= 400) conn.errorStream else conn.inputStream
-            val bytes = stream?.use { input ->
-                val out = java.io.ByteArrayOutputStream()
-                val buf = ByteArray(64 * 1024)
-                while (true) {
-                    val n = input.read(buf)
-                    // Between reads too: a node trickling its answer never trips the read timeout.
-                    if (expired()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
-                    if (n < 0) break
-                    if (out.size() + n > maxBytes) throw SwarmProvider.Http.AnswerTooLarge()
-                    out.write(buf, 0, n)
-                }
-                out.toByteArray()
-            } ?: ByteArray(0)
+            val bytes = try {
+                stream?.use { input ->
+                    val out = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        // Between reads too: a node trickling its answer never trips the read timeout.
+                        if (expired()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
+                        if (n < 0) break
+                        if (out.size() + n > maxBytes) throw SwarmProvider.Http.AnswerTooLarge()
+                        out.write(buf, 0, n)
+                    }
+                    out.toByteArray()
+                } ?: ByteArray(0)
+            } catch (e: IOException) {
+                // The node answered, then its body broke off (Android's
+                // stack throws "unexpected end of stream"; bee does this
+                // when a joined chunk can't be found mid-stream): a cut
+                // answer, not a node that can't be reached.
+                if (e is SocketTimeoutException || e is SwarmProvider.Http.AnswerTooLarge || expired()) throw e
+                throw SwarmProvider.Http.AnswerCutShort(e)
+            }
+            // The JVM's stack ends a fixed-length body the connection
+            // dropped part-way without an error: short of its length, it's cut too.
+            val length = conn.getHeaderField("Content-Length")?.trim()?.toLongOrNull()
+            if (length != null && bytes.size < length && method != "HEAD" && status != 204 && status != 304 &&
+                conn.getHeaderField("Content-Encoding") == null
+            ) {
+                throw SwarmProvider.Http.AnswerCutShort(null)
+            }
             // Read to its end: done, unless the deadline got there first.
             if (!state.compareAndSet(RUNNING, DONE)) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
             afterAnswer()
@@ -1066,14 +1100,11 @@ internal fun fetchManifest(url: String, timeoutMs: Int = MANIFEST_TIMEOUT_MS): M
     } catch (e: SwarmProvider.Http.AnswerTooLarge) {
         return ManifestDiscovery.Invalid("manifest exceeds 8 KiB")
     } catch (e: IOException) {
-        // A body that started and died is the transport's failure, not an invalid manifest.
+        // A body that started and died — including one that ended short
+        // of its Content-Length, which [GatewayHttp.requestAt] throws as
+        // AnswerCutShort — is the transport's failure, not an invalid manifest.
         return ManifestDiscovery.Unresolved(e.javaClass.simpleName)
     }
-    // HttpURLConnection ends a fixed-length body that the connection
-    // dropped part-way without an error: short of its length, it's the
-    // transport's failure too, not bytes to judge.
-    val length = answer.headers["content-length"]?.trim()?.toLongOrNull()
-    if (length != null && answer.body.size < length) return ManifestDiscovery.Unresolved("the answer was cut short")
     return manifestFromAnswer(answer.status, answer.body)
 }
 
@@ -1353,7 +1384,7 @@ internal fun swarmProviderJs(channel: String): String {
   var LONG = { swarm_publishData: 1, swarm_publishFiles: 1, swarm_publishChunk: 1, swarm_createFeed: 1,
     swarm_updateFeed: 1, swarm_writeFeedEntry: 1, swarm_writeSingleOwnerChunk: 1, swarm_getSigningIdentity: 1,
     swarm_requestAccess: 1, swarm_sendPss: 1, swarm_sendGsoc: 1, swarm_getMessagingIdentity: 1,
-    swarm_subscribe: 1 };
+    swarm_subscribe: 1, swarm_readData: 1 };
   port.addEventListener('message', function (ev) {
     var msg;
     try { msg = parse(ev.data); } catch (e) { return; }
@@ -1436,6 +1467,7 @@ internal fun swarmProviderJs(channel: String): String {
     listFeeds: method('swarm_listFeeds'),
     publishChunk: method('swarm_publishChunk'),
     readChunk: method('swarm_readChunk'),
+    readData: method('swarm_readData'),
     writeSingleOwnerChunk: method('swarm_writeSingleOwnerChunk'),
     readSingleOwnerChunk: method('swarm_readSingleOwnerChunk'),
     getSigningIdentity: method('swarm_getSigningIdentity'),
@@ -1468,4 +1500,36 @@ internal fun swarmProviderJs(channel: String): String {
   } catch (e) {}
 })();
 """.trimIndent()
+}
+
+/**
+ * Jobs filed under the tab and document that started them, so they can be
+ * cancelled once that document is no longer the tab's. One thread only
+ * (the bridge's main thread).
+ */
+internal class DocumentJobs {
+    private val jobs = HashMap<Job, Pair<Long, Int>>()
+
+    fun add(job: Job, tab: Long, document: Int) {
+        jobs[job] = tab to document
+    }
+
+    fun remove(job: Job) {
+        jobs.remove(job)
+    }
+
+    /** Tab [tab] committed [current]: cancel every job of its other documents. */
+    fun cancelOutgoing(tab: Long, current: Int) = cancelWhere { it.first == tab && it.second != current }
+
+    /** Tab [tab] closed: cancel all of its jobs. */
+    fun cancelTab(tab: Long) = cancelWhere { it.first == tab }
+
+    /** How many jobs are filed: for tests. */
+    fun size() = jobs.size
+
+    private fun cancelWhere(match: (Pair<Long, Int>) -> Boolean) {
+        val gone = jobs.filterValues(match).keys.toList()
+        gone.forEach { jobs.remove(it) }
+        gone.forEach { it.cancel() }
+    }
 }

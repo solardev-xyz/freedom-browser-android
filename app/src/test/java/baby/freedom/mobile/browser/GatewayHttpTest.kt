@@ -79,6 +79,32 @@ class GatewayHttpTest {
     }
 
     @Test
+    fun `an answer whose body breaks off after its status is cut short, not an unreachable node`() {
+        ServerSocket(0, 1, LOOPBACK).use { server ->
+            val acceptor = Thread {
+                runCatching {
+                    server.accept().use { s ->
+                        s.getInputStream().read(ByteArray(4096))
+                        // bee's /bytes join: 200 and the whole length, then a chunk it can't find.
+                        s.getOutputStream().apply {
+                            write("HTTP/1.1 200 OK\r\nContent-Length: 204800\r\n\r\n".toByteArray())
+                            write(ByteArray(4096))
+                            flush()
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; start() }
+            try {
+                GatewayHttp.requestAt("http://127.0.0.1:${server.localPort}", "GET", "/bytes/x", emptyMap(), null, 5_000)
+                fail("a cut answer returned")
+            } catch (e: SwarmProvider.Http.AnswerCutShort) {
+                // expected
+            }
+            acceptor.join(5_000)
+        }
+    }
+
+    @Test
     fun `an answer read to its end in time is returned even if the deadline passes while it is handed back`() {
         ServerSocket(0, 1, LOOPBACK).use { server ->
             val acceptor = Thread {

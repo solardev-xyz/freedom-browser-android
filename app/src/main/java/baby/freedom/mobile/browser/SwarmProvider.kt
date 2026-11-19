@@ -15,8 +15,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -32,7 +34,7 @@ import org.json.JSONObject
  * it was granted:
  *
  *  - none: `swarm_getCapabilities`, and the reads of public Swarm data —
- *    `swarm_readFeedEntry`, `swarm_readChunk`,
+ *    `swarm_readFeedEntry`, `swarm_readChunk`, `swarm_readData`,
  *    `swarm_readSingleOwnerChunk` — plus `swarm_listFeeds` (the site's
  *    own feed records). Reads are rate-limited per origin (desktop's
  *    budgets: more for a connected site).
@@ -169,6 +171,15 @@ class SwarmProvider(
         /** The answer's body ran past the call's limit; the rest of it was never read. */
         class AnswerTooLarge : IOException("the node's answer is too large")
 
+        /**
+         * The node answered, then its body broke off short of its length.
+         * It was up when it sent the status line, but this alone doesn't
+         * say why: bee does it when a chunk of a join can't be found after
+         * the 200 went out, and a node stopped or restarted mid-body does
+         * it too — [request] re-checks the node to tell the two apart.
+         */
+        class AnswerCutShort(cause: Throwable?) : IOException("the node's answer was cut short", cause)
+
         class Answer(val status: Int, headers: Map<String, String>, val body: ByteArray) {
             /** Header names lower-cased. */
             val headers: Map<String, String> = headers.mapKeys { it.key.lowercase() }
@@ -233,6 +244,34 @@ class SwarmProvider(
     /** How many origins have a read budget running: for tests. */
     internal fun budgetOrigins(): Int = synchronized(budgets) { budgets.size }
 
+    /**
+     * `swarm_readData` joins running at once, across every page. A join
+     * blocks an [io] thread for as long as bee holds `/bytes` open (up to
+     * ~280 s), so without this a page's burst of small-blob reads could
+     * tie up the shared IO pool for the whole app; a read past the cap
+     * waits here, suspended, holding no thread.
+     */
+    private val joins = Semaphore(MAX_CONCURRENT_JOINS)
+
+    /**
+     * Each origin's share of [joins]: at most [MAX_JOINS_PER_ORIGIN] of
+     * them, so one site's burst of slow joins can't hold every slot and
+     * leave another site's reads waiting out their deadline. Held for an
+     * origin only while it has a read waiting or joining.
+     */
+    private val originJoins = HashMap<String, OriginJoins>()
+
+    private class OriginJoins {
+        val slots = Semaphore(MAX_JOINS_PER_ORIGIN)
+        var users = 0
+    }
+
+    /** How many origins have a join share held: for tests. */
+    internal fun joinShareOrigins(): Int = synchronized(originJoins) { originJoins.size }
+
+    /** The bytes [origin]'s current window has charged or reserved: for tests. */
+    internal fun budgetBytes(origin: String): Long = synchronized(budgets) { budgets[origin]?.bytes ?: 0 }
+
     /** Upload tag → the origin that made it: nobody else may read its progress. Session only. */
     private val tagOwners = ConcurrentHashMap<Long, String>()
 
@@ -264,6 +303,9 @@ class SwarmProvider(
         throw e
     } catch (e: VaultLockedException) {
         Reply.Err(INTERNAL, VAULT_LOCKED)
+    } catch (e: Http.AnswerCutShort) {
+        // The node answered; its body ended early.
+        cutShort("The Swarm node's answer was cut short")
     } catch (e: SocketTimeoutException) {
         // The node is up but slow (a big upload over the whole-call
         // deadline): not "stopped" — it may even have stored the data.
@@ -292,6 +334,7 @@ class SwarmProvider(
             "swarm_requestAccess" -> requestAccess(origin, ask)
             "swarm_getCapabilities" -> Reply.Ok(capabilities(origin))
             "swarm_readChunk" -> readChunk(origin, params)
+            "swarm_readData" -> readData(origin, params)
             "swarm_readSingleOwnerChunk" -> readSoc(origin, params)
             "swarm_readFeedEntry" -> readFeedEntry(origin, params)
             "swarm_listFeeds" -> listFeeds(origin)
@@ -1080,6 +1123,124 @@ class SwarmProvider(
         )
     }
 
+    /**
+     * desktop's `handleReadData` (#538, desktop #722): a whole blob, as
+     * `swarm_publishData` or `/bytes` uploaded it, by its root reference,
+     * joined by the node (`GET /bytes`), which checks every chunk and
+     * recovers erasure-coded content. No grant; one request against the
+     * read budget whatever the size. The root chunk is read and checked
+     * first and charged once it validates (a root that isn't the requested
+     * chunk costs no bytes); the blob's size comes from
+     * its span, redundancy level cleared. A blob past the window's whole
+     * byte budget is `data_too_large` before the join; a blob that fits the
+     * root chunk is its payload, with no join; a larger one has the rest of
+     * its size reserved first (`rate_limited` if it doesn't fit what is left
+     * of the window, so parallel reads can't together pass it), and the join
+     * is held to that size. A reservation stands if the join fails —
+     * also when bee has sent its 200 and then breaks the body off at a chunk
+     * it can't retrieve, which is -32603, not `node-stopped`. Only
+     * 32-byte references: an encrypted one is `invalid_reference`. The
+     * join has no deadline of its own on desktop beyond the page's 300 s;
+     * here it gets what is left of [DATA_READ_DEADLINE_MS] less the
+     * [PREFLIGHT_TIMEOUT_MS] re-probe a cut-short join may still need, so the
+     * page still gets a real answer before its own timer gives up. At most
+     * [MAX_CONCURRENT_JOINS] joins run at once across all pages ([joins]),
+     * and at most [MAX_JOINS_PER_ORIGIN] of them for one origin, so one
+     * site can't hold every slot; a read past either waits, suspended, for
+     * a slot within the same deadline, and is -32603 if none frees in time.
+     * A read that never got a slot (out of time, or cancelled because its
+     * page went) joined nothing, and its reservation is handed back.
+     */
+    private suspend fun readData(origin: String, params: JSONObject): Reply {
+        val started = System.nanoTime()
+        emptyOptions(params)
+        val reference = hex32(params.opt("reference"), "invalid_reference", "reference")
+        spendBudget(origin, requests = 1)
+        reachableOrFail()
+        val raw = chunk(reference) ?: return invalid("Data not found: ${reference.swarmHex()}", "chunk_not_found")
+        val root = SwarmChunks.parseCac(reference, raw)
+            ?: return invalid("Downloaded bytes do not validate as the requested content-addressed chunk", "chunk_type_mismatch")
+        // The root is paid for whatever happens next (desktop charges it once it validates).
+        val rootRefusal = chargeBudget(origin, bytes = raw.size.toLong())
+        val size = dataSize(root.spanValue)
+        val maxBytes = readMaxBytes(origin)
+        if (size > maxBytes.toULong()) {
+            return invalid(
+                "Data exceeds the maximum read size of $maxBytes bytes", "data_too_large",
+                JSONObject().put("limit", maxBytes).put("actual", spanJson(size)),
+            )
+        }
+        rootRefusal?.let { return it }
+        val expected = size.toInt()
+        val data = if (size <= SwarmChunks.MAX_PAYLOAD.toULong()) {
+            // Held to the span: the root's payload is the whole blob, already checked.
+            if (root.payload.size < expected) {
+                return Reply.Err(INTERNAL, "Node returned ${root.payload.size} bytes for a $expected-byte blob")
+            }
+            root.payload.copyOf(expected)
+        } else {
+            val reserved = (expected - raw.size).toLong().coerceAtLeast(0)
+            val window = if (reserved > 0) {
+                val (refusal, window) = reserveBudget(origin, reserved)
+                refusal?.let { return it }
+                window
+            } else {
+                null
+            }
+            // Room is kept for [cutShort]'s `GET /node`, so a join cut at its
+            // deadline still answers inside [DATA_READ_DEADLINE_MS].
+            fun left() = DATA_READ_DEADLINE_MS - PREFLIGHT_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000
+            // A free join slot (the origin's share, then [joins]) is waited
+            // for within the same deadline; the join then gets whatever is
+            // left of it. A read that never gets one — out of time, or its
+            // page gone — had nothing joined, so its reservation is handed back.
+            var slot = false
+            try {
+                // Flagged inside the block: a timeout landing just as it
+                // returns must not leave the slot taken but never given back.
+                withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) {
+                    acquireJoin(origin)
+                    slot = true
+                }
+            } finally {
+                if (!slot && window != null) unreserveBudget(origin, window, reserved)
+            }
+            if (!slot) return Reply.Err(INTERNAL, "Data can't be read: too many Swarm reads are in progress. Try again.")
+            val answer = try {
+                withContext(io) {
+                    node.request(
+                        "GET", "/bytes/${reference.swarmHex()}", emptyMap(), null,
+                        left().coerceAtLeast(MIN_JOIN_MS).toInt(), maxBytes = expected,
+                    )
+                }
+            } catch (e: Http.AnswerTooLarge) {
+                return Reply.Err(INTERNAL, "Node returned more than $expected bytes for a $expected-byte blob")
+            } catch (e: Http.AnswerCutShort) {
+                // bee has sent its 200 and the length, then hit a chunk it
+                // can't retrieve — or was stopped part-way through.
+                return cutShort("Data can't be read: the node's answer broke off before the $expected-byte blob was complete")
+            } finally {
+                // withContext waits for the blocking call even when cancelled,
+                // so the slot is free only once its IO thread is.
+                releaseJoin(origin)
+            }
+            // As [chunk]: bee says "read chunk failed" with a 500 for a chunk it can't find.
+            if (answer.status == 404 || (answer.status == 500 && answer.message().trim().equals("read chunk failed", ignoreCase = true))) {
+                return invalid("Data not found: ${reference.swarmHex()}", "chunk_not_found")
+            }
+            if (!answer.ok) return Reply.Err(INTERNAL, "Data can't be read: ${answer.message()}")
+            if (answer.body.size != expected) {
+                return Reply.Err(INTERNAL, "Node returned ${answer.body.size} bytes for a $expected-byte blob")
+            }
+            answer.body
+        }
+        return Reply.Ok(
+            JSONObject()
+                .put("data", Base64.getEncoder().encodeToString(data))
+                .put("encoding", "base64"),
+        )
+    }
+
     private suspend fun readSoc(origin: String, params: JSONObject): Reply {
         emptyOptions(params)
         fun given(key: String) = params.opt(key).let { it != null && it != JSONObject.NULL }
@@ -1182,7 +1343,7 @@ class SwarmProvider(
             }
             socRefusal?.let { return it }
             val expected = size.toInt()
-            if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
+            if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong()).first?.let { return it }
             val answer = try {
                 withContext(io) {
                     node.request("GET", "/bytes/${soc.cac.address.swarmHex()}", emptyMap(), null, READ_TIMEOUT_MS, maxBytes = expected)
@@ -1251,13 +1412,58 @@ class SwarmProvider(
      * so parallel reads can't all fit and then each download what only one
      * of them may return (desktop's `reservePermissionFreeReadBytes`).
      */
-    private suspend fun reserveBudget(origin: String, bytes: Long): Reply.Err? {
+    private suspend fun reserveBudget(origin: String, bytes: Long): Pair<Reply.Err?, Budget?> {
         val limits = readLimits(origin)
-        val fits = synchronized(budgets) {
+        val window = synchronized(budgets) {
             val bucket = bucket(origin)
-            (bucket.bytes + bytes <= limits.second).also { if (it) bucket.bytes += bytes }
+            if (bucket.bytes + bytes <= limits.second) bucket.also { it.bytes += bytes } else null
         }
-        return if (fits) null else budgetExceeded(limits)
+        return if (window != null) null to window else budgetExceeded(limits) to null
+    }
+
+    /**
+     * Hand back [bytes] [reserveBudget] took from [window] for a read that
+     * never ran: only to that same window, if it's still [origin]'s (one
+     * that has run out since started afresh without them).
+     */
+    private fun unreserveBudget(origin: String, window: Budget, bytes: Long) {
+        synchronized(budgets) {
+            if (budgets[origin] === window) window.bytes = (window.bytes - bytes).coerceAtLeast(0)
+        }
+    }
+
+    /**
+     * Take a join slot for [origin]: one of its share
+     * ([MAX_JOINS_PER_ORIGIN]), then one of [joins]. Cancellable while it
+     * waits, taking nothing; [releaseJoin] gives both back.
+     */
+    private suspend fun acquireJoin(origin: String) {
+        val share = synchronized(originJoins) { originJoins.getOrPut(origin) { OriginJoins() }.also { it.users++ } }
+        var held = false
+        try {
+            share.slots.acquire()
+            try {
+                joins.acquire()
+                held = true
+            } finally {
+                if (!held) share.slots.release()
+            }
+        } finally {
+            if (!held) dropShare(origin, share)
+        }
+    }
+
+    private fun releaseJoin(origin: String) {
+        joins.release()
+        val share = synchronized(originJoins) { originJoins.getValue(origin) }
+        share.slots.release()
+        dropShare(origin, share)
+    }
+
+    private fun dropShare(origin: String, share: OriginJoins) {
+        synchronized(originJoins) {
+            if (--share.users == 0) originJoins.remove(origin)
+        }
     }
 
     /** The most bytes one window lets [origin] read. */
@@ -1307,16 +1513,30 @@ class SwarmProvider(
         throw Invalid(Reply.Err(UNAVAILABLE, "Node not available: $reason", reason(reason)))
     }
 
-    private suspend fun reachableOrFail() {
-        val ok = withContext(io) {
-            try {
-                node.request("GET", "/node", emptyMap(), null, PREFLIGHT_TIMEOUT_MS).ok
-            } catch (e: IOException) {
-                false
-            }
+    private suspend fun reachable(): Boolean = withContext(io) {
+        try {
+            node.request("GET", "/node", emptyMap(), null, PREFLIGHT_TIMEOUT_MS).ok
+        } catch (e: IOException) {
+            false
         }
-        if (!ok) throw Invalid(Reply.Err(UNAVAILABLE, "Node not available: node-stopped", reason("node-stopped")))
     }
+
+    private suspend fun reachableOrFail() {
+        if (!reachable()) throw Invalid(Reply.Err(UNAVAILABLE, "Node not available: node-stopped", reason("node-stopped")))
+    }
+
+    /**
+     * An [Http.AnswerCutShort]: [message] while the node is still there
+     * (bee broke off a join it couldn't finish), `node-stopped` if the
+     * node went away part-way through the answer (switched off, or
+     * `:node` restarting) — the cut was the node stopping, not a failed read.
+     */
+    private suspend fun cutShort(message: String): Reply =
+        if (reachable()) {
+            Reply.Err(INTERNAL, message)
+        } else {
+            Reply.Err(UNAVAILABLE, "Node not available: node-stopped", reason("node-stopped"))
+        }
 
     private fun usableBatches(): List<PostageBatch> {
         val answer = node.request("GET", "/stamps", emptyMap(), null, PREFLIGHT_TIMEOUT_MS)
@@ -1513,6 +1733,23 @@ class SwarmProvider(
 
         private const val PREFLIGHT_TIMEOUT_MS = 10_000
         private const val READ_TIMEOUT_MS = 60_000
+
+        /**
+         * A whole `swarm_readData` call, join included: inside the page's
+         * 300 s (`LONG` in the page script), so a slow join still answers.
+         * Covers the reachability probe, the root read, the join and, after
+         * a cut-short join, the `GET /node` re-probe.
+         */
+        private const val DATA_READ_DEADLINE_MS = 290_000L
+
+        /** [joins]: at most this many `swarm_readData` joins hold an IO thread at once. */
+        internal const val MAX_CONCURRENT_JOINS = 8
+
+        /** One origin's share of [MAX_CONCURRENT_JOINS] ([originJoins]): the rest stay open to other sites. */
+        internal const val MAX_JOINS_PER_ORIGIN = 2
+
+        /** The least a join is started with once it has its slot. */
+        private const val MIN_JOIN_MS = 5_000L
         private const val UPLOAD_TIMEOUT_MS = 5 * 60_000
 
         private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
@@ -1554,6 +1791,7 @@ class SwarmProvider(
             "swarm_listFeeds",
             "swarm_publishChunk",
             "swarm_readChunk",
+            "swarm_readData",
             "swarm_writeSingleOwnerChunk",
             "swarm_readSingleOwnerChunk",
             "swarm_getSigningIdentity",
