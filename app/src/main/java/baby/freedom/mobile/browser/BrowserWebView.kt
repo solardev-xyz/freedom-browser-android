@@ -4156,6 +4156,12 @@ private fun buildRefreshableWebView(
                         if (request.hasGesture() && request.method.equals("POST", ignoreCase = true)) {
                             (view as? PageWebView)?.let { v -> v.post { v.putBackHold.dropped() } }
                         }
+                        // Nor does a gateway answer redirect over a form the
+                        // page posts, gesture or not (#537 R2-M5). Posted
+                        // now, so it lands before the form's commit.
+                        if (request.method.equals("POST", ignoreCase = true)) {
+                            view?.post { state.gatewayOffer.formPosted() }
+                        }
                         // x402 (#140): a form POST — gesture or not —
                         // replaces a paid request in flight; its answer
                         // is not the paid request's (#218 R3-M1) — if it

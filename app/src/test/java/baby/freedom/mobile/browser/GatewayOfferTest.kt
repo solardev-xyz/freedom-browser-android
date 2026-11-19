@@ -381,8 +381,10 @@ class GatewayOfferTest {
         val lookup = tab.committed(limoUrl, traversal = false)!!
         tab.take(lookup)
         tab.historyStep()
-        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        // The pill only, over the page still on screen; the step's commit clears it.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
         assertNull(tab.committed("https://example.com/", traversal = true))
+        assertNull(tab.offer)
         assertNull(tab.pending)
     }
 
@@ -392,12 +394,75 @@ class GatewayOfferTest {
         val lookup = tab.committed(limoUrl, traversal = false)!!
         tab.take(lookup)
         tab.historyStep()
-        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
         tab.located("https://vitalik.eth.limo/") // a pushState entry
+        assertEquals("ipfs://vitalik.eth/", tab.destination())
+    }
+
+    @Test
+    fun `a Back that steps only a frame still gets its pill`() {
+        // R2-M1: no main-frame callback follows a Back that steps an
+        // iframe, so nothing must wait for one.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.historyStep()
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertEquals("ipfs://vitalik.eth/blog", tab.destination())
+    }
+
+    @Test
+    fun `a Back over a link on its way gives the page its lookup back, pill only`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.linkFollowed()
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        tab.historyStep()
         assertEquals(lookup, tab.pending)
         tab.take(lookup)
         assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
-        assertEquals("ipfs://vitalik.eth/", tab.destination())
+    }
+
+    @Test
+    fun `a form the page posts is never redirected over`() {
+        // R2-M5: a POST never reaches shouldOverrideUrlLoading.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.formPosted()
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        // Its commit drops the held answer.
+        assertNull(tab.committed("https://example.com/thanks", traversal = false))
+        assertNull(tab.offer)
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a form that ends with no commit gives the page its pill back`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.formPosted()
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        tab.loadFinished("https://vitalik.eth.limo/post-204")
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+    }
+
+    @Test
+    fun `each showing of an equal offer gets its own number`() {
+        // R2-M4: the pill's tap guard re-arms on it, not on the offer's value.
+        val tab = GatewayOfferTab()
+        val other = GatewayOfferTab()
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit(limoUrl, traversal = true))
+        val first = tab.shown
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit(limoUrl, traversal = true)) // a reload
+        assertEquals(tab.offer, limoOffer)
+        assertTrue(tab.shown != first)
+        assertEquals(GatewayOfferTab.Verdict.Show, other.visit(limoUrl, traversal = true))
+        assertTrue(other.shown != tab.shown)
     }
 
     @Test

@@ -7,6 +7,7 @@ import baby.freedom.mobile.ens.Base32
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
 import kotlinx.coroutines.Job
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * "Open without gateway" (#537), desktop's `src/main/gateway-offer.js`
@@ -230,15 +231,16 @@ internal object GatewayOffer {
  * on screen ([offer], which the pill shows), and the "Always open
  * without gateway" redirect's bookkeeping. Pure: [BrowserWebView] reports
  * commits ([committed]), same-document moves ([located]), links it
- * follows ([linkFollowed]) and navigations that end without a commit
- * ([stayed], [stopped], [loadFinished]); the screen reports its own loads
+ * follows ([linkFollowed]), forms it posts ([formPosted]) and navigations
+ * that end without a commit ([stayed], [stopped], [loadFinished]); the screen reports its own loads
  * ([loadStarted]) and the chrome's Back / Forward ([historyStep]), runs
  * the lookups ([Lookup]) and acts on [answered]'s verdict.
  *
  * An answer is acted on only while nothing is taking the tab elsewhere:
- * a load the tab starts drops it, a navigation still on its way holds
- * it until that commits (dropped) or doesn't (answered again for the
- * page that stayed).
+ * a load the tab starts drops it, a link or form the page sent on its
+ * way holds it until that commits (dropped) or doesn't (answered again
+ * for the page that stayed), and the chrome's Back / Forward keeps
+ * "always" off the page, with its pill.
  */
 internal class GatewayOfferTab {
     /**
@@ -256,6 +258,15 @@ internal class GatewayOfferTab {
 
     /** The offer for the page on screen, or `null`: what the pill shows. */
     var offer by mutableStateOf<GatewayOffer.Offer?>(null)
+        private set
+
+    /**
+     * Which showing of [offer] is up: a new number, unique across tabs,
+     * each time an offer is shown — even one equal to the last (a reload
+     * whose answer lands within the pill's fade-out, another tab's offer
+     * for the same name). The pill re-arms its tap guard on it (R2-M4).
+     */
+    var shown by mutableStateOf(0L)
         private set
 
     /**
@@ -291,19 +302,20 @@ internal class GatewayOfferTab {
     /** A page other than a gateway's has committed since the redirect (its destination). */
     private var redirectLanded = false
 
-    /** What is taking the tab away from the page on screen, before anything commits. */
-    private enum class Leaving { Link, HistoryStep }
-
     /**
-     * A navigation away from the page on screen is under way and hasn't
-     * committed: a link the WebView follows, or the chrome's Back /
-     * Forward. An answer arriving now is held ([held]), never acted on —
-     * a redirect would cancel that navigation (R1-F1) — and given back
-     * if the page stays after all ([stayed]): a link that became a
-     * download, or went to another app, or a 204, or a Back that stayed
-     * in the document (R1-M1).
+     * A navigation the page started away from itself is under way and
+     * hasn't committed: a link the WebView follows, or a form it posts.
+     * An answer arriving now is held ([held]), never acted on — a
+     * redirect would cancel that navigation (R1-F1) — and given back if
+     * the page stays after all ([stayed]): a link that became a download,
+     * or went to another app, or a 204 (R1-M1).
+     *
+     * Not the chrome's Back / Forward ([historyStep]): that may step only
+     * a frame of the page, with no main-frame callback at all to end a
+     * hold (R2-M1), and it needs none — "always" never redirects over it
+     * — so its answer shows the pill at once.
      */
-    private var leaving: Leaving? = null
+    private var leaving = false
 
     /** The lookup answered (or still running) while [leaving]: run again if the page stays. */
     private var held: Lookup? = null
@@ -328,7 +340,7 @@ internal class GatewayOfferTab {
         running = null
         offer = null
         pending = null
-        leaving = null
+        leaving = false
         held = null
         val at = url.orEmpty()
         this.url = at
@@ -368,13 +380,11 @@ internal class GatewayOfferTab {
     }
 
     /**
-     * The page moved within its document (`pushState`, a fragment): the
-     * destination follows. A Back / Forward the chrome asked for that
-     * lands here stayed in the document: no commit is coming.
+     * The page moved within its document (`pushState`, a fragment, or a
+     * Back / Forward onto such an entry): the destination follows.
      */
     fun located(url: String?) {
         if (url != null) this.url = url
-        if (leaving == Leaving.HistoryStep) stayed()
     }
 
     /**
@@ -386,7 +396,7 @@ internal class GatewayOfferTab {
         seq += 1
         running = null
         pending = null
-        leaving = null
+        leaving = false
         held = null
     }
 
@@ -396,17 +406,29 @@ internal class GatewayOfferTab {
      * the page on screen still gets its pill (R1-M1).
      */
     fun linkFollowed() {
-        leaving = Leaving.Link
+        leaving = true
     }
 
     /**
-     * The chrome's Back / Forward. Never redirected over (R1-F1), and if
-     * it stays in the document the page keeps its pill, with no redirect:
-     * the user stepped through history on it.
+     * The page posts a form in its main frame (R2-M5). A POST never
+     * reaches `shouldOverrideUrlLoading`, so the interceptor reports it;
+     * held like a link, so "always" doesn't cancel the user's submit.
+     */
+    fun formPosted() {
+        leaving = true
+    }
+
+    /**
+     * The chrome's Back / Forward. Never redirected over (R1-F1): the
+     * user stepped through history on this page, so "always" leaves it
+     * be, whether the step commits a new document, stays in this one,
+     * or steps only a frame (R2-M1). Its answer — and one a link held
+     * that this step supersedes — shows the pill at once; a commit
+     * clears it.
      */
     fun historyStep() {
-        leaving = Leaving.HistoryStep
         noAutoOpenSeq = seq
+        stayed()
     }
 
     /**
@@ -423,10 +445,10 @@ internal class GatewayOfferTab {
      * `onPageFinished` for [finishedUrl]. For a navigation that ended
      * with no commit (a 204, a failed hop) WebView reports it with that
      * navigation's URL; the page on screen finishing its own load reports
-     * its own, and the link is still on its way.
+     * its own, and the link or form is still on its way.
      */
     fun loadFinished(finishedUrl: String?) {
-        if (leaving == Leaving.Link && finishedUrl != null && finishedUrl != url) {
+        if (leaving && finishedUrl != null && finishedUrl != url) {
             // Inferred, not told: a superseded link's finish looks the
             // same and may land after the next link set out. The pill
             // only, then — never a redirect over that next link.
@@ -437,12 +459,13 @@ internal class GatewayOfferTab {
 
     /**
      * The navigation that was [leaving] is over and the page on screen
-     * stays — a link that became a download or another app's, or one of
-     * the cases above. A lookup it held answers again for this page.
+     * stays — a link or form that became a download or another app's,
+     * a 204, Stop, or the chrome's Back / Forward taking over from it.
+     * A lookup it held answers again for this page.
      */
     fun stayed() {
-        if (leaving == null) return
-        leaving = null
+        if (!leaving) return
+        leaving = false
         val lookup = held ?: return
         held = null
         if (lookup.seq == seq && running?.isActive != true) pending = lookup
@@ -475,7 +498,7 @@ internal class GatewayOfferTab {
      */
     fun answered(lookup: Lookup, found: GatewayOffer.Offer?, verified: Boolean, alwaysOpen: Boolean): Verdict {
         if (lookup.seq != seq || lookup.seq == dismissedSeq) return Verdict.Nothing
-        if (leaving != null) {
+        if (leaving) {
             // Answered while the tab is on its way elsewhere: kept for
             // the page on screen in case it stays ([stayed]).
             held = lookup
@@ -489,6 +512,7 @@ internal class GatewayOfferTab {
             return Verdict.AutoOpen(destination)
         }
         offer = found
+        shown = nextShown.incrementAndGet()
         return Verdict.Show
     }
 
@@ -501,4 +525,9 @@ internal class GatewayOfferTab {
 
     /** Where the pill opens now: the offer's native address for the page's current URL. */
     fun destination(): String? = offer?.destinationFor(url)
+
+    private companion object {
+        /** [shown]'s source: unique across every tab. */
+        val nextShown = AtomicLong()
+    }
 }

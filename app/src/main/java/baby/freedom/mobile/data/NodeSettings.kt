@@ -837,9 +837,14 @@ class NodeSettings private constructor(
      * *Always open without gateway* (#537): a page on an ENS/Swarm gateway
      * (`vitalik.eth.limo`, `<name>.bzz.link`, …) that has a native version
      * opens that `ipfs://` / `bzz://` address instead
-     * ([baby.freedom.mobile.browser.GatewayOffer]).
-     * Off by default, like desktop's `openWithoutGateway`: without it the
-     * address bar only offers the native version.
+     * ([baby.freedom.mobile.browser.GatewayOffer]). Not every such page:
+     * one whose name's answer wasn't cross-checked, one the user reached
+     * or pressed the chrome's Back / Forward on, or stopped, one the page
+     * itself stepped back onto after a redirect, and one whose link or
+     * form ended without a commit only get the pill over the page, as
+     * with this off ([baby.freedom.mobile.browser.GatewayOfferTab.answered]
+     * has the full rule).
+     * Off by default, like desktop's `openWithoutGateway`.
      */
     val openWithoutGateway: Flow<Boolean> = store.data.map { prefs ->
         prefs[Keys.OPEN_WITHOUT_GATEWAY] ?: false

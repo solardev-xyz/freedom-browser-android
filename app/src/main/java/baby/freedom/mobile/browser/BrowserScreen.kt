@@ -2086,8 +2086,15 @@ fun BrowserScreen(
                             // A Swarm CID names its content itself; a name's
                             // answer must have been cross-checked (#96).
                             val verified = direct != null || (result as? EnsResult.Ok)?.trust?.verified == true
-                            val always = runCatching { NodeSettings.get(context).openWithoutGateway.first() }
-                                .getOrDefault(false)
+                            // Not runCatching: a cancellation here is the
+                            // screen's, for [interrupted] below (R2-M2).
+                            val always = try {
+                                NodeSettings.get(context).openWithoutGateway.first()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                false
+                            }
                             val verdict = tab.gatewayOffer.answered(lookup, found, verified, always)
                             if (verdict is GatewayOfferTab.Verdict.AutoOpen && tab in tabs.tabs) {
                                 submit(tab, verdict.destination, SubmitSource.Renderer)
@@ -3023,7 +3030,9 @@ fun BrowserScreen(
                 GatewayOfferPill(
                     protocol = protocol,
                     destination = destination,
-                    offerKey = gatewayOffer,
+                    // Each showing's own, not the offer's value: an
+                    // equal offer (a reload, another tab) re-arms (R2-M4).
+                    offerKey = state.gatewayOffer.shown,
                     onOpen = {
                         // The page's current address, read at the tap.
                         state.gatewayOffer.destination()?.let { submit(state, it) }

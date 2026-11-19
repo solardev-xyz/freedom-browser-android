@@ -50,8 +50,8 @@ import kotlinx.coroutines.delay
  * submit (which lifts the tab's declined-download and prompt blocks), so
  * a press that began before it had been on screen, left alone, for
  * [PromptTapGuard.PROTECTION_MS] — or one through another app's window —
- * is dropped ([protectedPress]), re-armed for each new offer
- * ([offerKey]). Unlike [rememberArmedTapGuard] it doesn't hide other
+ * is dropped ([protectedPress]), re-armed each time an offer is shown
+ * ([offerKey]), even one equal to the last. Unlike [rememberArmedTapGuard] it doesn't hide other
  * apps' overlays: it is up for as long as a gateway page is.
  *
  * The × beside it ([onDismiss]) closes it for the page, which it may
@@ -61,7 +61,7 @@ import kotlinx.coroutines.delay
 internal fun GatewayOfferPill(
     protocol: String,
     destination: String,
-    /** The offer the pill is for: a new one re-arms the tap guard. */
+    /** Which showing the pill is for ([GatewayOfferTab.shown]): a new one re-arms the tap guard. */
     offerKey: Any?,
     onOpen: () -> Unit,
     /** Closes the pill for this page (R1-M4): it may cover the page's own controls. */
