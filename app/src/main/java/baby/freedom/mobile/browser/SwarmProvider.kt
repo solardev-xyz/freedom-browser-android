@@ -1094,18 +1094,22 @@ class SwarmProvider(
      * its size reserved first (`rate_limited` if it doesn't fit what is left
      * of the window, so parallel reads can't together pass it), and the join
      * is held to that size. A reservation stands if the join fails. Only
-     * 32-byte references: an encrypted one is `invalid_reference`.
+     * 32-byte references: an encrypted one is `invalid_reference`. The
+     * join has no deadline of its own on desktop beyond the page's 300 s;
+     * here it gets what is left of [DATA_READ_DEADLINE_MS], so the page
+     * still gets a real answer before its own timer gives up.
      */
     private suspend fun readData(origin: String, params: JSONObject): Reply {
+        val started = System.nanoTime()
         emptyOptions(params)
         val reference = hex32(params.opt("reference"), "invalid_reference", "reference")
         spendBudget(origin, requests = 1)
         reachableOrFail()
         val raw = chunk(reference) ?: return invalid("Data not found: ${reference.swarmHex()}", "chunk_not_found")
-        // The root came off the network: it's paid for whatever happens next.
-        val rootRefusal = chargeBudget(origin, bytes = raw.size.toLong())
         val root = SwarmChunks.parseCac(reference, raw)
             ?: return invalid("Downloaded bytes do not validate as the requested content-addressed chunk", "chunk_type_mismatch")
+        // The root is paid for whatever happens next (desktop charges it once it validates).
+        val rootRefusal = chargeBudget(origin, bytes = raw.size.toLong())
         val size = dataSize(root.spanValue)
         val maxBytes = readMaxBytes(origin)
         if (size > maxBytes.toULong()) {
@@ -1124,14 +1128,21 @@ class SwarmProvider(
             root.payload.copyOf(expected)
         } else {
             if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
+            val left = DATA_READ_DEADLINE_MS - (System.nanoTime() - started) / 1_000_000
             val answer = try {
                 withContext(io) {
-                    node.request("GET", "/bytes/${reference.swarmHex()}", emptyMap(), null, READ_TIMEOUT_MS, maxBytes = expected)
+                    node.request(
+                        "GET", "/bytes/${reference.swarmHex()}", emptyMap(), null,
+                        left.coerceAtLeast(READ_TIMEOUT_MS.toLong()).toInt(), maxBytes = expected,
+                    )
                 }
             } catch (e: Http.AnswerTooLarge) {
                 return Reply.Err(INTERNAL, "Node returned more than $expected bytes for a $expected-byte blob")
             }
-            if (answer.status == 404) return invalid("Data not found: ${reference.swarmHex()}", "chunk_not_found")
+            // As [chunk]: bee says "read chunk failed" with a 500 for a chunk it can't find.
+            if (answer.status == 404 || (answer.status == 500 && answer.message().trim().equals("read chunk failed", ignoreCase = true))) {
+                return invalid("Data not found: ${reference.swarmHex()}", "chunk_not_found")
+            }
             if (!answer.ok) return Reply.Err(INTERNAL, "Data can't be read: ${answer.message()}")
             if (answer.body.size != expected) {
                 return Reply.Err(INTERNAL, "Node returned ${answer.body.size} bytes for a $expected-byte blob")
@@ -1578,6 +1589,12 @@ class SwarmProvider(
 
         private const val PREFLIGHT_TIMEOUT_MS = 10_000
         private const val READ_TIMEOUT_MS = 60_000
+
+        /**
+         * A whole `swarm_readData` call, join included: inside the page's
+         * 300 s (`LONG` in the page script), so a slow join still answers.
+         */
+        private const val DATA_READ_DEADLINE_MS = 290_000L
         private const val UPLOAD_TIMEOUT_MS = 5 * 60_000
 
         private val HEX64 = Regex("^[0-9a-fA-F]{64}$")

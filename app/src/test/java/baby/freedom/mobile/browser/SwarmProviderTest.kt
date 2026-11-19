@@ -98,6 +98,8 @@ class SwarmProviderTest {
         val chunks = HashMap<String, ByteArray>()
         /** Whole blobs by root reference, as `GET /bytes` joins them. */
         val blobs = HashMap<String, ByteArray>()
+        /** `GET /bytes` answers that stand in for the join failing, by root reference. */
+        val blobFailures = HashMap<String, SwarmProvider.Http.Answer>()
         /** Each capped request's path and cap. */
         val caps: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
 
@@ -164,6 +166,8 @@ class SwarmProviderTest {
                     chunks[address.swarmHex()] = wire
                     json(JSONObject().put("reference", address.swarmHex()), 201)
                 }
+                method == "GET" && bare.startsWith("/bytes/") && blobFailures.containsKey(bare.removePrefix("/bytes/")) ->
+                    blobFailures.getValue(bare.removePrefix("/bytes/"))
                 method == "GET" && bare.startsWith("/bytes/") -> blobs[bare.removePrefix("/bytes/")]
                     ?.let { SwarmProvider.Http.Answer(200, emptyMap(), it) } ?: notFound()
                 method == "GET" && bare.startsWith("/chunks/") -> chunks[bare.removePrefix("/chunks/")]
@@ -695,6 +699,13 @@ class SwarmProviderTest {
         val ref = plantBlob(ByteArray(8000) { 3 })
         node.blobs.remove(ref)
         assertEquals("chunk_not_found", err(call("swarm_readData", dataParams(ref))).reason)
+        // bee's own word for a chunk it can't find, as a 500.
+        node.blobs[ref] = ByteArray(8000)
+        node.blobFailures[ref] = SwarmProvider.Http.Answer(500, emptyMap(), JSONObject().put("message", "read chunk failed").toString().toByteArray())
+        assertEquals("chunk_not_found", err(call("swarm_readData", dataParams(ref))).reason)
+        node.blobFailures[ref] = SwarmProvider.Http.Answer(500, emptyMap(), JSONObject().put("message", "joiner broke").toString().toByteArray())
+        assertEquals(-32603, err(call("swarm_readData", dataParams(ref))).code)
+        node.blobFailures.clear()
         node.blobs[ref] = ByteArray(8001)
         val long = err(call("swarm_readData", dataParams(ref)))
         assertEquals(-32603, long.code)
@@ -702,6 +713,19 @@ class SwarmProviderTest {
         node.blobs[ref] = ByteArray(7999)
         val short = err(call("swarm_readData", dataParams(ref)))
         assertTrue(short.message, short.message.contains("7999 bytes for a 8000-byte blob"))
+    }
+
+    @Test
+    fun `a root that isn't the requested chunk costs no bytes, as on desktop`() {
+        val cac = SwarmChunks.cac(ByteArray(4096) { 4 })
+        repeat(100) { i ->
+            val wrong = "%064x".format(i + 1)
+            node.chunks[wrong] = cac.data()
+            assertEquals("chunk_type_mismatch", err(call("swarm_readData", dataParams(wrong), origin = other)).reason)
+        }
+        // Charged, those 100 roots (410 KB) would leave no room for 200 KiB in a 512 KiB window.
+        val ref = plantBlob(ByteArray(200 * 1024) { 5 })
+        ok(call("swarm_readData", dataParams(ref), origin = other))
     }
 
     @Test
@@ -1422,10 +1446,10 @@ class SwarmProviderTest {
             cx.evaluateString(
                 scope,
                 """
-                var sent = [], handler = null;
+                var sent = [], handler = null, delays = [];
                 var window = {
                   location: { protocol: 'https:' },
-                  setTimeout: function () { return 1; }, clearTimeout: function () {},
+                  setTimeout: function (f, ms) { delays.push(ms); return 1; }, clearTimeout: function () {},
                   Promise: Promise, Error: Error, Map: Map, Uint8Array: Uint8Array, ArrayBuffer: ArrayBuffer,
                   BigInt: undefined,
                   btoa: function (s) { var o = ''; for (var i = 0; i < s.length; i++) o += s.charCodeAt(i) + ','; return o; },
@@ -1453,6 +1477,10 @@ class SwarmProviderTest {
             assertEquals("true", cx.evaluateString(scope, "String(window.swarm.isFreedomBrowser)", "flag", 1, null).toString())
             cx.evaluateString(scope, "window.swarm.readData({ reference: 'ab' });", "readData", 1, null)
             assertEquals("swarm_readData", JSONObject(cx.evaluateString(scope, "sent[3]", "sent", 1, null).toString()).getString("method"))
+            // A blob of up to 5 MiB joined from the network gets the page's long timeout, as on desktop.
+            assertEquals("300000", cx.evaluateString(scope, "String(delays[delays.length - 1])", "delay", 1, null).toString())
+            cx.evaluateString(scope, "window.swarm.readChunk({ reference: 'ab' });", "readChunk", 1, null)
+            assertEquals("60000", cx.evaluateString(scope, "String(delays[delays.length - 1])", "delay", 1, null).toString())
 
         } finally {
             RhinoContext.exit()
