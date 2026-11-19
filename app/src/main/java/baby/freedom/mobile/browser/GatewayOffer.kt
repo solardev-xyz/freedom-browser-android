@@ -214,11 +214,6 @@ internal object GatewayOffer {
         shape.reference?.let { Offer(shape.gateway, shape.host, "bzz", "bzz://$it") }
 
     /**
-     * The offer for a name [shape] given its contenthash lookup [result]:
-     * only a settled answer on a native transport (and the one
-     * [Shape.requireProtocol] demands) is offered.
-     */
-    /**
      * [resolve]'s answer for a lookup, or `null` if it failed. The
      * caller's own cancellation propagates (its lookup is
      * [GatewayOfferTab.interrupted]); a [CancellationException] the
@@ -236,6 +231,11 @@ internal object GatewayOffer {
             null
         }
 
+    /**
+     * The offer for a name [shape] given its contenthash lookup [result]:
+     * only a settled answer on a native transport (and the one
+     * [Shape.requireProtocol] demands) is offered.
+     */
     fun offerFor(shape: Shape, result: EnsResult?): Offer? {
         val name = shape.ensName ?: return null
         val ok = result as? EnsResult.Ok ?: return null
