@@ -55,6 +55,12 @@ class BackupRulesTest {
             "File(config.dataDir, \"\$UNCONFIRMED_DEPOSIT_FILE.tmp\")",
             "unconfirmed-deposit.json.tmp",
         ),
+        // The browsing-credit spend ledger (#543): marks against this phone's node; its `.tmp` beside it.
+        Pin(
+            "swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt",
+            "File(config.dataDir, CREDIT_SPEND_FILE)",
+            "credit-spend.json",
+        ),
         Pin("app/src/main/java/baby/freedom/mobile/node/NodeService.kt", "home = filesDir.resolve(\"radicle\")", "radicle"),
         Pin("app/src/main/java/baby/freedom/mobile/node/NodeService.kt", "dataDir = filesDir.resolve(\"ipfs\")", "ipfs"),
         Pin("app/src/main/java/baby/freedom/mobile/node/TorService.kt", "TorNode(filesDir.resolve(\"tor\"))", "tor"),
@@ -64,6 +70,8 @@ class BackupRulesTest {
     private val nodeNames = listOf(
         "swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt" to
             "UNCONFIRMED_DEPOSIT_FILE = \"unconfirmed-deposit.json\"",
+        "swarmnode/src/main/java/baby/freedom/swarm/SwarmNode.kt" to
+            "CREDIT_SPEND_FILE = \"credit-spend.json\"",
     )
 
     /**
@@ -87,6 +95,8 @@ class BackupRulesTest {
         "ant/chunks.sqlite",
         "unconfirmed-deposit.json",
         "unconfirmed-deposit.json.tmp",
+        "credit-spend.json",
+        "credit-spend.json.tmp",
         "radicle/keys/radicle",
         "radicle/keys/radicle.pub",
         "radicle/node/node.db",

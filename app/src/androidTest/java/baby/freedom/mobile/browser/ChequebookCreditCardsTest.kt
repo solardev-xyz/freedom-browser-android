@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -22,6 +23,9 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -58,6 +62,7 @@ class ChequebookCreditCardsTest {
         val swap: SwapStatus?,
         val wanted: Boolean?,
         val expect: String,
+        val spend: CreditSpendFigures? = null,
     )
 
     private val funded = ChequebookState(
@@ -117,6 +122,7 @@ class ChequebookCreditCardsTest {
                         ChequebookCreditCards(
                             state = case.state,
                             swap = case.swap,
+                            spend = case.spend,
                             swapWanted = case.wanted,
                             liabilityOutcome = null,
                             onSwapChange = onSwap,
@@ -196,6 +202,84 @@ class ChequebookCreditCardsTest {
 
     @Test fun emptyAtDoubleFont() = keepsNumbersWholeAtDoubleFont(cases[1], "< 0.000001 xBZZ")
     @Test fun confirmedAtDoubleFont() = keepsNumbersWholeAtDoubleFont(cases[4], "At most 0.011 xBZZ")
+
+    // 2026-11-12 12:00 UTC: when the node started counting.
+    private val spendCase = cases[0].copy(
+        name = "spend",
+        spend = CreditSpendFigures(xbzz("0.00042"), xbzz("0.0031"), 1_794_484_800_000L),
+    )
+
+    /** #543: what the credit paid peers in the last 24 hours and 7 days, in the card itself, as desktop shows it. */
+    private fun showsRecentSpend(dark: Boolean) {
+        render(spendCase, dark)
+        rule.onNodeWithText("Spent, last 24 hours").assertExists()
+        rule.onNodeWithText("0.00042 xBZZ").assertExists()
+        rule.onNodeWithText("Spent, last 7 days").assertExists()
+        rule.onNodeWithText("0.0031 xBZZ").assertExists()
+        rule.onNodeWithText("counted while it runs, since", substring = true).assertExists()
+        save("spend-${if (dark) "dark" else "light"}")
+    }
+
+    @Test fun recentSpendLight() = showsRecentSpend(dark = false)
+    @Test fun recentSpendDark() = showsRecentSpend(dark = true)
+
+    @Test
+    fun recentSpendBeforeTheFirstFigures() {
+        render(spendCase.copy(spend = CreditSpendFigures(null, null, null)), dark = false)
+        rule.onNodeWithText("Spent, last 24 hours").assertExists()
+        assertEquals(2, rule.onAllNodesWithText("Not counted yet").fetchSemanticsNodes().size)
+        rule.onNodeWithText("within a few minutes", substring = true).assertExists()
+    }
+
+    @Test
+    fun noRecentSpendWithoutAChequebook() {
+        render(spendCase.copy(state = ChequebookState(address = "")), dark = false)
+        rule.onNodeWithText("Spent, last 24 hours").assertDoesNotExist()
+    }
+
+    @Test fun recentSpendAtDoubleFont() = keepsNumbersWholeAtDoubleFont(spendCase, "0.0031 xBZZ")
+
+    /** #543: the review a top-up in xDAI opens, the same spend sheet as a deposit's. Never confirmed. */
+    @Test
+    fun theTopUpReviewNamesTheSwapCapTheAmountAndTheGas() {
+        val review = depositReview(
+            funded.copy(walletPlur = xbzz("0.0034"), walletXdaiWei = java.math.BigInteger("1250000000000000000")),
+            xbzz("0.1"),
+        )!!
+        var confirmed = false
+        var dismissed = false
+        rule.setContent {
+            FreedomTheme(darkTheme = false) {
+                Surface(color = MaterialTheme.colorScheme.background) {
+                    Box(Modifier.testTag("page").width(390.dp).height(760.dp)) {
+                        SpendConfirmDialog(
+                            title = "Deposit ${formatBzzExact(review.amountPlur)}?",
+                            body = depositConfirmText(review),
+                            confirmLabel = "Deposit",
+                            onConfirm = { confirmed = true },
+                            onDismiss = { dismissed = true },
+                        )
+                    }
+                }
+            }
+        }
+        rule.onNodeWithText("Deposit 0.1 xBZZ?").assertExists()
+        rule.onNodeWithText("spending at most 1.25 xDAI", substring = true).assertExists()
+        rule.onNodeWithText("moves 0.1 xBZZ into its chequebook at $chequebook", substring = true).assertExists()
+        rule.onNodeWithText("up to 0.02 xDAI of gas for the two transactions", substring = true).assertExists()
+        if (shots) {
+            val dir = File(InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null), "chequebook-shots")
+            dir.mkdirs()
+            val bitmap = rule.onNode(isDialog()).captureToImage().asAndroidBitmap()
+            File(dir, "top-up-review.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        // Cancel, never confirm (the spend guard opens no permit here anyway).
+        // The sheet's buttons arm after its tap-protection delay (real time).
+        rule.waitUntil(10_000) { runCatching { rule.onNodeWithText("Cancel").assertIsEnabled() }.isSuccess }
+        rule.onNodeWithText("Cancel").performClick()
+        assertEquals(false, confirmed)
+        assertEquals(true, dismissed)
+    }
 
     @Test
     fun theSwitchAsksForTheOtherValue() {

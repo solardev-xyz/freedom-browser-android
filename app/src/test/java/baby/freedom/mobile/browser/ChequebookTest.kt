@@ -57,14 +57,24 @@ class ChequebookTest {
         // Nothing read yet, or no chequebook.
         assertTrue(depositBlockedReason(light, ChequebookState(), milli)!!.startsWith("Checking"))
         assertTrue(depositBlockedReason(light, ready.copy(address = ""), milli)!!.contains("first postage stamp"))
-        // No amount chosen; more than the account holds; nothing at all to move.
+        // No amount chosen.
         assertEquals("Choose an amount.", depositBlockedReason(light, ready, null))
+        // More than the account holds (#543): the node swaps xDAI for the rest, once
+        // its xDAI is known, and if it holds any it can swap (6 decimals, as shown).
+        assertTrue(depositBlockedReason(light, ready, DEPOSIT_PRESETS_PLUR[1])!!.startsWith("Checking"))
+        assertNull(depositBlockedReason(light, ready.copy(walletXdaiWei = BigInteger.TEN.pow(17)), DEPOSIT_PRESETS_PLUR[1]))
+        assertNull(depositBlockedReason(light, ready.copy(walletPlur = BigInteger.ZERO, walletXdaiWei = BigInteger.TEN.pow(17)), milli))
         assertEquals(
-            "The node's account holds only 0.003439 xBZZ. Choose a smaller amount, or send xBZZ on Gnosis Chain " +
-                "to the node's address first.",
-            depositBlockedReason(light, ready, DEPOSIT_PRESETS_PLUR[1]),
+            "The node's account holds only 0.003439 xBZZ and no xDAI to swap for the rest. Choose a smaller amount, " +
+                "or send xDAI on Gnosis Chain to the node's address first.",
+            depositBlockedReason(light, ready.copy(walletXdaiWei = BigInteger.TEN.pow(11)), DEPOSIT_PRESETS_PLUR[1]),
         )
-        assertTrue(depositBlockedReason(light, ready.copy(walletPlur = BigInteger.ZERO), milli)!!.contains("holds no xBZZ"))
+        assertTrue(
+            depositBlockedReason(light, ready.copy(walletPlur = BigInteger.ZERO, walletXdaiWei = BigInteger.ZERO), milli)!!
+                .contains("holds no xBZZ and no xDAI"),
+        )
+        // What the account already holds needs no xDAI read.
+        assertNull(depositBlockedReason(light, ready.copy(walletXdaiWei = null), milli))
         // The device-only key never spends; ultra-light or a stopped node has no chequebook to read.
         assertTrue(depositBlockedReason(light.copy(walletIdentity = false), ready, milli)!!.contains("wallet"))
         assertTrue(depositBlockedReason(light.copy(lightMode = false), ready, milli)!!.contains("light mode"))
@@ -74,10 +84,91 @@ class ChequebookTest {
 
     @Test
     fun `the confirmation names the amount, the chequebook in full, and the gas bound`() {
-        val text = depositConfirmText(milli, chequebook)
+        val text = depositConfirmText(DepositReview(chequebook, milli, milli, swapWei = null))
         assertTrue(text, text.startsWith("The node moves 0.001 xBZZ from its account into its chequebook at $chequebook,"))
         assertTrue(text, text.contains("up to 0.01 xDAI of gas for the one transaction"))
         assertTrue(text, text.contains("can't be undone"))
+    }
+
+    @Test
+    fun `a deposit the node's xBZZ covers moves it, a bigger one swaps at most the xDAI shown`() {
+        val xdai = BigInteger("4982657111776494000") // 4.982657111776494 xDAI
+        val state = ChequebookState(address = chequebook, walletPlur = milli, walletXdaiWei = xdai)
+        assertEquals(DepositReview(chequebook, milli, milli, swapWei = null), depositReview(state, milli))
+        val tenth = DEPOSIT_PRESETS_PLUR[2]
+        val review = depositReview(state, tenth)!!
+        // Rounded down to the 6 decimals the review shows: the cap is the figure named.
+        assertEquals(BigInteger("4982657000000000000"), review.swapWei)
+        assertEquals(milli, review.walletPlur)
+        val text = depositConfirmText(review)
+        assertTrue(text, text.startsWith("The node's account holds 0.001 xBZZ, so the node swaps xDAI for the xBZZ it lacks, spending at most 4.982657 xDAI"))
+        assertTrue(text, text.contains("moves 0.1 xBZZ into its chequebook at $chequebook,"))
+        assertTrue(text, text.contains("up to 0.02 xDAI of gas for the two transactions"))
+        assertTrue(text, text.contains("can't be undone"))
+        // Nothing to swap with, nothing read yet, or no chequebook: no review.
+        assertNull(depositReview(state.copy(walletXdaiWei = BigInteger.TEN.pow(11)), tenth))
+        assertNull(depositReview(state.copy(walletXdaiWei = null), tenth))
+        assertNull(depositReview(state.copy(walletPlur = null), milli))
+        assertNull(depositReview(state.copy(address = ""), milli))
+        assertNull(depositReview(state, null))
+    }
+
+    @Test
+    fun `the node's address shows only when it has neither the xBZZ nor xDAI to swap`() {
+        val state = ChequebookState(address = chequebook, walletPlur = milli, walletXdaiWei = BigInteger.ZERO)
+        assertFalse(depositNeedsFunding(state, milli))
+        assertTrue(depositNeedsFunding(state, DEPOSIT_PRESETS_PLUR[2]))
+        assertTrue(depositNeedsFunding(state.copy(walletPlur = BigInteger.ZERO), null))
+        assertFalse(depositNeedsFunding(state.copy(walletXdaiWei = BigInteger.TEN.pow(17)), DEPOSIT_PRESETS_PLUR[2]))
+        assertFalse(depositNeedsFunding(state.copy(walletXdaiWei = null), DEPOSIT_PRESETS_PLUR[2]))
+        // Dust below the 6 decimals shown is no xDAI here either, as for the blocked reason.
+        val dust = state.copy(walletXdaiWei = BigInteger.TEN.pow(11))
+        assertTrue(depositNeedsFunding(dust, DEPOSIT_PRESETS_PLUR[2]))
+        assertTrue(depositBlockedReason(light, dust, DEPOSIT_PRESETS_PLUR[2])!!.contains("no xDAI"))
+        assertNull(depositReview(dust, DEPOSIT_PRESETS_PLUR[2]))
+        assertEquals(
+            BigInteger("4982657111776494000"),
+            walletXdaiFrom("""{"bzzBalance":"34393882720917","nativeTokenBalance":"4982657111776494000","chainID":100}"""),
+        )
+        assertNull(walletXdaiFrom("""{"bzzBalance":"1"}"""))
+    }
+
+    @Test
+    fun `a top-up runs as its own kind of spend, and its failure says where swapped xDAI went`() {
+        assertTrue(spendStatusText(StampClient.Spend.Running(StampClient.Kind.TopUp, null))!!.startsWith("Topping up"))
+        assertEquals("Topped up the credit.", spendStatusText(StampClient.Spend.Done(StampClient.Kind.TopUp, null)))
+        val failed = spendStatusText(StampClient.Spend.Failed(StampClient.Kind.TopUp, null, "not enough xDAI: send 0.02 xDAI more"))!!
+        assertTrue(failed, failed.startsWith("The top-up failed: not enough xDAI: send 0.02 xDAI more."))
+        assertTrue(failed, failed.contains("the xBZZ is in its account"))
+        assertTrue(
+            spendStatusText(StampClient.Spend.Failed(StampClient.Kind.TopUp, null, "x", noReport = true))!!
+                .startsWith("The top-up didn't report back"),
+        )
+        // Past the page's wait it reads as the deposit's "still sending", never a failure.
+        val outcome = StampClient.spendOutcome(StampClient.Kind.TopUp, null, StampClient.Answer.Failed(StampClient.TIMED_OUT, timedOut = true)) {}
+        assertTrue((outcome as StampClient.Spend.Failed).noReport)
+        assertFalse(StampClient.Kind.TopUp.mayRestartGateway)
+    }
+
+    @Test
+    fun `recent spend reads the node's figures, and says when there are none yet`() {
+        val week = creditSpendFrom(JSONObject("""{"chequebook":"$chequebook","dayPlur":"1000000000000","weekPlur":"23000000000000","since":1790856000000}"""))!!
+        assertEquals(CreditSpendFigures(BigInteger("1000000000000"), BigInteger("23000000000000"), 1790856000000L), week)
+        assertEquals("0.0001 xBZZ", creditSpendText(week) { it.dayPlur })
+        assertEquals("0.0023 xBZZ", creditSpendText(week) { it.weekPlur })
+        assertTrue(creditSpendNote(week), creditSpendNote(week).startsWith("What the node paid peers, counted while it runs, since "))
+        assertTrue(creditSpendNote(week), creditSpendNote(week).contains("2026"))
+        // What a reading can't date is named (#566 R1-F1, R1-F3).
+        assertTrue(creditSpendNote(week), creditSpendNote(week).contains("A peer's first payment usually isn't counted"))
+        assertTrue(creditSpendNote(week), creditSpendNote(week).contains("the few minutes before it disconnected, nor anything paid while the node was off"))
+        // No history for this chequebook yet (or no chequebook).
+        val none = creditSpendFrom(JSONObject("""{"chequebook":"$chequebook"}"""))!!
+        assertEquals("Not counted yet", creditSpendText(none) { it.dayPlur })
+        assertTrue(creditSpendNote(none).contains("within a few minutes"))
+        assertEquals(CreditSpendFigures(null, null, null), creditSpendFrom(JSONObject("""{"chequebook":null}""")))
+        // Not read yet.
+        assertEquals("Checking…", creditSpendText(null) { it.dayPlur })
+        assertNull(creditSpendFrom(JSONObject("{}")))
     }
 
     @Test
@@ -327,13 +418,15 @@ class ChequebookTest {
     }
 
     @Test
-    fun `a deposit beyond the node's xBZZ asks to fund the node first`() {
-        val holds = funded.copy(walletPlur = milli)
+    fun `a deposit beyond the node's xBZZ, with no xDAI to swap, asks to fund the node first`() {
+        val holds = funded.copy(walletPlur = milli, walletXdaiWei = BigInteger.ZERO)
         assertFalse(depositNeedsFunding(holds, milli))
         assertFalse(depositNeedsFunding(holds, null))
         assertTrue(depositNeedsFunding(holds, milli.multiply(BigInteger.TEN)))
-        assertTrue(depositNeedsFunding(funded, null)) // holds nothing at all
+        assertTrue(depositNeedsFunding(funded.copy(walletXdaiWei = BigInteger.ZERO), null)) // holds nothing at all
         assertFalse(depositNeedsFunding(funded.copy(walletPlur = null), milli)) // not read yet
+        // With xDAI the node swaps for the rest (#543): nothing to fund first.
+        assertFalse(depositNeedsFunding(holds.copy(walletXdaiWei = BigInteger.TEN.pow(17)), milli.multiply(BigInteger.TEN)))
     }
 
     @Test
@@ -389,6 +482,6 @@ class ChequebookTest {
         assertTrue(intro.contains("never spends more than you deposit"))
         val cost = baby.freedom.mobile.l10n.Strings.get(baby.freedom.mobile.R.string.stamps_credit_cost_note)
         assertTrue(cost.contains("0.59 xBZZ per GB"))
-        assertTrue(depositConfirmText(milli, chequebook).contains("faster downloads"))
+        assertTrue(depositConfirmText(DepositReview(chequebook, milli, milli, swapWei = null)).contains("faster downloads"))
     }
 }

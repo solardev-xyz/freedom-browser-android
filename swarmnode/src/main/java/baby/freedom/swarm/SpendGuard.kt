@@ -67,6 +67,33 @@ sealed interface SpendPlan {
     ) : SpendPlan
 
     /**
+     * Topping up browsing credit with xDAI (#543, ant's `POST
+     * /v0/settlement/deposit?amount=`, `fund_deposit_with_xdai`): swap the
+     * xBZZ the node's account lacks ([maxSwapWei] of xDAI at most, what the
+     * confirmation showed the node holds), then one xBZZ `transfer` to
+     * [chequebook] (40 lowercase hex) of at most [amountPlur]. ant tops the
+     * deposit up to what it read before the swap plus [amountPlur], and
+     * re-reads the chequebook before the transfer: grown meanwhile, it
+     * sends less, which passes; shrunk (a peer cashed a cheque in
+     * between), it would send more, which is refused, and the xBZZ the
+     * swap bought stays in the node's account for a plain deposit. No
+     * approval, no batch, no deploy. [amountPlur] is at most
+     * [SpendPermit.MAX_TOP_UP_PLUR].
+     */
+    data class TopUpCredit(
+        override val owner: String,
+        val chequebook: String,
+        val amountPlur: BigInteger,
+        val maxSwapWei: BigInteger,
+    ) : SpendPlan {
+        init {
+            require(isAddressHex(chequebook)) { "chequebook" }
+            require(amountPlur.signum() > 0 && amountPlur <= SpendPermit.MAX_TOP_UP_PLUR) { "amount" }
+            require(maxSwapWei.signum() >= 0) { "xDAI" }
+        }
+    }
+
+    /**
      * Connecting a batch the wallet bought for the node (#115,
      * `ant_storage_connect_batch`): it buys nothing, but ant then sets up
      * the chequebook — deploys it (issuer = the node) if there's none —
@@ -133,7 +160,9 @@ private fun isAddressHex(s: String) = s.length == 40 && s.all { it in '0'..'9' |
  * another device, which the app doesn't know either). That is safe only
  * because no ant gateway route transfers xBZZ to an address the caller
  * chooses. Several routes transfer xBZZ — `POST /chequebook/deposit`
- * (#117), `POST /v0/settlement/deposit`, and `POST /stamps`, whose
+ * (#117), `POST /v0/settlement/deposit` (which the app itself uses for
+ * an xDAI-funded credit top-up, [SpendPlan.TopUpCredit], #543, always to
+ * the chequebook the node already has), and `POST /stamps`, whose
  * after-buy hook deploys or tops up a chequebook — but every one pays
  * only the node's own chequebook, the one ant loaded or adopted. So
  * during a first buy or connect the only `transfer`s ant can sign go to
@@ -177,8 +206,16 @@ object SpendGuard {
      * open, and closes it however [block] ends. One at a time: a second
      * spend while one runs throws.
      */
-    fun <T> during(plan: SpendPlan, block: () -> T): T {
-        val p = SpendPermit(plan)
+    fun <T> during(plan: SpendPlan, block: () -> T): T = during(SpendPermit(plan), block)
+
+    /**
+     * [during] with a permit the caller made, so it can read afterwards
+     * what the permit let out ([SpendPermit.used]). The permit is closed
+     * when [block] ends: a transport thread that picked it up before and
+     * asks only now is refused, so what [SpendPermit.used] says once this
+     * returns is final.
+     */
+    fun <T> during(p: SpendPermit, block: () -> T): T {
         synchronized(this) {
             check(permit == null) { "another payment is already running" }
             permit = p
@@ -187,6 +224,7 @@ object SpendGuard {
             return block()
         } finally {
             synchronized(this) { if (permit === p) permit = null }
+            p.close()
         }
     }
 
@@ -223,10 +261,29 @@ class SpendPermit(val plan: SpendPlan) {
 
     private val used = HashSet<Slot>()
     private val admitted = HashSet<String>()
+    private var closed = false
+    private var refusedAny = false
+    private var refusedXdai = false
 
-    /** Is [requestJson] a broadcast this permit lets through? Marks its slot used if so. */
+    /**
+     * Is [requestJson] a broadcast this permit lets through? Marks its slot
+     * used if so. Nothing gets through once [close]d, not even a retry of
+     * a transaction admitted before.
+     */
     @Synchronized
     fun admit(requestJson: String): Boolean {
+        if (closed) return false
+        val ok = lets(requestJson)
+        if (!ok) {
+            refusedAny = true
+            // A refused transaction carrying xDAI is a swap: only a swap does.
+            val tx = rawTransaction(requestJson)?.let(::hexBytes)?.let(LegacyTx::decode)
+            if (tx != null && tx.value.signum() != 0) refusedXdai = true
+        }
+        return ok
+    }
+
+    private fun lets(requestJson: String): Boolean {
         val raw = rawTransaction(requestJson) ?: return false
         if (raw in admitted) return true
         val tx = LegacyTx.decode(hexBytes(raw) ?: return false) ?: return false
@@ -235,6 +292,31 @@ class SpendPermit(val plan: SpendPlan) {
         admitted += raw
         return true
     }
+
+    /** Lets nothing more out ([SpendGuard.during] calls it as the spend ends). */
+    @Synchronized
+    fun close() {
+        closed = true
+    }
+
+    /**
+     * Whether a [slot] transaction was let out. A refused broadcast never
+     * leaves the phone (`ant_jni.c`), so false after [close] means none
+     * went out under this permit.
+     */
+    @Synchronized
+    fun used(slot: Slot): Boolean = slot in used
+
+    /** Whether this permit refused a broadcast while it was open (not counting stragglers after [close]). */
+    @Synchronized
+    fun refusedAny(): Boolean = refusedAny
+
+    /**
+     * Whether a refused broadcast carried xDAI, i.e. was a swap (more xDAI
+     * than confirmed): the refusal was about the wallet, not the chequebook.
+     */
+    @Synchronized
+    fun refusedSwap(): Boolean = refusedXdai
 
     /** Which of the plan's transactions [tx] is, or null if it's none of them. */
     internal fun slotFor(tx: LegacyTx): Slot? {
@@ -259,12 +341,26 @@ class SpendPermit(val plan: SpendPlan) {
                     address(0) == plan.chequebook && uint(1) == plan.amountPlur
             }
         }
+        if (plan is SpendPlan.TopUpCredit) {
+            // The swap, within the xDAI the confirmation showed; then one transfer of
+            // at most the confirmed xBZZ to exactly the confirmed chequebook.
+            return when {
+                tx.value.signum() != 0 -> Slot.Swap.takeIf {
+                    to == SWAP_HELPER && selector == SEL_SWAP && words == 64 &&
+                        address(0) == owner && tx.value <= plan.maxSwapWei
+                }
+                to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 -> Slot.Deposit.takeIf {
+                    address(0) == plan.chequebook && uint(1).signum() > 0 && uint(1) <= plan.amountPlur
+                }
+                else -> null
+            }
+        }
         if (tx.value.signum() != 0) {
             // Only the swap carries xDAI, and never more than the confirmation showed.
             val maxSwap = when (plan) {
                 is SpendPlan.BuyStamp -> plan.maxSwapWei
                 is SpendPlan.ExtendStamp -> plan.maxSwapWei
-                is SpendPlan.DepositChequebook, is SpendPlan.ConnectBatch -> return null
+                is SpendPlan.DepositChequebook, is SpendPlan.ConnectBatch, is SpendPlan.TopUpCredit -> return null
             }
             return Slot.Swap.takeIf {
                 to == SWAP_HELPER && selector == SEL_SWAP && words == 64 &&
@@ -275,7 +371,7 @@ class SpendPermit(val plan: SpendPlan) {
         val (depth, amount) = when (plan) {
             is SpendPlan.BuyStamp -> plan.depth to plan.amountPerChunk
             is SpendPlan.ExtendStamp -> plan.depth to plan.amountPerChunk
-            is SpendPlan.DepositChequebook -> return null
+            is SpendPlan.DepositChequebook, is SpendPlan.TopUpCredit -> return null
             is SpendPlan.ConnectBatch -> null to null
         }
         val setup = plan as? SpendPlan.SetsUpChequebook
@@ -363,6 +459,15 @@ class SpendPermit(val plan: SpendPlan) {
 
         /** The most gas a chequebook deposit can cost: [MAX_GAS_WEI] for its one transaction. */
         val DEPOSIT_MAX_GAS_WEI: BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(DEPOSIT_SLOTS.size.toLong()))
+
+        /** What an xDAI-funded credit top-up (#543) may broadcast: the swap and the deposit transfer. */
+        val TOP_UP_SLOTS: Set<Slot> = setOf(Slot.Swap, Slot.Deposit)
+
+        /** The most gas a credit top-up can cost: [MAX_GAS_WEI] for each of [TOP_UP_SLOTS]. */
+        val TOP_UP_MAX_GAS_WEI: BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(TOP_UP_SLOTS.size.toLong()))
+
+        /** The most one credit top-up may deposit: 10 xBZZ, desktop's ceiling for an amount top-up (#488). */
+        val MAX_TOP_UP_PLUR: BigInteger = BigInteger.TEN.pow(17)
 
         private val METHOD = Regex("\"method\"\\s*:\\s*\"([^\"\\\\]*)\"")
         private val PARAMS = Regex("\"params\"\\s*:\\s*\\[\\s*\"(0x[0-9a-fA-F]*)\"\\s*]")

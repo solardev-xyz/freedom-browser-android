@@ -60,10 +60,12 @@
     <string name="stamps_spend_running_buy">Buying the stamp… The node swaps xDAI for the xBZZ it needs, buys the stamp, and waits for each transaction to confirm on Gnosis Chain. This takes a minute or two.</string>
     <string name="stamps_spend_running_extend">Extending the stamp… The node swaps xDAI for the xBZZ it needs, tops the stamp up, and waits for each transaction to confirm. This takes a minute or two.</string>
     <string name="stamps_spend_running_deposit">Depositing… The node moves the xBZZ into its chequebook and waits for the transaction to confirm on Gnosis Chain. This takes up to a minute.</string>
+    <string name="stamps_spend_running_top_up">Topping up… The node swaps xDAI for the xBZZ it lacks, moves the xBZZ into its chequebook, and waits for each transaction to confirm on Gnosis Chain. This takes a minute or two.</string>
     <string name="stamps_spend_running_connect">Connecting the stamp your wallet bought… The node checks it on Gnosis Chain and, the first time, sets up its chequebook. This takes up to a few minutes.</string>
     <string name="stamps_spend_done_buy">Stamp bought. It becomes usable once the network has seen it, usually within a minute.</string>
     <string name="stamps_spend_done_extend">Stamp extended.</string>
     <string name="stamps_spend_done_deposit">Deposited into the chequebook.</string>
+    <string name="stamps_spend_done_top_up">Topped up the credit.</string>
     <string name="stamps_spend_done_connect">Stamp connected: the node publishes with it.</string>
     <!-- %1$s: why, or how it ended. -->
     <string name="stamps_spend_buy_no_report">The stamp purchase didn\'t report back: %1$s</string>
@@ -73,6 +75,8 @@
     <string name="stamps_spend_connect_failed">Connecting the stamp your wallet bought failed: %1$s</string>
     <string name="stamps_spend_deposit_no_report">The deposit didn\'t report back: %1$s</string>
     <string name="stamps_spend_deposit_failed">The deposit failed: %1$s</string>
+    <string name="stamps_spend_top_up_no_report">The top-up didn\'t report back: %1$s</string>
+    <string name="stamps_spend_top_up_failed">The top-up failed: %1$s. If the node had already swapped xDAI, the xBZZ is in its account: deposit it from there.</string>
     <string name="stamps_publish_running_note">A publish is uploading. Buy or search for stamps once it has finished.</string>
     <string name="stamps_title_buy">Buy storage</string>
     <string name="stamps_title_extend">Add time</string>
@@ -249,18 +253,20 @@
     <string name="stamps_chequebook_checking">Checking the node\'s chequebook…</string>
     <string name="stamps_chequebook_none">The node has no chequebook yet. It sets one up with its first postage stamp.</string>
     <string name="stamps_chequebook_checking_xbzz">Checking the node\'s xBZZ…</string>
-    <string name="stamps_chequebook_no_xbzz">The node\'s account holds no xBZZ. Send xBZZ on Gnosis Chain to the node\'s address first: a deposit moves xBZZ the node already holds, it doesn\'t swap xDAI.</string>
+    <string name="stamps_chequebook_no_xbzz">The node\'s account holds no xBZZ and no xDAI. Send xDAI on Gnosis Chain to the node\'s address first: the node swaps it for xBZZ.</string>
     <string name="stamps_chequebook_choose_amount">Choose an amount.</string>
     <!-- %1$s: the xBZZ the node's account holds. -->
-    <string name="stamps_chequebook_holds_only">The node\'s account holds only %1$s. Choose a smaller amount, or send xBZZ on Gnosis Chain to the node\'s address first.</string>
+    <string name="stamps_chequebook_holds_only">The node\'s account holds only %1$s and no xDAI to swap for the rest. Choose a smaller amount, or send xDAI on Gnosis Chain to the node\'s address first.</string>
     <!-- %1$s: the amount; %2$s: the chequebook's address; %3$s: the most the gas costs. -->
+    <!-- %1$s: the node's xBZZ; %2$s: the most xDAI it may swap; %3$s: the amount; %4$s: the chequebook's address; %5$s: the most the gas costs. -->
+    <string name="stamps_chequebook_top_up_confirm">The node\'s account holds %1$s, so the node swaps xDAI for the xBZZ it lacks, spending at most %2$s (the xDAI it holds now). It then moves %3$s into its chequebook at %4$s, and pays up to %5$s of gas for the two transactions. The xBZZ then pays other nodes for pushing what you publish, and, while Pay peers from the chequebook is on, for faster downloads and uploads. These are real transactions on Gnosis Chain and can\'t be undone.</string>
     <string name="stamps_chequebook_deposit_confirm">The node moves %1$s from its account into its chequebook at %2$s, and pays up to %3$s of gas for the one transaction. The xBZZ then pays other nodes for pushing what you publish, and, while Pay peers from the chequebook is on, for faster downloads and uploads. This is a real transaction on Gnosis Chain and can\'t be undone.</string>
 
     <!-- ChequebookScreen.kt -->
     <string name="stamps_chequebook_title">Chequebook</string>
     <string name="stamps_credit_title">Credit</string>
     <string name="stamps_chequebook_none_yet_headline">No chequebook yet</string>
-    <string name="stamps_deposit_intro">Moves xBZZ from the node\'s account into its credit.</string>
+    <string name="stamps_deposit_intro">Adds to the credit from the node\'s account: its xBZZ, and when that isn\'t enough, xDAI the node swaps for the rest.</string>
     <!-- %1$s: a duration ("40 minutes", "3 hours"). -->
     <string name="stamps_deposit_preset_video">About %1$s of HD video</string>
     <string name="stamps_deposit_preset_under_a_minute">Less than a minute of HD video</string>
@@ -304,8 +310,15 @@
     <!-- %1$s: why. -->
     <string name="stamps_credit_lost_failed">Couldn\'t confirm: %1$s</string>
     <string name="stamps_credit_lost_not_recorded">the app couldn\'t save a note of it, so the node wasn\'t asked. Try again.</string>
-    <string name="stamps_credit_fund_node_note">A deposit moves xBZZ the node\'s account already holds. Send xBZZ on Gnosis Chain to this address first, from any wallet, then deposit.</string>
-    <string name="stamps_chequebook_wallet_note">In the node\'s own account: what a deposit moves into the chequebook.</string>
+    <string name="stamps_credit_fund_node_note">Send xDAI (or xBZZ) on Gnosis Chain to this address first, from any wallet, then deposit. The node swaps xDAI for the xBZZ it lacks.</string>
+    <string name="stamps_chequebook_wallet_note">In the node\'s own account: what a deposit moves into the chequebook first.</string>
+    <string name="stamps_chequebook_wallet_xdai_note">Pays the gas, and what a deposit swaps for the xBZZ the node lacks.</string>
+    <string name="stamps_credit_spent_day">Spent, last 24 hours</string>
+    <string name="stamps_credit_spent_week">Spent, last 7 days</string>
+    <string name="stamps_credit_spent_none_yet">Not counted yet</string>
+    <!-- %1$s: the date counting started. -->
+    <string name="stamps_credit_spent_note">What the node paid peers, counted while it runs, since %1$s. A peer\'s first payment usually isn\'t counted (the node lists a peer only once the two have settled), nor what a peer was paid in the few minutes before it disconnected, nor anything paid while the node was off.</string>
+    <string name="stamps_credit_spent_note_none">The node counts what it pays peers while it runs; the first figures show within a few minutes.</string>
     <string name="stamps_deposit">Deposit</string>
     <string name="stamps_chequebook_other_payment">Another payment is running. Deposit once it has finished.</string>
     <string name="stamps_chequebook_searching">The node is searching for your stamps. Deposit once it has finished.</string>
