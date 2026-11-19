@@ -59,6 +59,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.RpcUrls
+import baby.freedom.mobile.chains.rpc.ChainSource
 import baby.freedom.mobile.data.NodeSettings
 import baby.freedom.mobile.ens.EnsQuorum
 import baby.freedom.mobile.ens.EnsRpcConfig
@@ -75,7 +76,9 @@ import kotlinx.coroutines.withContext
  * browser's pages of the same names, cut to what the Android resolver
  * does: the light client's answer first (#101), then the RPC quorum (#96)
  * over the endpoints below, in their order; never a Colibri proof (#529).
- * The *Colibri proofs* switch here governs chain reads (#329). Every
+ * The *Proof check* (Colibri) switch here governs chain reads (#329); its
+ * title is [ChainSource.COLIBRI]'s plain label, the technical detail
+ * under its Advanced fold (#548). Every
  * edit goes to [NodeSettings.ensRpcConfig], which the resolver reads
  * for each lookup, so it applies to the next name without a restart.
  */
@@ -84,8 +87,9 @@ internal val SECTION_ENS: String get() = Strings.get(R.string.names_section_ens)
 internal val SECTION_RPC: String get() = Strings.get(R.string.names_section_rpc)
 
 private val ENS_ABOUT: String get() = Strings.get(R.string.names_ens_about)
-private val ROW_COLIBRI: String get() = Strings.get(R.string.names_colibri_title)
+private val ROW_COLIBRI: String get() = ChainSource.COLIBRI.label
 private val COLIBRI_HELP: String get() = Strings.get(R.string.names_colibri_help)
+private val COLIBRI_ADVANCED: String get() = Strings.get(R.string.names_colibri_advanced)
 private val ROW_ORDER: String get() = Strings.get(R.string.names_order_title)
 private val ORDER_HELP: String get() = Strings.get(R.string.names_order_help)
 private val ROW_CCIP: String get() = Strings.get(R.string.names_ccip_title)
@@ -138,6 +142,7 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
         ROW_COLIBRI,
         onOff(config.colibri),
         COLIBRI_HELP,
+        COLIBRI_ADVANCED,
         Strings.get(R.string.names_search_proof),
         Strings.get(R.string.names_search_verified),
     ),
@@ -218,6 +223,11 @@ internal fun NameResolutionSection(
                 enabled = true,
                 onCheckedChange = { on -> scope.launch { settings.setEnsColibri(on) } },
             )
+            // Lined up with the switch row's title, past its icon column.
+            DetailsExpander(
+                title = stringResource(R.string.names_advanced),
+                modifier = Modifier.padding(start = 48.dp, end = 12.dp),
+            ) { HelpText(COLIBRI_ADVANCED) }
         }
         if ("ccip" in visible) {
             if ("about" in visible || "order" in visible || "colibri" in visible) Spacer(Modifier.height(12.dp))

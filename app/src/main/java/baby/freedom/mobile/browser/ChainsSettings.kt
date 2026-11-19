@@ -370,7 +370,7 @@ internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSou
         mine == members.size -> R.plurals.names_read_step_quorum_all_yours
         else -> R.plurals.names_read_step_quorum_yours_among
     }
-    return policy.readOrder.filter(wired).map { source ->
+    return readStepSources(policy, wired).map { source ->
         when (source) {
             ChainSource.MYOTIS, ChainSource.COLIBRI -> Strings.get(R.string.names_read_step_proof, source.label)
             ChainSource.QUORUM -> if (providers >= policy.quorumM) {
@@ -388,6 +388,10 @@ internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSou
         }
     }
 }
+
+/** The sources [readSteps] lists, one per step and in its order: the chain page puts each one's [ChainSource.advanced] under its step. */
+internal fun readStepSources(policy: ChainAccessPolicy, wired: (ChainSource) -> Boolean): List<ChainSource> =
+    policy.readOrder.filter(wired)
 
 /** How often the chain page re-reads [proofTierGaps] while it's open. */
 private const val PROOF_TIER_REFRESH_MS = 1_000L
@@ -719,11 +723,21 @@ internal fun ChainDetailPage(
                     }
                     SectionCard(title = stringResource(R.string.names_how_reads_are_checked)) {
                         val steps = readSteps(chain, policy, answers)
+                        val stepSources = readStepSources(policy, answers)
                         steps.forEachIndexed { i, step ->
                             Text(
                                 stringResource(R.string.names_read_step_numbered, i + 1, step),
                                 style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(top = if (i == 0) 0.dp else 6.dp),
                             )
+                            // The technical name the plain label stands for (#548).
+                            stepSources.getOrNull(i)?.let { source ->
+                                Text(
+                                    source.advanced,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                         for (note in proofTierNotes(chain, gaps)) {
                             Text(
