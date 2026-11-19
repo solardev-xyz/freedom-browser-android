@@ -73,8 +73,9 @@ import kotlinx.coroutines.withContext
 /*
  * Settings → Name resolution and → RPC providers (#102): the desktop
  * browser's pages of the same names, cut to what the Android resolver
- * does: a Colibri proof first (#100), then the RPC quorum (#96) over the
- * endpoints below, in their order. Every
+ * does: the light client's answer first (#101), then the RPC quorum (#96)
+ * over the endpoints below, in their order; never a Colibri proof (#529).
+ * The *Colibri proofs* switch here governs chain reads (#329). Every
  * edit goes to [NodeSettings.ensRpcConfig], which the resolver reads
  * for each lookup, so it applies to the next name without a restart.
  */

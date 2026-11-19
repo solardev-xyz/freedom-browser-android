@@ -16,7 +16,7 @@ import org.json.JSONObject
 
 /**
  * The router's [ChainSource.COLIBRI] tier (#329): corpus.core's Colibri
- * stateless verifier ([EnsColibri], the one name resolution uses) checks
+ * stateless verifier ([EnsColibri]; name resolution doesn't use it, #529) checks
  * a remote prover's proof on this device against the chain's sync
  * committee, on Ethereum and Gnosis. With *privacy mode basic* the state
  * a read touches is fetched from the chain's own RPCs (the router's pool,
@@ -31,15 +31,15 @@ import org.json.JSONObject
  * `eth_blockNumber` is answered from a proven `latest` block, no older
  * than [EnsColibri.MAX_LATEST_AGE_SECONDS]. At most [maxInFlight] reads
  * at once: past that the router moves straight on rather than queueing
- * behind the verifier's one lock (which name resolution shares). Never
+ * behind the verifier's one lock. Never
  * broadcasts.
  *
  * Only while [enabled]: the *Colibri proofs* switch (Settings → Name
  * resolution), which covers these reads too — off, nothing goes to the
  * prover and reads start at the quorum.
  *
- * **Back-off**, per chain, as name resolution's ([baby.freedom.mobile.ens.EnsResolver]
- * `ColibriBackoff`): a call that can't reach the chain's provers or
+ * **Back-off**, per chain, with the figures name resolution's Colibri
+ * tier used before #529: a call that can't reach the chain's provers or
  * servers ([EnsColibri.Failure.unreachable], or an unexpected error),
  * or that outlasts the router's wait ([RouterWait]: not a reader that
  * stopped waiting sooner, which says nothing about the prover), makes the tier unavailable for
@@ -370,7 +370,7 @@ internal class ColibriChainSource(
         /** Sites' share of [MAX_IN_FLIGHT]: the wallet's and the Swarm node's reads always keep two. */
         const val MAX_PAGE_IN_FLIGHT = 2
 
-        /** Name resolution's figures ([baby.freedom.mobile.ens.EnsResolver.COLIBRI_BACKOFF_MS]). */
+        /** 30 s, doubling up to 5 min: name resolution's Colibri back-off before #529. */
         const val BACKOFF_MS = 30_000L
         const val BACKOFF_MAX_MS = 5 * 60_000L
 
