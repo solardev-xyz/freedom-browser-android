@@ -1,6 +1,14 @@
 package baby.freedom.mobile.browser
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -139,6 +147,8 @@ fun TabSwitcherScreen(
     val showPrivate = panes && privatePane
     val paneTabs = paneTabs(tabs.tabs, showPrivate)
     val activeId = tabs.active.id
+    // The ⋮ menu's *Recently closed* list (#546) is open.
+    var closedListOpen by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -211,6 +221,17 @@ fun TabSwitcherScreen(
                     Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.browser_tabs_menu))
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    // Closed private tabs aren't kept (#86), so the list
+                    // belongs to the normal pane, as Reopen does.
+                    if (!showPrivate && tabs.canReopenClosedTab) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.browser_tabs_recently_closed)) },
+                            onClick = {
+                                menuOpen = false
+                                closedListOpen = true
+                            },
+                        )
+                    }
                     if (showPrivate) {
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.browser_tabs_close_private)) },
@@ -234,6 +255,20 @@ fun TabSwitcherScreen(
                     }
                 }
             }
+        }
+
+        // Above the empty state's early return: the list is offered with
+        // no tab open too.
+        if (closedListOpen && !showPrivate) {
+            RecentlyClosedSheet(
+                closed = tabs.recentlyClosed,
+                onReopen = { group ->
+                    // Gone from the stack meanwhile: nothing comes back,
+                    // and the switcher stays.
+                    if (tabs.reopenClosedTab(group) != null) onDismiss()
+                },
+                onDismiss = { closedListOpen = false },
+            )
         }
 
         if (paneTabs.isEmpty()) {
@@ -329,6 +364,101 @@ fun TabSwitcherScreen(
             }
         }
     }
+}
+
+/**
+ * The ⋮ menu's *Recently closed* list (#546): every entry of the reopen
+ * stack, most recently closed first, as desktop's History > Recently
+ * Closed. A row is one close — a single tab (its title, and its address
+ * under it), or a bulk close (how many tabs, and their titles) that
+ * comes back whole, as Reopen brings it back. Tapping a row reopens it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecentlyClosedSheet(
+    closed: List<TabsState.ClosedGroup>,
+    onReopen: (TabsState.ClosedGroup) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    // Emptied meanwhile (Ctrl+Shift+T, an Undo): nothing left to offer.
+    LaunchedEffect(closed.isEmpty()) { if (closed.isEmpty()) onDismiss() }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Text(
+            stringResource(R.string.browser_tabs_recently_closed),
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier
+                .padding(horizontal = 24.dp, vertical = 8.dp)
+                .semantics { heading() },
+        )
+        LazyColumn(modifier = Modifier.fillMaxWidth().navigationBarsPadding(), contentPadding = PaddingValues(bottom = 8.dp)) {
+            items(closed) { group ->
+                val row = recentlyClosedRow(group)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .clickable(role = Role.Button) {
+                            afterUnlessDisposed(scope, { sheetState.hide() }) {
+                                onDismiss()
+                                onReopen(group)
+                            }
+                        }
+                        .padding(horizontal = 24.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Restore, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.size(16.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            row.headline,
+                            style = MaterialTheme.typography.bodyLarge,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (row.detail.isNotBlank()) {
+                            Text(
+                                row.detail,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** What a *Recently closed* row says: [headline], and [detail] under it (blank for none). */
+internal data class RecentlyClosedRow(val headline: String, val detail: String)
+
+/**
+ * The row for [group] (#546). A single tab: its title — or, with none,
+ * its address, or "New tab" as its card would say — and its address
+ * under it (the one the bar showed, so `name.eth/…` rather than the
+ * virtual origin it is served from). A bulk close: "N tabs", and their
+ * titles under it.
+ */
+internal fun recentlyClosedRow(group: TabsState.ClosedGroup): RecentlyClosedRow {
+    // Bounded, as the cards' titles: an address can be up to 2 MiB.
+    fun address(tab: TabsState.ClosedTab) =
+        AddressFieldText.row(tab.addressBarText).ifBlank { AddressFieldText.row(tab.url) }
+    fun name(tab: TabsState.ClosedTab) =
+        AddressFieldText.row(tab.title).ifBlank { address(tab) }.ifBlank { Strings.get(R.string.browser_tabs_new_tab) }
+    val only = group.tabs.singleOrNull()
+    if (only != null) {
+        val address = address(only)
+        val name = name(only)
+        return RecentlyClosedRow(name, if (address == name) "" else address)
+    }
+    return RecentlyClosedRow(
+        Strings.plural(R.plurals.browser_tabs_recently_closed_group, group.tabs.size, group.tabs.size),
+        AddressFieldText.row(group.tabs.joinToString(", ") { name(it) }),
+    )
 }
 
 /**

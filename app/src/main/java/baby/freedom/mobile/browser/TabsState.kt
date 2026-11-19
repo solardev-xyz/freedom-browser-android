@@ -212,6 +212,15 @@ class TabsState(
         get() = closedTabs.isNotEmpty()
 
     /**
+     * The reopen stack, most recently closed first: the switcher's
+     * *Recently closed* list (#546), one entry per close — a bulk close
+     * is one entry, as Reopen brings it back whole. Private tabs are
+     * never on it (#86). Observable.
+     */
+    val recentlyClosed: List<ClosedGroup>
+        get() = closedTabs.asReversed().toList()
+
+    /**
      * Hook installed by the [BrowserWebViewHost] so the find bar can drive
      * the given tab's `findAllAsync` / `findNext` / `clearMatches`. Like
      * [stopLoading], only the host knows which physical WebView backs a
@@ -778,8 +787,17 @@ class TabsState(
      * now if it's one of them, else the last one back), or null if
      * there was nothing to reopen.
      */
-    fun reopenClosedTab(): BrowserState? {
-        val group = closedTabs.removeLastOrNull() ?: return null
+    fun reopenClosedTab(): BrowserState? = closedTabs.lastOrNull()?.let(::reopenClosedTab)
+
+    /**
+     * Reopen [group] from the *Recently closed* list (#546), as Reopen
+     * would if it were the most recent: a single tab comes back active,
+     * a bulk close as [reopenClosedTab] has it. Null, with nothing
+     * changed, if [group] is no longer on the stack (reopened or
+     * forgotten meanwhile) — not some other entry in its place.
+     */
+    fun reopenClosedTab(group: ClosedGroup): BrowserState? {
+        if (!closedTabs.remove(group)) return null
         return reopen(group)
     }
 
