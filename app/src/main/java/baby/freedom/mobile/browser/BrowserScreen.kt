@@ -121,6 +121,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
@@ -2074,13 +2075,7 @@ fun BrowserScreen(
                             val result = if (direct != null || shape.ensName == null) {
                                 null
                             } else {
-                                try {
-                                    ensResolver.resolveContenthash(shape.ensName, tab.private)
-                                } catch (e: CancellationException) {
-                                    throw e
-                                } catch (e: Exception) {
-                                    null
-                                }
+                                GatewayOffer.answerOf { ensResolver.resolveContenthash(shape.ensName, tab.private) }
                             }
                             val found = direct ?: GatewayOffer.offerFor(shape, result)
                             // A Swarm CID names its content itself; a name's
@@ -2098,12 +2093,21 @@ fun BrowserScreen(
                             val verdict = tab.gatewayOffer.answered(lookup, found, verified, always)
                             if (verdict is GatewayOfferTab.Verdict.AutoOpen && tab in tabs.tabs) {
                                 submit(tab, verdict.destination, SubmitSource.Renderer)
+                                // Its probe, if it waits on one before it
+                                // loads: a link the page sets out on
+                                // meanwhile cancels it (R3-M1).
+                                tab.gatewayOffer.autoOpenProbing(
+                                    lookup,
+                                    tab.pendingProbeJob.takeIf { tab.pendingProbeSource == SubmitSource.Renderer },
+                                )
                             }
                         } catch (e: CancellationException) {
                             // Cancelled with this screen (an Activity
                             // recreation) rather than by a later load:
-                            // the next screen runs it (R1-M6).
-                            tab.gatewayOffer.interrupted(lookup)
+                            // the next screen runs it (R1-M6). Only if
+                            // this job was: another cancellation is no
+                            // reason to run it again at once (R3-M3).
+                            if (!isActive) tab.gatewayOffer.interrupted(lookup)
                             throw e
                         }
                     }

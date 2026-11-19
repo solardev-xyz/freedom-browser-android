@@ -4,9 +4,18 @@ import baby.freedom.mobile.ens.Base32
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
 import baby.freedom.mobile.ens.EnsTrust
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -203,6 +212,25 @@ class GatewayOfferTest {
         assertNull(GatewayOffer.offerFor(limo, null))
     }
 
+    @Test
+    fun `a cancellation the resolver raises is no answer, the caller's own propagates`() = runTest {
+        // R3-M3: only the lookup job's own cancellation re-queues it.
+        assertNull(GatewayOffer.answerOf { throw CancellationException("the resolver's own") })
+        assertNull(GatewayOffer.answerOf { throw IllegalStateException("no RPC") })
+        assertEquals(ipfsOk, GatewayOffer.answerOf { ipfsOk })
+        val started = CompletableDeferred<Unit>()
+        val job = launch {
+            GatewayOffer.answerOf {
+                started.complete(Unit)
+                awaitCancellation()
+            }
+            fail("a cancelled caller must not get an answer")
+        }
+        started.await()
+        job.cancelAndJoin()
+        assertTrue(job.isCancelled)
+    }
+
     // --- one tab ---
 
     private val limoUrl = "https://vitalik.eth.limo/blog"
@@ -327,6 +355,76 @@ class GatewayOfferTest {
         // It commits: nothing comes back.
         assertNull(tab.committed("https://example.com/", traversal = false))
         assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a link the page follows while always's redirect waits on its probe cancels that probe`() {
+        // R3-M1: the probe's load would stop the link the user tapped.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertTrue(tab.take(lookup))
+        assertTrue(tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true) is GatewayOfferTab.Verdict.AutoOpen)
+        // As the screen does it: the redirect's submit starts a load, then
+        // reports the probe that load waits on.
+        tab.loadStarted()
+        val probe = Job()
+        tab.autoOpenProbing(lookup, probe)
+        assertFalse(tab.linkFollowed(Job())) // some other probe: not ours to cancel
+        tab.loadStarted()
+        tab.autoOpenProbing(lookup, probe)
+        assertTrue(tab.linkFollowed(probe))
+        assertFalse(tab.linkFollowed(probe)) // once
+        // The link became a download: the page gets its lookup back, and
+        // its answer counts.
+        tab.stayed()
+        val back = tab.pending!!
+        assertEquals(lookup.url, back.url)
+        assertTrue(tab.take(back))
+        assertTrue(tab.answered(back, limoOffer, verified = true, alwaysOpen = true) is GatewayOfferTab.Verdict.AutoOpen)
+        // The link commits instead: the gateway page is no Back target
+        // of a redirect that never happened, so it is redirected again.
+        val tab2 = GatewayOfferTab()
+        val l2 = tab2.committed(limoUrl, traversal = false)!!
+        tab2.answered(l2, limoOffer, verified = true, alwaysOpen = true)
+        tab2.loadStarted()
+        tab2.autoOpenProbing(l2, probe)
+        assertTrue(tab2.formPosted(probe))
+        assertNull(tab2.committed("https://example.com/", traversal = false))
+        assertTrue(tab2.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `a probe the redirect no longer waits on is not cancelled by a link`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        tab.loadStarted()
+        val probe = Job()
+        tab.autoOpenProbing(lookup, probe)
+        tab.loadStarted() // the user's own submit took over
+        assertFalse(tab.linkFollowed(probe))
+        val again = tab.committed(limoUrl, traversal = false)!!
+        tab.answered(again, limoOffer, verified = true, alwaysOpen = true)
+        tab.loadStarted()
+        tab.autoOpenProbing(again, null) // loaded at once: nothing to cancel
+        assertFalse(tab.linkFollowed(null))
+    }
+
+    @Test
+    fun `always opens the route the page pushed before the answer came`() {
+        // R3-M2: a hash router's `/#/swap`, pushed before the lookup answered.
+        val tab = GatewayOfferTab()
+        val root = "https://vitalik.eth.limo/"
+        val offer = GatewayOffer.offerFor(GatewayOffer.parse(root)!!, ipfsOk)!!
+        val lookup = tab.committed(root, traversal = false)!!
+        tab.located("https://vitalik.eth.limo/#/swap")
+        assertEquals(
+            GatewayOfferTab.Verdict.AutoOpen("ipfs://vitalik.eth/#/swap"),
+            tab.answered(lookup, offer, verified = true, alwaysOpen = true),
+        )
+        assertNull(tab.visit("https://bafy.ipfs.example/"))
+        // The page's own `history.back()` lands on the route: it stays.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit("https://vitalik.eth.limo/#/swap", offer = offer))
     }
 
     @Test

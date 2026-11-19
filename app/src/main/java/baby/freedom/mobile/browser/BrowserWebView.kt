@@ -4061,7 +4061,13 @@ private fun buildRefreshableWebView(
                 // A link the page follows: a gateway lookup still out
                 // never redirects over it, and is held for the page on
                 // screen in case the link never commits (#537 R1-M1).
-                if (request.isForMainFrame && !request.isRedirect) state.gatewayOffer.linkFollowed()
+                // Nor does the probe "always"'s redirect waits on: its load
+                // would stop this one (R3-M1).
+                if (request.isForMainFrame && !request.isRedirect &&
+                    state.gatewayOffer.linkFollowed(state.pendingProbeJob)
+                ) {
+                    state.cancelPendingProbe()
+                }
                 // A new top-level navigation supersedes whatever was
                 // pending, which may never report back (an ERR_ABORTED
                 // fetch sends nothing): drop it, or a service worker's
@@ -4160,7 +4166,9 @@ private fun buildRefreshableWebView(
                         // page posts, gesture or not (#537 R2-M5). Posted
                         // now, so it lands before the form's commit.
                         if (request.method.equals("POST", ignoreCase = true)) {
-                            view?.post { state.gatewayOffer.formPosted() }
+                            view?.post {
+                                if (state.gatewayOffer.formPosted(state.pendingProbeJob)) state.cancelPendingProbe()
+                            }
                         }
                         // x402 (#140): a form POST — gesture or not —
                         // replaces a paid request in flight; its answer

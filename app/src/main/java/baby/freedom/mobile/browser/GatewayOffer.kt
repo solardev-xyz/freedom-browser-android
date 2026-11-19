@@ -6,7 +6,10 @@ import androidx.compose.runtime.setValue
 import baby.freedom.mobile.ens.Base32
 import baby.freedom.mobile.ens.EnsInput
 import baby.freedom.mobile.ens.EnsResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -215,6 +218,24 @@ internal object GatewayOffer {
      * only a settled answer on a native transport (and the one
      * [Shape.requireProtocol] demands) is offered.
      */
+    /**
+     * [resolve]'s answer for a lookup, or `null` if it failed. The
+     * caller's own cancellation propagates (its lookup is
+     * [GatewayOfferTab.interrupted]); a [CancellationException] the
+     * resolver raises with the caller still live is a failure like any
+     * other — not a cancellation, which would put the lookup straight
+     * back to be run again (R3-M3).
+     */
+    suspend fun answerOf(resolve: suspend () -> EnsResult?): EnsResult? =
+        try {
+            resolve()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            null
+        } catch (e: Exception) {
+            null
+        }
+
     fun offerFor(shape: Shape, result: EnsResult?): Offer? {
         val name = shape.ensName ?: return null
         val ok = result as? EnsResult.Ok ?: return null
@@ -234,7 +255,9 @@ internal object GatewayOffer {
  * follows ([linkFollowed]), forms it posts ([formPosted]) and navigations
  * that end without a commit ([stayed], [stopped], [loadFinished]); the screen reports its own loads
  * ([loadStarted]) and the chrome's Back / Forward ([historyStep]), runs
- * the lookups ([Lookup]) and acts on [answered]'s verdict.
+ * the lookups ([Lookup]), acts on [answered]'s verdict and reports the
+ * probe a redirect waits on ([autoOpenProbing]), which a link or form
+ * cancels.
  *
  * An answer is acted on only while nothing is taking the tab elsewhere:
  * a load the tab starts drops it, a link or form the page sent on its
@@ -303,6 +326,16 @@ internal class GatewayOfferTab {
     private var redirectLanded = false
 
     /**
+     * The probe "always"'s redirect is waiting on before it loads (a
+     * name's resolve, a gateway's peers), and the lookup that asked for
+     * it: a link or form the page sets out on meanwhile cancels it, as
+     * its own commit would — the probe's load would otherwise stop the
+     * link the user just tapped (R3-M1). See [autoOpenProbing].
+     */
+    private var autoOpenProbe: Job? = null
+    private var autoOpenLookup: Lookup? = null
+
+    /**
      * A navigation the page started away from itself is under way and
      * hasn't committed: a link the WebView follows, or a form it posts.
      * An answer arriving now is held ([held]), never acted on — a
@@ -342,6 +375,8 @@ internal class GatewayOfferTab {
         pending = null
         leaving = false
         held = null
+        autoOpenProbe = null
+        autoOpenLookup = null
         val at = url.orEmpty()
         this.url = at
         val shape = GatewayOffer.parse(at)
@@ -398,25 +433,55 @@ internal class GatewayOfferTab {
         pending = null
         leaving = false
         held = null
+        autoOpenProbe = null
+        autoOpenLookup = null
+    }
+
+    /**
+     * The screen submitted [lookup]'s [Verdict.AutoOpen] and it waits on
+     * [probe] (the tab's pending probe) before it loads; `null` if it
+     * loaded at once. Called after the submit, whose [loadStarted]
+     * would otherwise clear it — and which moved [seq] on with the page
+     * still on screen: the lookup is kept under the number it has now,
+     * so a link that cancels the probe can hold it for that page.
+     */
+    fun autoOpenProbing(lookup: Lookup, probe: Job?) {
+        autoOpenProbe = probe
+        autoOpenLookup = if (probe != null) lookup.copy(seq = seq) else null
     }
 
     /**
      * The WebView follows a main-frame link the page started. Its
      * lookup goes on: if the link never commits — a download, a 204 —
      * the page on screen still gets its pill (R1-M1).
+     *
+     * [probe] is the tab's pending probe now. `true` if it is the one
+     * "always"'s redirect waits on, which the caller must cancel
+     * ([BrowserState.cancelPendingProbe]): the link supersedes it, and
+     * its lookup is held for the page like any other (R3-M1).
      */
-    fun linkFollowed() {
+    fun linkFollowed(probe: Job? = null): Boolean {
         leaving = true
+        val redirect = autoOpenProbe
+        val lookup = autoOpenLookup
+        autoOpenProbe = null
+        autoOpenLookup = null
+        if (redirect == null || probe !== redirect) return false
+        // The redirect never happened: the page is no Back target, and
+        // its answer waits on the link like one that came in now.
+        redirectedFrom = null
+        redirectLanded = false
+        if (lookup != null && lookup.seq == seq) held = lookup
+        return true
     }
 
     /**
      * The page posts a form in its main frame (R2-M5). A POST never
      * reaches `shouldOverrideUrlLoading`, so the interceptor reports it;
-     * held like a link, so "always" doesn't cancel the user's submit.
+     * held like a link, so "always" doesn't cancel the user's submit —
+     * nor does its probe (see [linkFollowed]).
      */
-    fun formPosted() {
-        leaving = true
-    }
+    fun formPosted(probe: Job? = null): Boolean = linkFollowed(probe)
 
     /**
      * The chrome's Back / Forward. Never redirected over (R1-F1): the
@@ -506,8 +571,12 @@ internal class GatewayOfferTab {
         }
         if (found == null) return Verdict.Nothing
         if (lookup.mayAutoOpen && lookup.seq != noAutoOpenSeq && alwaysOpen && verified) {
-            val destination = found.destinationFor(lookup.url) ?: return Verdict.Nothing
-            redirectedFrom = lookup.url
+            // The page's URL now, not at its commit: a hash route it
+            // pushed meanwhile is where it is, the native page's
+            // destination and its own Back's target (R3-M2).
+            val at = url
+            val destination = found.destinationFor(at) ?: return Verdict.Nothing
+            redirectedFrom = at
             redirectLanded = false
             return Verdict.AutoOpen(destination)
         }
