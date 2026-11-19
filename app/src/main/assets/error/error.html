@@ -119,8 +119,10 @@
       const detail = params.get('detail');
       const continueUrl = params.get('continue');
       const resolved = params.get('resolved');
-      // Why a Swarm probe gave up (GatewayProbe, ErrorPage.SwarmFailure);
-      // absent on a failed WebView load and on older history entries.
+      // Why a Swarm probe gave up (GatewayProbe, ErrorPage.SwarmFailure),
+      // or path_not_found for a failed WebView load's 404 the interceptor
+      // tagged as a path the site lacks (X-Swarm-Path-Not-Found); absent
+      // on any other failed WebView load and on older history entries.
       const swarmReason = params.get('reason');
       const swarmStatus = params.get('status');
       const swarmPeers = params.get('peers') === null ? null : Number(params.get('peers'));
@@ -206,7 +208,7 @@
           }
           default: {
             // 'not_found': the probe's 5-minute budget ran out. No
-            // reason: a failed load, or a page from before #536.
+            // reason: an untagged failed load, or a page from before #536.
             const peers = Number.isFinite(swarmPeers) ? swarmPeers : null;
             let description;
             // An ENS site's failed load (protocol `ens`) is as likely a

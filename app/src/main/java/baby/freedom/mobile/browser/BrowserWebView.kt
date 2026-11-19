@@ -165,10 +165,12 @@ internal fun gatewayResponseHeaders(fields: Map<String?, List<String>?>): Map<St
 internal const val NAME_RESOLUTION_ERROR_HEADER = "X-Name-Resolution-Error"
 
 /**
- * Header on a main-frame Swarm 404 the interceptor fetched (#536) whose
- * body is ant's `path address not found`, final by [GatewayProbe]'s own
- * rule (answered within [GatewayProbe.WARM_404_MS], or the attempt before
- * said the same): the site's manifest has no such path. Tells
+ * Header on a navigation's Swarm 404 the interceptor fetched (#536) — the
+ * main frame's own, or one a service worker forwarded ([isDocumentRequest])
+ * — whose body is ant's `path address not found`, final by
+ * [GatewayProbe]'s own rule (answered within [GatewayProbe.WARM_404_MS],
+ * or the attempt before said the same): the site's manifest has no such
+ * path. Tells
  * `onReceivedHttpError` to show "Page not found" for a link inside a
  * site, which never goes through the probe, rather than "not found yet".
  */
@@ -6816,7 +6818,7 @@ private sealed class FetchAttempt {
     data class Response(
         val response: WebResourceResponse,
         val transient: Boolean,
-        /** A main-frame Swarm 404 with ant's `path address not found` body ([fetchOnce] reads it ahead). */
+        /** A navigation's Swarm 404 with ant's `path address not found` body ([fetchOnce] reads it ahead). */
         val missingPath: Boolean = false,
         /** Its headers came within [GatewayProbe.WARM_404_MS]: from a manifest the node held. */
         val warm: Boolean = false,
@@ -6855,8 +6857,10 @@ internal fun fetchWithRetry(
     abandon: AbandonSignal? = null,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
-    // The previous answer was a cold `path address not found` still
-    // awaiting the next one's confirmation, as in [GatewayProbe.probe].
+    // The previous attempt was a cold `path address not found` still
+    // awaiting the next one's confirmation, by [GatewayProbe.probe]'s
+    // rule: only the very next attempt confirms it, so any other answer
+    // or a failed attempt starts the confirmation over.
     var coldMissingPath = false
     fun abandoned(): WebResourceResponse {
         lastResponse?.data?.let { runCatching { it.close() } }
@@ -6896,7 +6900,10 @@ internal fun fetchWithRetry(
                     return attempt.response
                 }
                 coldMissingPath = attempt.missingPath
-                if (!attempt.transient) return attempt.response
+                // A cold miss awaits the next answer even where a 404
+                // isn't retried: a navigation a service worker forwarded
+                // comes with a subresource's policy.
+                if (!attempt.transient && !attempt.missingPath) return attempt.response
                 lastResponse = attempt.response
                 Log.i(
                     LOG_TAG,
@@ -6905,7 +6912,9 @@ internal fun fetchWithRetry(
                 )
             }
             FetchAttempt.Unreachable -> return lastResponse
-            FetchAttempt.Retry -> {}
+            // A timeout or dropped connection, as the probe's timed-out
+            // attempt: it doesn't confirm a cold miss before it.
+            FetchAttempt.Retry -> coldMissingPath = false
             FetchAttempt.Abandoned -> return abandoned()
         }
     }
@@ -6995,9 +7004,7 @@ private fun fetchOnce(
         // A navigation's 404 from ant says whether the site lacks the
         // path (#536): its short body is read ahead and handed on whole.
         var missingPath = false
-        if (raw != null && status == 404 && req.isForMainFrame && conn.requestMethod != "HEAD" &&
-            GatewayUrls.extractBase(targetUrl)?.protocol == "bzz"
-        ) {
+        if (raw != null && readsAheadForMissingPath(req, status, conn.requestMethod, targetUrl)) {
             val head = readAhead(raw, MISSING_PATH_PEEK_BYTES)
             missingPath = GatewayProbe.missingPathBody(String(head, Charsets.UTF_8))
             raw = java.io.SequenceInputStream(ByteArrayInputStream(head), raw)
@@ -7067,6 +7074,22 @@ private fun fetchOnce(
         deadline?.headersReceived()
     }
 }
+
+/**
+ * Does [fetchOnce] read ahead this answer's body for ant's `path address
+ * not found` (#536)? A Swarm 404 to a GET for a document: the main frame,
+ * or a navigation a service worker forwarded to the network, which comes
+ * in as not-main-frame ([isDocumentRequest], PR #557 R2-M1).
+ */
+internal fun readsAheadForMissingPath(
+    req: WebResourceRequest,
+    status: Int,
+    method: String?,
+    targetUrl: String,
+): Boolean =
+    status == 404 && method != "HEAD" &&
+        isDocumentRequest(req.isForMainFrame, req.requestHeaders) &&
+        GatewayUrls.extractBase(targetUrl)?.protocol == "bzz"
 
 /** How much of a navigation's Swarm 404 body [fetchOnce] reads ahead: ant's JSON is far shorter. */
 private const val MISSING_PATH_PEEK_BYTES = 1_024

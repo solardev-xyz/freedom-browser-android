@@ -43,10 +43,14 @@ import java.net.URLEncoder
  *                does resolve to (#97), for "resolves to IPFS, not
  *                Swarm" and a button that opens it there.
  *  - `reason` / `status` / `peers` — `swarm_content_not_found` only
- *                (#536, desktop #618): why the [GatewayProbe] gave up
- *                ([SwarmFailure]), so the page says what happened. A
- *                page without `reason` (a failed WebView load, an older
- *                history entry) reads as content not found yet.
+ *                (#536, desktop #618): why the load failed
+ *                ([SwarmFailure]), so the page says what happened. Set
+ *                when the [GatewayProbe] gave up, and as
+ *                `path_not_found` when a failed WebView load's 404 was
+ *                tagged by the interceptor's fetch as a path the site's
+ *                manifest lacks ([SWARM_PATH_NOT_FOUND_HEADER]). A page
+ *                without `reason` (any other failed WebView load, an
+ *                older history entry) reads as content not found yet.
  *  - `streak`  — `1` when this failure follows straight on from the
  *                page's own retry from an error page for the same
  *                `retry` URL: the page then goes on counting its
@@ -100,7 +104,8 @@ object ErrorPage {
     }
 
     /**
-     * Why a Swarm (or IPFS) probe gave up, as `error.html` reads it:
+     * Why a Swarm (or IPFS) probe gave up, or (`path_not_found` only) why
+ * a failed WebView load's tagged 404 failed, as `error.html` reads it:
      * [reason] is `path_not_found`, `not_found` (the budget ran out) or
      * `other` (an unexpected HTTP [status]); for `not_found`, [status] is
      * the node's last answer (`no_response` when it gave none in time)
