@@ -94,6 +94,7 @@ import baby.freedom.mobile.wallet.SafeAccounts
 import baby.freedom.mobile.wallet.SafeCallLabel
 import baby.freedom.mobile.wallet.SafeChain
 import baby.freedom.mobile.wallet.SafePolicyChange
+import baby.freedom.mobile.wallet.SafeDeployment
 import baby.freedom.mobile.wallet.SafeException
 import baby.freedom.mobile.wallet.SafePending
 import baby.freedom.mobile.wallet.SafeProtocol
@@ -499,17 +500,21 @@ internal fun SafePage(
     var checking by remember { mutableStateOf(false) }
     var holdings by remember { mutableStateOf<List<Pair<Token, BigInteger>>?>(null) }
 
-    // Where it stands on chain: deployed (healing the record, as desktop does), and if not, the activation's price.
+    // Where it stands on chain: deployed (healing the record on a verified read only, #535), and if not, the activation's price.
     LaunchedEffect(safe.deployed, executor?.address, chain, refreshTick) {
         val c = chain ?: return@LaunchedEffect
         checking = true
         checkError = null
         try {
             if (!safe.deployed) {
-                if (chainReads.deployed(c.id, safe.address)) {
-                    safes.markDeployed(safe.address)
-                } else {
-                    activation = executor?.let { chainReads.activation(safe, it.address) }
+                when (safes.checkDeployed(safe)) {
+                    SafeDeployment.ACTIVE -> Unit
+                    SafeDeployment.NOT_ACTIVE -> activation = executor?.let { chainReads.activation(safe, it.address) }
+                    // Code no verified read confirms: it may well be active, so activation isn't offered. Pending, to check again.
+                    SafeDeployment.UNVERIFIED -> {
+                        activation = null
+                        checkError = Strings.get(R.string.safe_activation_unverified, c.name)
+                    }
                 }
             }
             holdings = TokenRegistry.tokens(c).mapNotNull { token ->
@@ -890,7 +895,14 @@ private fun SafeActivationSection(
         when {
             chain == null -> Text(stringResource(R.string.safe_activation_no_chain), style = MaterialTheme.typography.bodyMedium)
             executor == null -> Text(stringResource(R.string.safe_activation_no_executor), style = MaterialTheme.typography.bodyMedium)
-            activation == null && checkError != null -> FieldText(checkError, error = true)
+            activation == null && checkError != null -> {
+                FieldText(checkError, error = true)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onRefresh, enabled = !checking, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(stringResource(if (checking) R.string.safe_checking else R.string.safe_check_again))
+                    }
+                }
+            }
             activation == null -> Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
