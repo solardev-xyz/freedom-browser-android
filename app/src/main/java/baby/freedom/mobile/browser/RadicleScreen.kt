@@ -30,6 +30,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -37,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -48,6 +51,7 @@ import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleSeed
 import baby.freedom.swarm.RadicleStatus
+import kotlinx.coroutines.launch
 
 /**
  * What the UI knows about the embedded Radicle node (#73) and what it can
@@ -65,6 +69,8 @@ data class RadicleControls(
     /** Sites connected to `window.radicle` (#124), and dropping one's grant. */
     val grants: List<RadicleGrantStore.Grant> = emptyList(),
     val onRevoke: (String) -> Unit = {},
+    /** Turn a site's "always allow writes" rule off (#544); false if that couldn't be saved. */
+    val onAskEachTime: suspend (String) -> Boolean = { true },
 )
 
 internal const val RADICLE_ROW_KEY = "radicle"
@@ -153,7 +159,7 @@ fun RadicleScreen(
                 }
             }
             if (radicle.enabled && radicle.grants.isNotEmpty()) {
-                item("sites") { RadicleSitesSection(radicle.grants, info.did, radicle.onRevoke) }
+                item("sites") { RadicleSitesSection(radicle.grants, info.did, radicle.onRevoke, radicle.onAskEachTime) }
             }
         }
     }
@@ -360,10 +366,19 @@ internal fun canSign(grant: RadicleGrantStore.Grant, did: String): Boolean =
 /**
  * Sites connected to `window.radicle` (#124), and what they may do. A
  * site can drop its own grant (`radicle_disconnect`); this is the user's
- * way to drop it for them.
+ * way to drop it for them, and to turn off a site's "always allow writes"
+ * rule (#544) with Ask each time — set from a write prompt's switch.
  */
 @Composable
-private fun RadicleSitesSection(grants: List<RadicleGrantStore.Grant>, did: String, onRevoke: (String) -> Unit) {
+private fun RadicleSitesSection(
+    grants: List<RadicleGrantStore.Grant>,
+    did: String,
+    onRevoke: (String) -> Unit,
+    onAskEachTime: suspend (String) -> Boolean,
+) {
+    val scope = rememberCoroutineScope()
+    // The site whose Ask each time couldn't be saved.
+    var failed by remember { mutableStateOf<String?>(null) }
     SectionCard(title = stringResource(R.string.radicle_section_sites)) {
         grants.forEach { grant ->
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -374,6 +389,27 @@ private fun RadicleSitesSection(grants: List<RadicleGrantStore.Grant>, did: Stri
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (grant.autoWrites && canSign(grant, did)) {
+                        Text(
+                            stringResource(R.string.radicle_site_auto_writes),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("radicle-site-auto-writes"),
+                        )
+                        TextButton(
+                            onClick = {
+                                scope.launch { failed = if (onAskEachTime(grant.origin)) null else grant.origin }
+                            },
+                            modifier = Modifier.testTag("radicle-ask-each-time"),
+                        ) { Text(stringResource(R.string.radicle_site_ask_each_time)) }
+                    }
+                    if (failed == grant.origin) {
+                        Text(
+                            stringResource(R.string.radicle_site_ask_each_time_failed),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
                 TextButton(onClick = { onRevoke(grant.origin) }) { Text(stringResource(R.string.common_disconnect)) }
             }

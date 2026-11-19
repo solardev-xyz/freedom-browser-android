@@ -27,10 +27,15 @@ import org.json.JSONObject
  * active one and its page is on screen.
  */
 class RadiclePromptRequest internal constructor(val ask: RadicleAsk) {
-    internal val answer = CompletableDeferred<Boolean>()
+    internal val answer = CompletableDeferred<RadicleAnswer>()
 
-    fun respond(allowed: Boolean) {
-        answer.complete(allowed)
+    /**
+     * The user's answer, or (with [alwaysAllow] null) the prompt being
+     * taken down; [alwaysAllow] is where a [RadicleAsk.Write]'s switch was
+     * left when the user answered it.
+     */
+    fun respond(allowed: Boolean, alwaysAllow: Boolean? = null) {
+        answer.complete(RadicleAnswer(allowed, alwaysAllow))
     }
 }
 
@@ -118,6 +123,11 @@ object RadicleProviders {
                 override suspend fun signedBefore(origin: String) = store.grantFor(origin)?.let { it.signingAs ?: it.signedAs }
                 override suspend fun grantSigning(origin: String, did: String) = store.grantSigning(origin, did)
                 override suspend fun revoke(origin: String) = store.revoke(origin)
+                override suspend fun autoWrites(origin: String, did: String) =
+                    store.grantFor(origin)?.let { it.autoWrites && it.signsAs(did) } == true
+                override suspend fun allowAutoWrites(origin: String, did: String) = store.allowAutoWrites(origin, did)
+                override suspend fun stopAutoWrites(origin: String) = store.stopAutoWrites(origin)
+                override suspend fun countAutoWrite(origin: String, now: Long) = store.countAutoWrite(origin, now)
             },
             node = object : RadicleProvider.Node {
                 override val state get() = RadicleClient.state
@@ -345,36 +355,43 @@ object RadicleProviders {
     }
 
     /**
-     * Put [ask] up on [tab] and wait for the answer — false at once if the
+     * Put [ask] up on [tab] and wait for the answer — refused at once if the
      * tab is blocked from prompting, the document that asked ([doc]) is no
      * longer the tab's, or the tab moves on or closes while it waits; and
-     * false once [waitMs] runs out (queued behind another prompt, or up
+     * refused once [waitMs] runs out (queued behind another prompt, or up
      * unanswered in a tab the user isn't looking at). The page's own
      * timer rejects its request after five minutes, and it may retry: an
      * Allow tapped after that would carry out a request the page has
      * already given up on. Running out doesn't block the tab: the
      * user refused nothing.
      */
-    internal suspend fun askOnTab(tab: BrowserState, doc: Int, ask: RadicleAsk, waitMs: Long = PROMPT_WAIT_MS): Boolean {
+    internal suspend fun askOnTab(
+        tab: BrowserState,
+        doc: Int,
+        ask: RadicleAsk,
+        waitMs: Long = PROMPT_WAIT_MS,
+    ): RadicleAnswer {
         fun live() = (documents[tab.id] ?: 0) == doc && tab.id !in blockedTabs
-        if (!live() || waitMs <= 0) return false
+        if (!live() || waitMs <= 0) return RadicleAnswer.REFUSED
         val lock = promptLocks.getOrPut(tab.id) { Mutex() }
         return withTimeoutOrNull(waitMs) {
             lock.withLock {
-                if (!live()) return@withLock false
+                if (!live()) return@withLock RadicleAnswer.REFUSED
                 val request = RadiclePromptRequest(ask)
                 pending.getOrPut(tab.id) { mutableSetOf() }.add(request)
                 tab.radiclePrompt = request
-                val allowed = try {
+                val answer = try {
                     request.answer.await()
                 } finally {
                     pending[tab.id]?.remove(request)
                     if (tab.radiclePrompt === request) tab.radiclePrompt = null
                 }
-                if (!allowed && live()) blockedTabs += tab.id
-                allowed && live()
+                if (!answer.allowed && live()) blockedTabs += tab.id
+                // The switch stays the user's even if the page has gone:
+                // the rule is the site's, not the document's.
+                answer.copy(allowed = answer.allowed && live())
             }
-        } ?: false
+        } ?: RadicleAnswer.REFUSED
     }
 
     /**
@@ -410,8 +427,10 @@ object RadicleProviders {
     }
 
     /**
-     * How long a prompt waits, from the request's arrival: short of the
-     * page's five-minute timer by the node calls an allowed request still
+     * How long a request's prompts wait, from its arrival — all of them
+     * together: a first write can ask for the signing grant and then for
+     * itself (#544). Short of the page's five-minute timer by the node
+     * calls an allowed request still
      * makes — reading the identity again ([RadicleClient.READ_TIMEOUT_MS])
      * and the write ([RadicleClient.WRITE_TIMEOUT_MS]) — so what the user
      * allows is answered before the page gives up on it.
