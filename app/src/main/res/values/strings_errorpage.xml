@@ -103,12 +103,46 @@
     <string name="errorpage_page_web3_lookup_failed_title">Couldn\'t read the app</string>
     <!-- HTML. -->
     <string name="errorpage_page_web3_lookup_failed">Couldn\'t get an answer from the chain\'s RPC servers. Check your connection and try again.</string>
-    <string name="errorpage_page_swarm_not_ready_title">Content not ready yet</string>
-    <!-- HTML. -->
-    <string name="errorpage_page_swarm_not_ready">Couldn\'t find this content on the Swarm network yet. The node is still connecting to peers &amp;mdash; try again in a moment.</string>
+    <!-- Why a Swarm load failed (#536). Plain text, not HTML. -->
+    <string name="errorpage_page_swarm_path_not_found_title">Page not found</string>
+    <string name="errorpage_page_swarm_path_not_found">This Swarm site exists, but it has no page at this path. Check the address for a typo.</string>
     <!-- A line of the details box. -->
-    <string name="errorpage_page_swarm_not_found_detail">Swarm content not found (timeout)</string>
-    <!-- HTML. %1$s is the Nodes panel's icon. -->
+    <string name="errorpage_page_swarm_path_not_found_detail">HTTP 404: the path isn\'t in the site\'s manifest</string>
+    <string name="errorpage_page_swarm_other_title">Couldn\'t load this content</string>
+    <!-- %1$s is an HTTP status code. -->
+    <string name="errorpage_page_swarm_other">The Swarm node refused the request (HTTP %1$s).</string>
+    <!-- A line of the details box. %1$s is an HTTP status code. -->
+    <string name="errorpage_page_swarm_other_detail">HTTP %1$s from the Swarm node</string>
+    <!-- An IPFS load\'s errorpage_page_swarm_other. %1$s is an HTTP status code. -->
+    <string name="errorpage_page_ipfs_other">The IPFS node refused the request (HTTP %1$s).</string>
+    <!-- A line of the details box. %1$s is an HTTP status code. -->
+    <string name="errorpage_page_ipfs_other_detail">HTTP %1$s from the IPFS node</string>
+    <string name="errorpage_page_swarm_not_found_title">Content not found yet</string>
+    <string name="errorpage_page_swarm_not_found">Your Swarm node couldn\'t find this content on the network. It may not have spread through the network yet, or it may no longer be stored.</string>
+    <string name="errorpage_page_swarm_one_peer">Your Swarm node is connected to only 1 peer, too few to find this content. It keeps connecting in the background.</string>
+    <!-- %1$s is a number of peers, 0 or 2 to 9. -->
+    <string name="errorpage_page_swarm_few_peers">Your Swarm node is connected to only %1$s peers, too few to find this content. It keeps connecting in the background.</string>
+    <string name="errorpage_page_ipfs_not_found">Your IPFS node couldn\'t find this content on the network. It may not have spread through the network yet, or no peers may be serving it.</string>
+    <!-- A line of the details box: the failure as it reached the page, without a reason. -->
+    <string name="errorpage_page_swarm_not_found_detail">Not found</string>
+    <!-- A line of the details box. %1$s is the node\'s last answer (errorpage_page_swarm_answer_*). -->
+    <string name="errorpage_page_swarm_timeout_detail">Not found within 5 minutes (last answer: %1$s)</string>
+    <!-- A line of the details box. %1$s is the node\'s last answer, %2$s its peer count (not 1). -->
+    <string name="errorpage_page_swarm_timeout_peers_detail">Not found within 5 minutes (last answer: %1$s, %2$s peers connected)</string>
+    <!-- A line of the details box. %1$s is the node\'s last answer. -->
+    <string name="errorpage_page_swarm_timeout_one_peer_detail">Not found within 5 minutes (last answer: %1$s, 1 peer connected)</string>
+    <!-- The node\'s last answer, in the details box. %1$s is an HTTP status code. -->
+    <string name="errorpage_page_swarm_answer_http">HTTP %1$s</string>
+    <string name="errorpage_page_swarm_answer_none">no answer within 30 seconds</string>
+    <!-- The automatic retry\'s countdown. %1$s is a number of seconds. -->
+    <string name="errorpage_page_auto_retry_in">Trying again automatically in %1$s s.</string>
+    <string name="errorpage_page_auto_retry_now">Trying again…</string>
+    <string name="errorpage_page_auto_retry_stopped">Stopped trying again automatically.</string>
+    <!-- Shown on an error page reached with Back or Forward, which doesn\'t retry on its own. -->
+    <string name="errorpage_page_auto_retry_paused">Not trying again automatically. Use Try Again to retry.</string>
+    <!-- Button: ends the automatic retries. -->
+    <string name="errorpage_page_auto_retry_stop">Stop retrying</string>
+    <!-- HTML. %1$s is the Nodes panel\'s icon. -->
     <string name="errorpage_page_swarm_node_stopped">The Swarm node is not running. Open the Nodes panel %1$s from the menu to start it.</string>
     <!-- HTML. -->
     <string name="errorpage_page_swarm_gateway_unreachable">Couldn\'t reach the Swarm gateway. Check that the node is running and try again.</string>

@@ -132,6 +132,8 @@ internal val HEADERS_TO_STRIP = setOf(
     NAME_RESOLUTION_ERROR_HEADER.lowercase(),
     NodeApiGuard.REFUSAL_HEADER.lowercase(),
     DwebPath.REFUSAL_HEADER.lowercase(),
+    // Likewise our own word that a page's path isn't in its site (#536).
+    SWARM_PATH_NOT_FOUND_HEADER.lowercase(),
     // Would let a gateway-served worker script claim a scope wider than
     // its own path on the virtual origin (#355; desktop drops it too).
     "service-worker-allowed",
@@ -162,6 +164,20 @@ internal fun gatewayResponseHeaders(fields: Map<String?, List<String>?>): Map<St
  * already *is* the error page (see [nameResolutionRefusal]).
  */
 internal const val NAME_RESOLUTION_ERROR_HEADER = "X-Name-Resolution-Error"
+
+/**
+ * Header on a main-frame Swarm 404 the interceptor fetched (#536) whose
+ * body is ant's `path address not found`, final by [GatewayProbe]'s own
+ * rule (answered within [GatewayProbe.WARM_404_MS], or the attempt before
+ * said the same): the site's manifest has no such path. Tells
+ * `onReceivedHttpError` to show "Page not found" for a link inside a
+ * site, which never goes through the probe, rather than "not found yet".
+ */
+internal const val SWARM_PATH_NOT_FOUND_HEADER = "X-Swarm-Path-Not-Found"
+
+/** Whether a main-frame HTTP error's headers carry [SWARM_PATH_NOT_FOUND_HEADER]. */
+internal fun swarmPathNotFoundIn(headers: Map<String, String>?): Boolean =
+    headers?.keys?.any { it.equals(SWARM_PATH_NOT_FOUND_HEADER, ignoreCase = true) } == true
 
 /**
  * The [ErrorPage] code in a main-frame HTTP error's headers if the
@@ -3237,6 +3253,7 @@ private fun buildRefreshableWebView(
                 state.showsErrorPage = ErrorPage.isErrorPage(url) ||
                     nameRefusal.isRefused(url) ||
                     certRefusal.isServed(url)
+                state.errorPageRetry = ErrorPage.paramFor(url, "retry")
                 // Another page: what was typed no longer stands behind a
                 // later load of that address (#419).
                 state.typedAddress = typedAddressAfterCommit(state.typedAddress, url)
@@ -3582,6 +3599,7 @@ private fun buildRefreshableWebView(
                     // …and no site to zoom as (#88), for the same reason.
                     state.zoomSite = null
                     state.showsErrorPage = false
+                    state.errorPageRetry = null
                     state.providerOrigin = null
                     state.permissionOrigin = null
                     state.siteOrigin = null
@@ -4383,12 +4401,14 @@ private fun buildRefreshableWebView(
                 if (!isDwebPageUrl(failed)) return
 
                 val status = errorResponse?.statusCode ?: 0
-                // The probe already waited out transient 404s and 5xx
-                // ([GatewayProbe.TRANSIENT_5XX]) — if we got one here,
-                // the gateway answered but the content
-                // genuinely isn't available (misspelled hash, etc). A
-                // synthesized 502 is the interceptor telling us the
-                // gateway socket itself is gone (node not running).
+                // The probe (for a typed or opened address) and the
+                // fetch's own retries already waited out transient 404s
+                // and 5xx ([GatewayProbe.TRANSIENT_5XX]) — if we got one
+                // here, the gateway answered but the content genuinely
+                // isn't available (misspelled hash, a path the site
+                // lacks, etc). A synthesized 502 is the interceptor
+                // telling us the gateway socket itself is gone (node
+                // not running).
                 val display = displayFor(failed, state).ifBlank { failed }
                 // The interceptor's refusal of an ENS document (#99) is
                 // already the error page, served in place — loading
@@ -4413,11 +4433,17 @@ private fun buildRefreshableWebView(
                 val errorCode =
                     if (status == 502) "ERR_CONNECTION_REFUSED"
                     else "swarm_content_not_found"
+                // A link inside a site to a path its manifest lacks never
+                // went through the probe; the fetch tagged it (#536).
+                val pathNotFound = status == 404 && swarmPathNotFoundIn(errorResponse?.responseHeaders)
                 val page = ErrorPage.url(
                     errorCode = errorCode,
                     displayUrl = display,
                     protocol = protocolForErrorPage(failed),
                     retryUrl = retryUrlFor(failed),
+                    swarmFailure = if (pathNotFound) {
+                        ErrorPage.SwarmFailure.of(GatewayProbe.Outcome.PathNotFound)
+                    } else null,
                 )
                 Log.i(LOG_TAG, "main-frame HTTP $status for $failed → error page")
                 state.clearEnsOverride()
@@ -6833,6 +6859,10 @@ private sealed class FetchAttempt {
     data class Response(
         val response: WebResourceResponse,
         val transient: Boolean,
+        /** A main-frame Swarm 404 with ant's `path address not found` body ([fetchOnce] reads it ahead). */
+        val missingPath: Boolean = false,
+        /** Its headers came within [GatewayProbe.WARM_404_MS]: from a manifest the node held. */
+        val warm: Boolean = false,
     ) : FetchAttempt()
 
     /** Recoverable I/O failure — worth another attempt. */
@@ -6853,6 +6883,14 @@ private sealed class FetchAttempt {
  * dropped connection). The last answer is handed back once the attempts
  * are spent; null when the gateway can't be reached at all.
  *
+ * A main-frame Swarm `path address not found` 404 (#536) is final, and
+ * tagged [SWARM_PATH_NOT_FOUND_HEADER], when its headers came within
+ * [GatewayProbe.WARM_404_MS] or the attempt just before was one too.
+ * That is [GatewayProbe.probe]'s rule but for one difference: the probe
+ * re-reads only a 404 that took under [GatewayProbe.QUICK_404_MS] (its
+ * GET re-read is a request of its own), while here the body comes with
+ * the answer, so a slower one counts too.
+ *
  * Once [abandon] says the page gave up on the request, the attempt under
  * way is cut, no other is made, and [abandonedResponse] — which no page
  * reads — is handed back at once, so neither the gateway nor WebView's
@@ -6868,6 +6906,11 @@ internal fun fetchWithRetry(
     abandon: AbandonSignal? = null,
 ): WebResourceResponse? {
     var lastResponse: WebResourceResponse? = null
+    // The previous attempt was a cold `path address not found` still
+    // awaiting the next one's confirmation, by [GatewayProbe.probe]'s
+    // rule: only the very next attempt confirms it, so any other answer
+    // or a failed attempt starts the confirmation over.
+    var coldMissingPath = false
     fun abandoned(): WebResourceResponse {
         lastResponse?.data?.let { runCatching { it.close() } }
         Log.i(LOG_TAG, "abandoned by the page: ${dwebUrlForLog(originalUrl)}")
@@ -6898,6 +6941,14 @@ internal fun fetchWithRetry(
                     runCatching { attempt.response.data?.close() }
                     return abandoned()
                 }
+                if (attempt.missingPath && (attempt.warm || coldMissingPath)) {
+                    // The site has no such page: no retry will find it.
+                    Log.i(LOG_TAG, "path not in manifest: ${dwebUrlForLog(originalUrl)}")
+                    attempt.response.responseHeaders =
+                        (attempt.response.responseHeaders.orEmpty()) + (SWARM_PATH_NOT_FOUND_HEADER to "1")
+                    return attempt.response
+                }
+                coldMissingPath = attempt.missingPath
                 if (!attempt.transient) return attempt.response
                 lastResponse = attempt.response
                 Log.i(
@@ -6907,7 +6958,9 @@ internal fun fetchWithRetry(
                 )
             }
             FetchAttempt.Unreachable -> return lastResponse
-            FetchAttempt.Retry -> {}
+            // A timeout or dropped connection, as the probe's timed-out
+            // attempt: it doesn't confirm a cold miss before it.
+            FetchAttempt.Retry -> coldMissingPath = false
             FetchAttempt.Abandoned -> return abandoned()
         }
     }
@@ -6947,10 +7000,14 @@ private fun fetchOnce(
         null
     }
     // The page giving up cuts the attempt where it is: connecting, or
-    // waiting on its headers (once they're in, the body's close does it).
+    // waiting on its headers. Once they're in, a main-frame 404's
+    // read-ahead below is bounded by [MISSING_PATH_PEEK_MS] (and by
+    // [abandon], though a main frame has none); any later body read
+    // ends with the body's close.
     val unwatch = abandon?.onAbandon { deadline?.abandon() }
     return try {
         val target = URL(targetUrl)
+        val asked = System.nanoTime()
         // Redirects are followed hop by hop through TorRouting.
         val conn = TorRouting.openFollowingRedirects(target, hops = deadline) { hop ->
             requestMethod = if (req.method == "HEAD") "HEAD" else "GET"
@@ -6959,6 +7016,7 @@ private fun fetchOnce(
             forwardProxiedHeaders(req, crossOrigin = !TorRouting.sameOrigin(hop, target), noCache = fresh)
         }
         val status = conn.responseCode
+        val headersMs = (System.nanoTime() - asked) / 1_000_000
         deadline?.headersReceived()
         if (deadline?.expired == true) {
             // Disconnected by the deadline just as the headers came in.
@@ -6991,7 +7049,24 @@ private fun fetchOnce(
 
         val headers = gatewayResponseHeaders(conn.headerFields)
 
-        val raw = if (status in 200..399) conn.inputStream else conn.errorStream
+        var raw = if (status in 200..399) conn.inputStream else conn.errorStream
+        // A navigation's 404 from ant says whether the site lacks the
+        // path (#536): its short body is read ahead and handed on whole.
+        // Main frame only: a navigation a service worker forwards comes in
+        // as not-main-frame, but WebView never reports its HTTP error to
+        // `onReceivedHttpError`, so a tag there would reach nobody
+        // (checked on the AVD, PR #557 R2-M1).
+        var missingPath = false
+        // JSON only: another gateway's own 404 page isn't read ahead, so
+        // a slow one still shows as it comes (PR #557 R4-M3).
+        if (raw != null && status == 404 && req.isForMainFrame && conn.requestMethod != "HEAD" &&
+            GatewayProbe.missingPathType(rawCt) && GatewayUrls.extractBase(targetUrl)?.protocol == "bzz"
+        ) {
+            // Bounded as a whole, not just per read (PR #557 R3-M2).
+            val head = readAheadWithin(raw, conn, MISSING_PATH_PEEK_BYTES, MISSING_PATH_PEEK_MS, abandon)
+            missingPath = GatewayProbe.missingPathBody(String(head, Charsets.UTF_8))
+            raw = java.io.SequenceInputStream(ByteArrayInputStream(head), raw)
+        }
         val body = DisconnectOnCloseInputStream(
             raw ?: ByteArrayInputStream(ByteArray(0)),
             conn,
@@ -7036,7 +7111,12 @@ private fun fetchOnce(
                 webViewSeekProof(body, range),
             )
         }
-        FetchAttempt.Response(response, transient = status in policy.retryStatuses)
+        FetchAttempt.Response(
+            response,
+            transient = status in policy.retryStatuses,
+            missingPath = missingPath,
+            warm = headersMs < GatewayProbe.WARM_404_MS,
+        )
     } catch (t: Throwable) {
         if (abandon?.abandoned == true) {
             FetchAttempt.Abandoned
@@ -7052,6 +7132,17 @@ private fun fetchOnce(
         deadline?.headersReceived()
     }
 }
+
+/** How much of a navigation's Swarm 404 body [fetchOnce] reads ahead: ant's JSON is far shorter. */
+private const val MISSING_PATH_PEEK_BYTES = 1_024
+
+/**
+ * How long [fetchOnce] gives that read-ahead in all: ant writes its 404
+ * body with its headers. Past this the attempt fails as a timeout and is
+ * retried, as one whose headers never came. Only a JSON 404 is read ahead
+ * ([GatewayProbe.missingPathType]): an HTML 404 page is never held to it.
+ */
+internal const val MISSING_PATH_PEEK_MS = 3_000L
 
 private fun failedAttempt(t: Throwable, targetUrl: String, media: Boolean): FetchAttempt =
     when (t) {

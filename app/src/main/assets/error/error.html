@@ -22,15 +22,20 @@
       [hidden] {
         display: none !important;
       }
+      #auto-retry {
+        margin: -12px 0 24px;
+      }
     </style>
   </head>
   <body>
     <div class="c container">
       <h1 id="title"></h1>
       <p id="description"></p>
+      <p id="auto-retry" hidden></p>
       <div class="b">
         <button id="retry-btn" class="btn p"></button>
         <button id="continue-btn" class="btn w" hidden></button>
+        <button id="auto-retry-stop" class="btn" hidden></button>
       </div>
       <details>
         <summary id="details-label"></summary>
@@ -114,6 +119,15 @@
       const detail = params.get('detail');
       const continueUrl = params.get('continue');
       const resolved = params.get('resolved');
+      // Why a Swarm probe gave up (GatewayProbe, ErrorPage.SwarmFailure),
+      // or path_not_found for a failed WebView load's 404 the interceptor
+      // tagged as a path the site lacks (X-Swarm-Path-Not-Found); absent
+      // on any other failed WebView load and on older history entries.
+      const swarmReason = params.get('reason');
+      const swarmStatus = params.get('status');
+      const swarmPeers = params.get('peers') === null ? null : Number(params.get('peers'));
+      // This failure follows straight on from this page's own retry.
+      const continuesRetryStreak = params.get('streak') === '1';
       // What the Try Again button says; a page can name its way on.
       let retryLabel = null;
       const NETWORKS = { bzz: 'Swarm', ipfs: 'IPFS', ipns: 'IPNS' };
@@ -155,6 +169,183 @@
       // in it (`ens://%E2%80%AEmoc.lapyap.eth`) printed `hte.paypal.com`.
       function shown(text) {
         return text.replace(/\p{Bidi_Control}/gu, '\uFFFD');
+      }
+
+      // Below this many connected peers a node is still warming up, so a
+      // miss says more about the node than about the content.
+      const LOW_PEER_COUNT = 10;
+
+      function describeLastAnswer(status) {
+        if (status === 'no_response') return fmt('page_swarm_answer_none');
+        return fmt('page_swarm_answer_http', status);
+      }
+
+      // Title, description (text, not HTML), details line and whether
+      // trying again later can help, for a swarm_content_not_found page.
+      function describeSwarmFailure() {
+        switch (swarmReason) {
+          case 'path_not_found':
+            return {
+              title: fmt('page_swarm_path_not_found_title'),
+              description: fmt('page_swarm_path_not_found'),
+              detail: fmt('page_swarm_path_not_found_detail'),
+              recoverable: false,
+            };
+          case 'other': {
+            // An IPFS probe's unexpected answer comes from the IPFS
+            // node, not the Swarm one; as below, only a known IPFS load.
+            const ipfs = protocol === 'ipfs' || protocol === 'ipns';
+            return {
+              title: fmt('page_swarm_other_title'),
+              description: ipfs
+                ? fmt('page_ipfs_other', swarmStatus || '?')
+                : fmt('page_swarm_other', swarmStatus || '?'),
+              detail: ipfs
+                ? fmt('page_ipfs_other_detail', swarmStatus || '?')
+                : fmt('page_swarm_other_detail', swarmStatus || '?'),
+              recoverable: false,
+            };
+          }
+          default: {
+            // 'not_found': the probe's 5-minute budget ran out. No
+            // reason: an untagged failed load, or a page from before #536.
+            const peers = Number.isFinite(swarmPeers) ? swarmPeers : null;
+            let description;
+            // An ENS site's failed load (protocol `ens`) is as likely a
+            // Swarm one as not; only a known IPFS load gets IPFS copy.
+            if (protocol === 'ipfs' || protocol === 'ipns') description = fmt('page_ipfs_not_found');
+            else if (peers === 1) description = fmt('page_swarm_one_peer');
+            else if (peers !== null && peers < LOW_PEER_COUNT) description = fmt('page_swarm_few_peers', peers);
+            else description = fmt('page_swarm_not_found');
+            let detail;
+            if (swarmReason !== 'not_found') detail = fmt('page_swarm_not_found_detail');
+            else if (peers === 1) detail = fmt('page_swarm_timeout_one_peer_detail', describeLastAnswer(swarmStatus));
+            else if (peers !== null) detail = fmt('page_swarm_timeout_peers_detail', describeLastAnswer(swarmStatus), peers);
+            else detail = fmt('page_swarm_timeout_detail', describeLastAnswer(swarmStatus));
+            return {
+              title: fmt('page_swarm_not_found_title'),
+              description,
+              detail,
+              // Only a probe that ran out of time retries on its own. A
+              // page without a reason is a load that failed after the
+              // probe let it through (an IPFS path its root doesn't
+              // have, say): retrying it every 30 s would never end,
+              // since such a page never continues a streak.
+              recoverable: swarmReason === 'not_found',
+            };
+          }
+        }
+      }
+
+      // Content can still spread through the network and a node can still
+      // gain peers, so a recoverable miss tries again on its own (desktop
+      // #618). Each retry runs a fresh probe (up to 5 minutes), so the
+      // waits stay short; the count lives in sessionStorage because each
+      // retry lands on a new copy of this page, and the app says
+      // (`streak=1`) whether this page continues that count. Try Again
+      // starts it over. Unlike desktop, a page without a reason doesn't
+      // retry on its own (see describeSwarmFailure). The countdown only runs while the page is
+      // visible: WebView's timers keep running in a tab in the
+      // background, or with the app in the background, and a retry
+      // there would be a 5-minute probe nobody is waiting for.
+      const AUTO_RETRY_DELAYS_S = [30, 60, 120, 300, 300, 300];
+      // A count older than this belongs to an earlier visit.
+      const AUTO_RETRY_STREAK_MS = 30 * 60000;
+      // One key for every address: `streak=1` already says the previous
+      // page retried this same one, and no address is left in storage.
+      const autoRetryKey = 'freedom:auto-retry';
+      const autoRetryEl = document.getElementById('auto-retry');
+      const autoRetryStopBtn = document.getElementById('auto-retry-stop');
+      // null: none; else { state: 'counting' | 'retrying' | 'stopped' |
+      // 'exhausted' | 'paused', remaining }. Kept across displayError's
+      // second run (the app's strings after the English fallback).
+      let autoRetry = null;
+      let autoRetryTimer = null;
+
+      function readAutoRetryCount() {
+        try {
+          const saved = JSON.parse(sessionStorage.getItem(autoRetryKey) || 'null');
+          if (!saved || !(Date.now() - saved.at <= AUTO_RETRY_STREAK_MS)) return 0;
+          return Number.isInteger(saved.count) ? saved.count : 0;
+        } catch (e) {
+          return 0;
+        }
+      }
+
+      function writeAutoRetryCount(count) {
+        try {
+          if (count === 0) sessionStorage.removeItem(autoRetryKey);
+          else sessionStorage.setItem(autoRetryKey, JSON.stringify({ count, at: Date.now() }));
+        } catch (e) {
+          // No storage: retries still happen, just without the cap.
+        }
+      }
+
+      function renderAutoRetry() {
+        if (!autoRetry) return;
+        const text = {
+          counting: () => fmt('page_auto_retry_in', autoRetry.remaining),
+          retrying: () => fmt('page_auto_retry_now'),
+          stopped: () => fmt('page_auto_retry_stopped'),
+          exhausted: () => fmt('page_auto_retry_stopped'),
+          paused: () => fmt('page_auto_retry_paused'),
+        }[autoRetry.state]();
+        autoRetryEl.hidden = false;
+        autoRetryEl.textContent = text;
+        autoRetryStopBtn.hidden = autoRetry.state !== 'counting';
+        autoRetryStopBtn.textContent = fmt('page_auto_retry_stop');
+      }
+
+      function stopAutoRetry(state) {
+        clearInterval(autoRetryTimer);
+        autoRetryTimer = null;
+        autoRetry.state = state;
+        renderAutoRetry();
+      }
+
+      // How this copy of the page was reached. Back/Forward onto it is
+      // the user reading history, not a fresh failure, and a restored
+      // tab is the same: no countdown then, only Try Again.
+      function reachedByNavigation() {
+        try {
+          const entry = performance.getEntriesByType('navigation')[0];
+          return !entry || entry.type === 'navigate';
+        } catch (e) {
+          return true;
+        }
+      }
+
+      function scheduleAutoRetry() {
+        if (autoRetry) {
+          renderAutoRetry();
+          return;
+        }
+        if (!retryUrl) return;
+        if (!reachedByNavigation()) {
+          autoRetry = { state: 'paused' };
+          renderAutoRetry();
+          return;
+        }
+        if (!continuesRetryStreak) writeAutoRetryCount(0);
+        const count = readAutoRetryCount();
+        if (count >= AUTO_RETRY_DELAYS_S.length) {
+          autoRetry = { state: 'exhausted' };
+          renderAutoRetry();
+          return;
+        }
+        autoRetry = { state: 'counting', remaining: AUTO_RETRY_DELAYS_S[count] };
+        renderAutoRetry();
+        autoRetryTimer = setInterval(() => {
+          if (document.visibilityState !== 'visible') return;
+          autoRetry.remaining -= 1;
+          if (autoRetry.remaining > 0) {
+            renderAutoRetry();
+            return;
+          }
+          stopAutoRetry('retrying');
+          writeAutoRetryCount(count + 1);
+          window.location.href = retryUrl;
+        }, 1000);
       }
 
       async function displayError() {
@@ -273,12 +464,16 @@
           descriptionEl.innerHTML = fmt('page_dweb_path_refused');
           document.getElementById('retry-btn').hidden = true;
         } else if (error === 'swarm_content_not_found') {
-          titleEl.textContent = fmt('page_swarm_not_ready_title');
-          descriptionEl.innerHTML = fmt('page_swarm_not_ready');
-          if (protocolUrl) {
-            parts.push('');
-            parts.push(fmt('page_swarm_not_found_detail'));
-          }
+          // The node answered, but not with the content. Say which way
+          // it failed (#536): the old copy blamed peers and a timeout for
+          // every failure, a missing page included.
+          const failure = describeSwarmFailure();
+          titleEl.textContent = failure.title;
+          document.title = failure.title;
+          descriptionEl.textContent = failure.description;
+          parts.push('');
+          parts.push(failure.detail);
+          if (failure.recoverable) scheduleAutoRetry();
         } else if (error && error.indexOf('ERR_CONNECTION_REFUSED') !== -1) {
           if (protocol === 'swarm') {
             const status = await checkSwarmStatus();
@@ -310,7 +505,7 @@
       // is never left blank without a Retry. Kept equal to the English
       // resources by ErrorPageStringsTest; the app's table, in the app's
       // language, replaces it whenever it arrives.
-      const FALLBACK = /* EN-FALLBACK */{"page_default_title":"Content Unavailable","page_default_description":"This content could not be retrieved from the decentralized network. The address may be invalid, the content may no longer exist, or no peers are serving it.","page_continue_once":"Continue once","page_try_again":"Try Again","page_details":"Details","ens_not_found_title":"No content for this %1$s name","page_ens_not_found_tezos":"This Tezos Domains name doesn't point at a website. The owner may not have set a \u003ccode\u003eweb:content_url\u003c/code\u003e record, the name isn't registered, or it has expired.","page_ens_not_found_no_resolver":"This %1$s name doesn't point at any content yet. The owner may not have set a \u003ccode\u003econtenthash\u003c/code\u003e record, or the name has no resolver.","page_ens_not_found_unregistered":"This %1$s name doesn't point at any content yet. The owner may not have set a \u003ccode\u003econtenthash\u003c/code\u003e record, or the name isn't registered.","ens_wrong_protocol_title":"Name lives on a different network","page_wrong_protocol_networks":"This %1$s name resolves to %2$s content, not %3$s. The %4$s:// you typed asks for %3$s only, so Freedom did not switch networks for you.","page_open_on_network":"Open on %1$s","page_wrong_protocol_contenthash":"This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own \u0026mdash; the browser will follow wherever its \u003ccode\u003econtenthash\u003c/code\u003e points.","page_wrong_protocol_website_record":"This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own \u0026mdash; the browser will follow wherever its website record points.","unsupported_format_title":"Unsupported content format","page_unsupported_codec":"This %1$s name resolves to a content format Freedom Browser cannot load yet on mobile.","ens_invalid_name_title":"Not a valid %1$s name","ens_invalid_name_description":"This name breaks the ENSIP-15 naming rules (a disallowed character, mixed scripts, a lookalike, \u0026hellip;), so Freedom Browser won't look it up \u0026mdash; other %1$s apps refuse it too, and it could be mistaken for a different name. Check the spelling.","ens_name_too_long_title":"%1$s name too long","ens_name_too_long_description":"A label of this name is longer than the 255 bytes an %1$s lookup can carry, so Freedom Browser can't ask a resolver about it. Check the address.","not_cross_checked_title":"Not cross-checked","page_ens_unverified":"Only one %1$s RPC server answered for this %2$s name, so Freedom couldn't check its answer against another server. The address below may be right, but a single misbehaving server could have picked it.","rpc_disagreed_title":"RPC servers disagreed","page_ens_conflict":"The %1$s RPC servers Freedom asked gave different answers for this %2$s name. At least one of them is wrong \u0026mdash; or lying \u0026mdash; so nothing was loaded. Try again in a moment.","lookup_failed_title":"%1$s lookup failed","ccip_disabled_description":"This name is resolved through an off-chain gateway (CCIP-Read), which is turned off in Settings \u0026rarr; Name resolution.","tezos_rpc_unreachable_description":"Couldn't reach a Tezos RPC endpoint to resolve this name. Check your connection and try again.","ethereum_rpc_unreachable_description":"Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your connection, or the endpoints in Settings \u0026rarr; Name resolution \u0026rarr; RPC providers, and try again.","page_web3_unverified":"Only one RPC server returned this onchain app's code, so Freedom couldn't check it against another server. It may be the real app, but a single misbehaving server could have changed it. Continue only if you trust that server with this app.","page_web3_conflict":"The RPC servers Freedom asked returned different code for this onchain app. At least one of them is wrong \u0026mdash; or lying \u0026mdash; so nothing was run. Try again in a moment.","page_web3_unknown_chain_title":"Unknown chain","page_web3_unknown_chain":"This app lives on a chain that isn't in your chain list, so Freedom doesn't know which RPC servers to ask. Add the chain in Settings, then try again.","page_web3_not_an_app_title":"Not an onchain app","page_web3_not_an_app":"The contract didn't return an ERC-8244 \u003ccode\u003ehtml()\u003c/code\u003e document on this chain. Check the address and the chain ID.","page_web3_too_large_title":"App too large","page_web3_too_large":"The app's document is larger than Freedom loads.","page_web3_invalid_title":"Not a web3:// app address","page_web3_invalid":"Freedom loads web3:// apps by contract address: \u003ccode\u003eweb3://0x\u0026hellip;[:chainId]/\u003c/code\u003e. Names are not supported yet.","page_web3_lookup_failed_title":"Couldn't read the app","page_web3_lookup_failed":"Couldn't get an answer from the chain's RPC servers. Check your connection and try again.","cert_title":"Connection isn't secure","cert_description_expired":"Freedom didn't load %1$s because its security certificate has expired.","cert_description_not_yet_valid":"Freedom didn't load %1$s because its security certificate isn't valid yet. If your device's date and time are wrong, correct them and try again.","cert_description_date_invalid":"Freedom didn't load %1$s because its security certificate has invalid dates.","cert_description_wrong_host":"Freedom didn't load %1$s because its security certificate was issued for a different site.","cert_description_untrusted":"Freedom didn't load %1$s because its security certificate wasn't issued by an authority this device trusts.","cert_description_invalid":"Freedom didn't load %1$s because its security certificate is not valid.","cert_description_risk":"Someone could be impersonating the site or intercepting the connection, or the site is misconfigured.","page_swarm_not_ready_title":"Content not ready yet","page_swarm_not_ready":"Couldn't find this content on the Swarm network yet. The node is still connecting to peers \u0026mdash; try again in a moment.","page_swarm_not_found_detail":"Swarm content not found (timeout)","page_swarm_node_stopped":"The Swarm node is not running. Open the Nodes panel %1$s from the menu to start it.","page_swarm_gateway_unreachable":"Couldn't reach the Swarm gateway. Check that the node is running and try again.","page_dweb_path_refused_title":"Address leaves the site's content","page_dweb_path_refused":"Freedom didn't open this address: its path leaves the site's content (a \u003ccode\u003e..\u003c/code\u003e segment, an encoded slash or a backslash). Check the address.","page_unknown_error":"Unknown error"}/* /EN-FALLBACK */;
+      const FALLBACK = /* EN-FALLBACK */{"page_default_title":"Content Unavailable","page_default_description":"This content could not be retrieved from the decentralized network. The address may be invalid, the content may no longer exist, or no peers are serving it.","page_continue_once":"Continue once","page_try_again":"Try Again","page_details":"Details","ens_not_found_title":"No content for this %1$s name","page_ens_not_found_tezos":"This Tezos Domains name doesn't point at a website. The owner may not have set a \u003ccode\u003eweb:content_url\u003c/code\u003e record, the name isn't registered, or it has expired.","page_ens_not_found_no_resolver":"This %1$s name doesn't point at any content yet. The owner may not have set a \u003ccode\u003econtenthash\u003c/code\u003e record, or the name has no resolver.","page_ens_not_found_unregistered":"This %1$s name doesn't point at any content yet. The owner may not have set a \u003ccode\u003econtenthash\u003c/code\u003e record, or the name isn't registered.","ens_wrong_protocol_title":"Name lives on a different network","page_wrong_protocol_networks":"This %1$s name resolves to %2$s content, not %3$s. The %4$s:// you typed asks for %3$s only, so Freedom did not switch networks for you.","page_open_on_network":"Open on %1$s","page_wrong_protocol_contenthash":"This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own \u0026mdash; the browser will follow wherever its \u003ccode\u003econtenthash\u003c/code\u003e points.","page_wrong_protocol_website_record":"This %1$s name resolves to content on a different network than the scheme you typed asks for. Try the name on its own \u0026mdash; the browser will follow wherever its website record points.","unsupported_format_title":"Unsupported content format","page_unsupported_codec":"This %1$s name resolves to a content format Freedom Browser cannot load yet on mobile.","ens_invalid_name_title":"Not a valid %1$s name","ens_invalid_name_description":"This name breaks the ENSIP-15 naming rules (a disallowed character, mixed scripts, a lookalike, \u0026hellip;), so Freedom Browser won't look it up \u0026mdash; other %1$s apps refuse it too, and it could be mistaken for a different name. Check the spelling.","ens_name_too_long_title":"%1$s name too long","ens_name_too_long_description":"A label of this name is longer than the 255 bytes an %1$s lookup can carry, so Freedom Browser can't ask a resolver about it. Check the address.","not_cross_checked_title":"Not cross-checked","page_ens_unverified":"Only one %1$s RPC server answered for this %2$s name, so Freedom couldn't check its answer against another server. The address below may be right, but a single misbehaving server could have picked it.","rpc_disagreed_title":"RPC servers disagreed","page_ens_conflict":"The %1$s RPC servers Freedom asked gave different answers for this %2$s name. At least one of them is wrong \u0026mdash; or lying \u0026mdash; so nothing was loaded. Try again in a moment.","lookup_failed_title":"%1$s lookup failed","ccip_disabled_description":"This name is resolved through an off-chain gateway (CCIP-Read), which is turned off in Settings \u0026rarr; Name resolution.","tezos_rpc_unreachable_description":"Couldn't reach a Tezos RPC endpoint to resolve this name. Check your connection and try again.","ethereum_rpc_unreachable_description":"Couldn't reach an Ethereum RPC endpoint to resolve this name. Check your connection, or the endpoints in Settings \u0026rarr; Name resolution \u0026rarr; RPC providers, and try again.","page_web3_unverified":"Only one RPC server returned this onchain app's code, so Freedom couldn't check it against another server. It may be the real app, but a single misbehaving server could have changed it. Continue only if you trust that server with this app.","page_web3_conflict":"The RPC servers Freedom asked returned different code for this onchain app. At least one of them is wrong \u0026mdash; or lying \u0026mdash; so nothing was run. Try again in a moment.","page_web3_unknown_chain_title":"Unknown chain","page_web3_unknown_chain":"This app lives on a chain that isn't in your chain list, so Freedom doesn't know which RPC servers to ask. Add the chain in Settings, then try again.","page_web3_not_an_app_title":"Not an onchain app","page_web3_not_an_app":"The contract didn't return an ERC-8244 \u003ccode\u003ehtml()\u003c/code\u003e document on this chain. Check the address and the chain ID.","page_web3_too_large_title":"App too large","page_web3_too_large":"The app's document is larger than Freedom loads.","page_web3_invalid_title":"Not a web3:// app address","page_web3_invalid":"Freedom loads web3:// apps by contract address: \u003ccode\u003eweb3://0x\u0026hellip;[:chainId]/\u003c/code\u003e. Names are not supported yet.","page_web3_lookup_failed_title":"Couldn't read the app","page_web3_lookup_failed":"Couldn't get an answer from the chain's RPC servers. Check your connection and try again.","cert_title":"Connection isn't secure","cert_description_expired":"Freedom didn't load %1$s because its security certificate has expired.","cert_description_not_yet_valid":"Freedom didn't load %1$s because its security certificate isn't valid yet. If your device's date and time are wrong, correct them and try again.","cert_description_date_invalid":"Freedom didn't load %1$s because its security certificate has invalid dates.","cert_description_wrong_host":"Freedom didn't load %1$s because its security certificate was issued for a different site.","cert_description_untrusted":"Freedom didn't load %1$s because its security certificate wasn't issued by an authority this device trusts.","cert_description_invalid":"Freedom didn't load %1$s because its security certificate is not valid.","cert_description_risk":"Someone could be impersonating the site or intercepting the connection, or the site is misconfigured.","page_swarm_path_not_found_title":"Page not found","page_swarm_path_not_found":"This Swarm site exists, but it has no page at this path. Check the address for a typo.","page_swarm_path_not_found_detail":"HTTP 404: the path isn't in the site's manifest","page_swarm_other_title":"Couldn't load this content","page_swarm_other":"The Swarm node refused the request (HTTP %1$s).","page_swarm_other_detail":"HTTP %1$s from the Swarm node","page_ipfs_other":"The IPFS node refused the request (HTTP %1$s).","page_ipfs_other_detail":"HTTP %1$s from the IPFS node","page_swarm_not_found_title":"Content not found yet","page_swarm_not_found":"Your Swarm node couldn't find this content on the network. It may not have spread through the network yet, or it may no longer be stored.","page_swarm_one_peer":"Your Swarm node is connected to only 1 peer, too few to find this content. It keeps connecting in the background.","page_swarm_few_peers":"Your Swarm node is connected to only %1$s peers, too few to find this content. It keeps connecting in the background.","page_ipfs_not_found":"Your IPFS node couldn't find this content on the network. It may not have spread through the network yet, or no peers may be serving it.","page_swarm_not_found_detail":"Not found","page_swarm_timeout_detail":"Not found within 5 minutes (last answer: %1$s)","page_swarm_timeout_peers_detail":"Not found within 5 minutes (last answer: %1$s, %2$s peers connected)","page_swarm_timeout_one_peer_detail":"Not found within 5 minutes (last answer: %1$s, 1 peer connected)","page_swarm_answer_http":"HTTP %1$s","page_swarm_answer_none":"no answer within 30 seconds","page_auto_retry_in":"Trying again automatically in %1$s s.","page_auto_retry_now":"Trying again…","page_auto_retry_stopped":"Stopped trying again automatically.","page_auto_retry_paused":"Not trying again automatically. Use Try Again to retry.","page_auto_retry_stop":"Stop retrying","page_swarm_node_stopped":"The Swarm node is not running. Open the Nodes panel %1$s from the menu to start it.","page_swarm_gateway_unreachable":"Couldn't reach the Swarm gateway. Check that the node is running and try again.","page_dweb_path_refused_title":"Address leaves the site's content","page_dweb_path_refused":"Freedom didn't open this address: its path leaves the site's content (a \u003ccode\u003e..\u003c/code\u003e segment, an encoded slash or a backslash). Check the address.","page_unknown_error":"Unknown error"}/* /EN-FALLBACK */;
       const FALLBACK_AFTER_MS = 1500;
 
       // Run when the app hands over the strings; a table that came before
@@ -342,7 +537,14 @@
         };
       }
 
+      autoRetryStopBtn.onclick = () => {
+        if (autoRetry && autoRetry.state === 'counting') stopAutoRetry('stopped');
+      };
+
       document.getElementById('retry-btn').onclick = () => {
+        // The user's own retry starts the automatic count over.
+        writeAutoRetryCount(0);
+        if (autoRetry && autoRetry.state === 'counting') stopAutoRetry('retrying');
         if (retryUrl) {
           window.location.href = retryUrl;
         } else {

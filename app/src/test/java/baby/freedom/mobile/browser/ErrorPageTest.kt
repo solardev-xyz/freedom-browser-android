@@ -23,6 +23,37 @@ class ErrorPageTest {
     }
 
     @Test
+    fun `url says why a Swarm probe gave up (#536)`() {
+        fun page(outcome: GatewayProbe.Outcome, streak: Boolean = false) = ErrorPage.url(
+            errorCode = "swarm_content_not_found",
+            displayUrl = "bzz://a/b",
+            retryUrl = "bzz://a/b",
+            swarmFailure = ErrorPage.SwarmFailure.of(outcome),
+            continuesRetryStreak = streak,
+        )
+        fun params(u: String) = u.substringAfter('?').split('&').filterNot {
+            it.startsWith("error=") || it.startsWith("url=") || it.startsWith("retry=")
+        }
+        assertEquals(listOf("reason=path_not_found"), params(page(GatewayProbe.Outcome.PathNotFound)))
+        assertEquals(
+            listOf("reason=not_found", "status=503", "peers=4"),
+            params(page(GatewayProbe.Outcome.NotFound(lastStatus = 503, peers = 4))),
+        )
+        assertEquals(
+            listOf("reason=not_found", "status=no_response", "streak=1"),
+            params(page(GatewayProbe.Outcome.NotFound(lastStatus = null, peers = null), streak = true)),
+        )
+        assertEquals(
+            listOf("reason=other", "status=418"),
+            params(page(GatewayProbe.Outcome.Other(418))),
+        )
+        // A failure that isn't the content's carries no reason.
+        assertEquals(null, ErrorPage.SwarmFailure.of(GatewayProbe.Outcome.Unreachable("refused")))
+        assertEquals(null, ErrorPage.SwarmFailure.of(GatewayProbe.Outcome.Ok))
+        assertEquals(emptyList<String>(), params(ErrorPage.url("swarm_content_not_found", "bzz://a/b")))
+    }
+
+    @Test
     fun `url omits optional params when null`() {
         val u = ErrorPage.url(
             errorCode = "ERR_FAILED",

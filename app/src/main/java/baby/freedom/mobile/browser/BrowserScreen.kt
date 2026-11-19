@@ -1127,6 +1127,8 @@ fun BrowserScreen(
         loadUri: String = contentUri,
         namedByUser: Boolean = false,
         bypassCache: Boolean = false,
+        // This load is the error page's own retry of [contentUri] (#536).
+        continuesRetryStreak: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -1140,7 +1142,7 @@ fun BrowserScreen(
             else -> "swarm"
         }
 
-        fun showError(errorCode: String) {
+        fun showError(errorCode: String, failure: ErrorPage.SwarmFailure? = null) {
             target.clearEnsOverride()
             target.loadUrl(
                 ErrorPage.url(
@@ -1148,6 +1150,8 @@ fun BrowserScreen(
                     displayUrl = displayUrl,
                     protocol = protocolHint,
                     retryUrl = contentUri,
+                    swarmFailure = failure,
+                    continuesRetryStreak = continuesRetryStreak,
                 ),
             )
         }
@@ -1218,19 +1222,30 @@ fun BrowserScreen(
         // external endpoint) — the WebView gets the virtual-origin URL,
         // but readiness is a question for the node itself. Resolved
         // after the node flips to Running, in case ipfsBase was still
-        // empty before. Only ever the root — the id's whole first
-        // segment — and never one that leaves `/<namespace>/<id>/`
+        // empty before. Never one that leaves `/<namespace>/<id>/`
         // (#534): this HEAD is native, so neither the interceptor's path
         // check nor the node-API guard sees it. Nor do they see a load
         // that falls back to the gateway URL itself (an id that isn't
         // label-encodable), so for that one the whole path must stay
         // beneath the root as well ([Gateways.probeUrlFor]).
-        val headUrl = Gateways.probeUrlFor(contentUri)
-        if (headUrl == null) {
+        val rootUrl = Gateways.probeUrlFor(contentUri)
+        if (rootUrl == null) {
             // Only a refused path has no probe, and that was answered
             // above, before the wait; kept so a probe URL is never guessed.
             showError(ErrorPage.DWEB_PATH_REFUSED)
             return
+        }
+        // For Swarm, the very page the WebView will load, so a path the
+        // site's manifest lacks fails here, fast (#536,
+        // [GatewayProbe.probeTarget]) — but only a path that stays beneath
+        // the root by #534's own rule; any other probes the root alone.
+        val headUrl = if (
+            !isIpfs &&
+            DwebPath.isContainedTarget("/bzz/${contentUri.substringAfter("://")}", encodedSeparators = false)
+        ) {
+            GatewayProbe.probeTarget(Gateways.toGatewayUrl(contentUri))
+        } else {
+            rootUrl
         }
 
         // Open gateway work of this load while the probe's HEADs run —
@@ -1239,7 +1254,12 @@ fun BrowserScreen(
         // itself is blocking, so the probe returns only once it has.
         val probeWork = target.gatewayWork.start(generation)
         val outcome = try {
-            gatewayProbe.probe(headUrl)
+            gatewayProbe.probe(
+                headUrl,
+                // A Swarm node that gave up says how many peers it had,
+                // so the page can blame too few rather than the content.
+                peersUrl = if (isIpfs) null else "${Gateways.swarmBase}/peers",
+            )
         } finally {
             target.gatewayWork.finish(probeWork)
         }
@@ -1253,12 +1273,10 @@ fun BrowserScreen(
                 )
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
-            GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
-                val detail = if (outcome is GatewayProbe.Outcome.Other) {
-                    "swarm_content_not_found_${outcome.status}"
-                } else "swarm_content_not_found"
-                showError(detail)
-            }
+            GatewayProbe.Outcome.PathNotFound,
+            is GatewayProbe.Outcome.NotFound,
+            is GatewayProbe.Outcome.Other,
+            -> showError("swarm_content_not_found", ErrorPage.SwarmFailure.of(outcome))
         }
     }
 
@@ -1392,6 +1410,12 @@ fun BrowserScreen(
         // [submitSupersedesPendingProbe]). Checked before anything else
         // so a looping `location.href` touches no tab state at all.
         if (!submitSupersedesPendingProbe(target.pendingProbeSource, source)) return
+
+        // The error page on screen retrying its own address (its
+        // countdown, or Try Again) goes on counting its automatic
+        // retries; anything else starts the count over (#536). Read
+        // before this submit's own load can move the tab on.
+        val errorPageRetried = if (source == SubmitSource.Renderer) target.errorPageRetry else null
 
         // The editor is the user's, and only their own submit closes it
         // (#35, see [submitEndsAddressEditing]).
@@ -1716,6 +1740,7 @@ fun BrowserScreen(
                         displayUrl = contentUri,
                         namedByUser = namedByUser,
                         bypassCache = bypassCache,
+                        continuesRetryStreak = errorPageRetried == contentUri,
                     )
                 } finally {
                     target.resolving = false

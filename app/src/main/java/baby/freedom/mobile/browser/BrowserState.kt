@@ -869,6 +869,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The `retry` address of the [ErrorPage] on screen, `null` on any
+     * other document. Set with [showsErrorPage]. A page-initiated submit
+     * of exactly this address is the error page's own retry, which goes
+     * on counting its automatic retries (#536).
+     */
+    internal var errorPageRetry: String? = null
+
+    /**
      * The address the user last typed into this tab's address bar and
      * the web URL it became ([typedAddressFor]), so that URL's "address
      * not found" page can offer to search for it instead (#419).
