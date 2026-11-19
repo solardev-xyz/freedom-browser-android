@@ -64,7 +64,11 @@ class SafeAccountsTest {
     private fun safes(
         readDeployment: suspend (Long, String) -> SafeDeployment = { _, _ -> SafeDeployment.UNVERIFIED },
         activationRetryMs: Long = 5_000,
-    ) = SafeAccounts(vault, SafeStore(file), scope, Dispatchers.Unconfined, clock = { 42L }, readDeployment = readDeployment, activationRetryMs = activationRetryMs)
+        monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    ) = SafeAccounts(
+        vault, SafeStore(file), scope, Dispatchers.Unconfined, clock = { 42L },
+        readDeployment = readDeployment, activationRetryMs = activationRetryMs, monotonicMs = monotonicMs,
+    )
 
     @After
     fun tearDown() {
@@ -920,6 +924,43 @@ class SafeAccountsTest {
         catching.noteSend(confirmed)
         withTimeout(5_000) { while (catching.state.value?.safes?.single()?.deployed != true) delay(5) }
         assertEquals(2, tries)
+    }
+
+    @Test
+    fun `a no-code read just after a mined activation doesn't offer activation again, for a while`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        val confirmed = execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e3".repeat(32))
+        var found = SafeDeployment.NOT_ACTIVE
+        var now = 1_000L
+        var reads = 0
+        val s = safes({ _, _ -> reads++; found }, activationRetryMs = 1, monotonicMs = { now }).also { it.reconcile(vault.state.value) }
+        // Before any activation was seen mined, no code is just not active.
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        s.noteSend(confirmed)
+        withTimeout(5_000) { while (reads < 5) delay(5) }
+        // RPCs behind the block: settling, not "activate again"; and still not marked.
+        assertEquals(SafeDeployment.SETTLING, s.checkDeployed(s.state.value!!.safes.single()))
+        assertFalse(s.state.value!!.safes.single().deployed)
+        now += SafeAccounts.ACTIVATION_SETTLE_MS - 1
+        assertEquals(SafeDeployment.SETTLING, s.checkDeployed(s.state.value!!.safes.single()))
+        // Code on one RPC's word stays unverified, as ever.
+        found = SafeDeployment.UNVERIFIED
+        assertEquals(SafeDeployment.UNVERIFIED, s.checkDeployed(s.state.value!!.safes.single()))
+        // The receipt is one RPC's word too: past the window, no code reads as not active again.
+        found = SafeDeployment.NOT_ACTIVE
+        now += 1
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        // A clock that went backwards doesn't hold it forever either.
+        s.noteSend(confirmed)
+        now -= 5
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        // A verified read marks it, as before.
+        s.noteSend(confirmed)
+        found = SafeDeployment.ACTIVE
+        assertEquals(SafeDeployment.ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        assertTrue(s.state.value!!.safes.single().deployed)
     }
 
     @Test

@@ -400,6 +400,8 @@ class SafeAccounts internal constructor(
     private val readDeployment: suspend (chainId: Long, address: String) -> SafeDeployment = { _, _ -> SafeDeployment.UNVERIFIED },
     /** How long [noteSend] waits between reads of a just-mined activation that weren't verified yet. */
     private val activationRetryMs: Long = 5_000,
+    /** A clock immune to wall-clock changes, for how long a mined activation holds off a "no code" read. */
+    private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     private val _state = MutableStateFlow<SafeState?>(null)
 
@@ -538,8 +540,20 @@ class SafeAccounts internal constructor(
      */
     suspend fun checkDeployed(safe: SafeAccount): SafeDeployment {
         if (safe.deployed) return SafeDeployment.ACTIVE
+        val key = safe.address.lowercase()
         val found = readDeployment(safe.chainId, safe.address)
-        if (found == SafeDeployment.ACTIVE) markDeployed(safe.address)
+        if (found == SafeDeployment.ACTIVE) {
+            markDeployed(safe.address)
+            activationsMined.remove(key)
+            return found
+        }
+        // Its activation was just seen mined: a "no code" read is an RPC still behind that block, not
+        // proof it isn't active, so it mustn't bring Activate back. Bounded, as the receipt is one RPC's word too.
+        val minedAt = activationsMined[key]
+        if (found == SafeDeployment.NOT_ACTIVE && minedAt != null) {
+            if (monotonicMs() - minedAt in 0 until ACTIVATION_SETTLE_MS) return SafeDeployment.SETTLING
+            activationsMined.remove(key, minedAt)
+        }
         return found
     }
 
@@ -751,6 +765,9 @@ class SafeAccounts internal constructor(
         ) to Unit
     }
 
+    /** Safes whose activation was seen mined ([noteSend]), by lowercase address: when, on [monotonicMs]. */
+    private val activationsMined = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     /** Safes whose mined activation [confirmActivation] is reading for. */
     private val confirming = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -797,7 +814,10 @@ class SafeAccounts internal constructor(
         val state = _state.value ?: return
         val safe = state.safe(label.address) ?: return
         if (label.activates) {
-            if (status.stage is SendStatus.Stage.Confirmed && !safe.deployed) confirmActivation(safe)
+            if (status.stage is SendStatus.Stage.Confirmed && !safe.deployed) {
+                activationsMined.putIfAbsent(safe.address.lowercase(), monotonicMs())
+                confirmActivation(safe)
+            }
             return
         }
         val entry = state.pendingFor(safe.address).firstOrNull { it.kind == SafePending.Kind.TX } ?: return
@@ -840,6 +860,9 @@ class SafeAccounts internal constructor(
         /** How many times [confirmActivation] reads a mined activation's code before leaving it to the Safe page. */
         private const val ACTIVATION_READS = 4
 
+        /** How long after a mined activation a "no code" read reads as [SafeDeployment.SETTLING], not [SafeDeployment.NOT_ACTIVE]. */
+        internal const val ACTIVATION_SETTLE_MS = 10 * 60_000L
+
         @Volatile
         private var instance: SafeAccounts? = null
 
@@ -875,6 +898,12 @@ enum class SafeDeployment {
 
     /** Code, but no verified read confirms it: left pending, to check again. */
     UNVERIFIED,
+
+    /**
+     * No code yet, but its activation was just seen mined ([SafeAccounts.checkDeployed]
+     * only): the RPCs are behind that block. Activation isn't offered again; left pending, to check again.
+     */
+    SETTLING,
 }
 
 /** Which owner lists and thresholds a Safe can have. */

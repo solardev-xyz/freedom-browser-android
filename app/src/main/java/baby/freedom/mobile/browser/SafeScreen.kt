@@ -505,6 +505,8 @@ internal fun SafePage(
         val c = chain ?: return@LaunchedEffect
         checking = true
         checkError = null
+        // Until this check has priced it again, an earlier price must not stand: the Safe may be active by now.
+        var settled = false
         try {
             if (!safe.deployed) {
                 when (safes.checkDeployed(safe)) {
@@ -515,8 +517,14 @@ internal fun SafePage(
                         activation = null
                         checkError = Strings.get(R.string.safe_activation_unverified, c.name)
                     }
+                    // Its activation was just mined, and the RPCs don't have that block yet: not offered again either.
+                    SafeDeployment.SETTLING -> {
+                        activation = null
+                        checkError = Strings.get(R.string.safe_activation_settling, c.name)
+                    }
                 }
             }
+            settled = true
             holdings = TokenRegistry.tokens(c).mapNotNull { token ->
                 val held = if (token.address == null) chainReads.balance(c.id, safe.address) else chainReads.tokenBalance(c.id, token.address, safe.address)
                 (token to held).takeIf { token.isNative || held.signum() > 0 }
@@ -524,6 +532,7 @@ internal fun SafePage(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (!settled) activation = null
             checkError = safeErrorMessage(e, Strings.get(R.string.safe_action_read), phraseBackedUp)
         } finally {
             checking = false

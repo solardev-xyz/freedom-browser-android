@@ -146,6 +146,8 @@
     <string name="safe_check_again">Check again</string>
     <!-- %1$s the network. -->
     <string name="safe_activation_unverified">This Safe may already be active on %1$s, but the servers asked didn’t agree, or too few answered, so Freedom can’t confirm it. It stays not active until they do. Try again in a moment.</string>
+    <!-- %1$s the network. -->
+    <string name="safe_activation_settling">The activation went through, but the servers asked don’t show this Safe on %1$s yet, so Freedom can’t confirm it. It stays not active until they do. Try again in a moment.</string>
     <!-- %1$s the network, %2$s the most it costs, %3$s the paying account, %4$s what it holds. -->
     <string name="safe_activation_ready">Activating deploys it on %1$s: up to %2$s, paid by %3$s (holds %4$s).</string>
     <string name="safe_activate_on">Activate on %1$s</string>
