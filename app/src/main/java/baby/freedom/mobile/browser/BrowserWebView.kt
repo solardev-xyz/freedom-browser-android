@@ -4208,6 +4208,7 @@ private fun buildRefreshableWebView(
                         freshDocument = { target -> state.fetchedFresh(generation, target) },
                         private = state.private,
                         abandon = ticket,
+                        tabId = state.id,
                         onMainFrameRoot = { served ->
                             noteMainFrameContentLoad(view, state, generation, served)
                         },
@@ -6298,6 +6299,8 @@ internal fun interceptVirtualRequest(
     private: Boolean = false,
     /** Whether the page has given up on this request ([DwebAborts]); null: never asked. */
     abandon: AbandonSignal? = null,
+    /** The tab asking, for its Radicle reads (#533); null: a worker's or a native re-fetch. */
+    tabId: Long? = null,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
     onMainFrameGateway: (String?) -> Unit = {},
 ): WebResourceResponse? {
@@ -6323,7 +6326,7 @@ internal fun interceptVirtualRequest(
     // the whole process — every tab — so a bug a page can reach (#355:
     // a page-chosen Range header) answers a 502 instead.
     val response = try {
-        RadApi.intercept(req, url)
+        RadApi.intercept(req, url, tabId)
             ?: interceptOnchainAppRequest(req, url, onchain)
             ?: siteDataCleanupFor(req, url, tab, private)
             ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, onMainFrameGateway, private, abandon)

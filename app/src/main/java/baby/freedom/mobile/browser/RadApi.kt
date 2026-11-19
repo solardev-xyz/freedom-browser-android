@@ -100,14 +100,22 @@ object RadApi {
      * The interceptor's answer for [url], or null if it isn't on
      * [RadUrl.HOST]. Never falls through to the network: the host doesn't
      * exist in DNS.
+     *
+     * [tabId]: the tab asking, null for a service worker or a native
+     * re-fetch. Every main-frame request of a tab — on any host — starts
+     * its next document for [RadicleClient]: the reads the page on screen
+     * still has queued or running are dropped (#533), and the incoming
+     * document's own reads, this one included, are its.
      */
-    internal fun intercept(request: WebResourceRequest, url: String): WebResourceResponse? {
+    internal fun intercept(request: WebResourceRequest, url: String, tabId: Long? = null): WebResourceResponse? {
+        if (tabId != null && request.isForMainFrame) RadicleClient.navigationRequested(tabId)
         if (!RadUrl.isVirtualUrl(url) && !isUnderHost(url)) return null
         val reply = if (RadUrl.isVirtualUrl(url)) {
+            val requester = RadicleClient.requesterFor(tabId)
             serve(
                 request.method ?: "GET",
                 url,
-                RadicleClient::call,
+                { method, args -> RadicleClient.call(method, args, requester = requester) },
                 fromViewer = isFromViewer(request.requestHeaders.orEmpty(), request.isForMainFrame),
             )
         } else {
@@ -591,11 +599,15 @@ object RadApi {
     /**
      * A node error as desktop's catch maps it: "not found" phrasing → 404,
      * the node being off or starting → 403 / 503 with its reason, anything
-     * else → 500.
+     * else → 500. Desktop's read limits (#533): too busy or the page gone
+     * → 503, out of time → 504, an answer over the size cap → 502.
      */
     private fun failed(a: RadicleClient.Answer.Failed): Reply = when {
         a.reason == RadicleClient.REASON_DISABLED || a.reason == RadicleClient.REASON_STOPPED ||
             a.reason == RadicleClient.REASON_NOT_READY -> unavailable(a.reason)
+        a.reason == RadicleClient.REASON_BUSY || a.reason == RadicleClient.REASON_CANCELLED -> apiError(503, a.message)
+        a.reason == RadicleClient.REASON_TIMEOUT -> apiError(504, a.message)
+        a.reason == RadicleClient.REASON_TOO_LARGE -> apiError(502, a.message)
         NOT_FOUND.containsMatchIn(a.message) -> apiError(404, a.message)
         else -> apiError(500, a.message)
     }
@@ -633,7 +645,9 @@ object RadApi {
         403 -> "Forbidden"
         404 -> "Not Found"
         405 -> "Method Not Allowed"
+        502 -> "Bad Gateway"
         503 -> "Service Unavailable"
+        504 -> "Gateway Timeout"
         else -> "Internal Server Error"
     }
 

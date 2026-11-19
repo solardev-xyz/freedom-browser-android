@@ -305,7 +305,8 @@ object RadicleProviders {
         val id = request.id
         val method = request.method
         var params: JSONObject? = request.params
-        scope.launch {
+        // Its node reads are this document's: dropped when it goes (#533).
+        scope.launch(RadicleClient.requesterContext(RadicleClient.requesterFor(tab.id))) {
             val result = try {
                 val p = provider ?: throw IllegalStateException("provider not ready")
                 val ps = params!!
@@ -378,9 +379,11 @@ object RadicleProviders {
 
     /**
      * The tab started (committed) a new document on [url] — null when it's
-     * being torn down: what the old one asked is refused.
+     * being torn down: what the old one asked is refused, and its Radicle
+     * reads still queued or running are dropped ([RadicleClient.documentStarted]).
      */
     fun onDocumentStarted(tab: BrowserState, url: String?) {
+        RadicleClient.documentStarted(tab.id, gone = url == null)
         documents[tab.id] = (documents[tab.id] ?: 0) + 1
         committedOrigins[tab.id] = providerOriginKey(url)
         withdraw(tab.id)
@@ -388,6 +391,7 @@ object RadicleProviders {
 
     /** The tab closed. */
     fun onTabClosed(tabId: Long) {
+        RadicleClient.tabClosed(tabId)
         withdraw(tabId)
         documents.remove(tabId)
         committedOrigins.remove(tabId)
