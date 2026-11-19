@@ -166,7 +166,8 @@ class SwarmProvider(
          * derived from the wallet. A page must not publish a SOC owned by
          * one of these (`swarm_publishSingleOwnerChunk`): it can get a
          * wallet account's `personal_sign` of 32 bytes, which is exactly
-         * a SOC signature. Never reads a key a user must unlock for and
+         * a SOC signature. Nothing signs: a key may be derived only to
+         * compute its address, and is zeroed after. Never asks the user,
          * never counts as wallet activity. Throws if it can't be read.
          */
         fun ownAddresses(): OwnAddresses
@@ -524,12 +525,20 @@ class SwarmProvider(
 
     /**
      * desktop's `swarm_publishSingleOwnerChunk` (#647): a SOC the page
-     * signed with its own key, stamped by the node. Publish tier, like
+     * signed, stamped by the node. Publish tier, like
      * `swarm_publishChunk`: no Freedom key signs, so no feed access or
      * signing grant is needed. The signature must recover to `owner` for
      * this identifier and chunk, and `owner` must not be one of this
      * device's own identities ([ownerCheck]), before anyone is asked; the
      * bytes that verified are the ones uploaded.
+     *
+     * The owner need not be the site's own key: any validly signed SOC
+     * may be published, one read back with `swarm_readSingleOwnerChunk`
+     * included — the network already accepts it from anyone holding it.
+     * App-scoped publisher keys aren't refused (as on desktop): they sign
+     * only Freedom's own writes for their site, so under one a page can
+     * only publish a chunk already signed for the network, never get a
+     * new signature.
      *
      * Unlike desktop, the signature is checked before the owner: with
      * the owner check first, any connected site could ask, sheet-free,
@@ -574,20 +583,19 @@ class SwarmProvider(
      */
     private suspend fun ownerCheck(owner: ByteArray) {
         val hex = owner.swarmHex()
-        val held = try {
-            withContext(io) {
-                val own = publishers.ownAddresses()
-                val answer = node.request("GET", "/addresses", emptyMap(), null, PREFLIGHT_TIMEOUT_MS)
-                val nodeKey = answer.takeIf { it.ok }?.json()?.optString("ethereum")?.removePrefix("0x")?.lowercase()
-                    ?.takeIf { HEX40.matches(it) }
-                    ?: throw IOException("the node didn't say its address")
-                OwnAddresses(own.addresses + nodeKey, own.complete)
-            }
+        val cantCheck = Invalid(Reply.Err(INTERNAL, "Could not check the owner against Freedom identities"))
+        // The node not answering is the node's usual error ([request]); an answer without its address fails closed.
+        val nodeKey = call("GET", "/addresses", emptyMap(), null, PREFLIGHT_TIMEOUT_MS)
+            .takeIf { it.ok }?.json()?.optString("ethereum")?.removePrefix("0x")?.lowercase()
+            ?.takeIf { HEX40.matches(it) } ?: throw cantCheck
+        val own = try {
+            withContext(io) { publishers.ownAddresses() }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw Invalid(Reply.Err(INTERNAL, "Could not check the owner against Freedom identities"))
+            throw cantCheck
         }
+        val held = OwnAddresses(own.addresses + nodeKey, own.complete)
         if (hex in held.addresses) {
             throw Invalid(
                 Reply.Err(
@@ -2084,7 +2092,7 @@ sealed interface SwarmAsk {
         val contentType: String?,
         val name: String?,
         val paths: List<String>,
-        /** A [Kind.SignedSoc]'s signer (EIP-55): the page's key, never Freedom's. */
+        /** A [Kind.SignedSoc]'s signer (EIP-55), whose signature was checked: never the node's or a wallet account's. */
         val owner: String? = null,
     ) : SwarmAsk {
         enum class Kind { Data, Files, Chunk, SignedSoc }

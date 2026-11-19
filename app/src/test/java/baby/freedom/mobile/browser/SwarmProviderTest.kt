@@ -529,7 +529,7 @@ class SwarmProviderTest {
         assertEquals(SwarmAsk.Publish.Kind.SignedSoc, ask.kind)
         assertEquals(pageOwner, ask.owner)
         assertEquals(5L, ask.size)
-        assertEquals("Single owner chunk, signed by the site", swarmPublishWhat(ask))
+        assertEquals("Single owner chunk", swarmPublishWhat(ask))
         assertFalse(feeds.granted(site))
         assertTrue(publishers.keysHandedOut.isEmpty())
         assertEquals(1, commits)
@@ -614,6 +614,11 @@ class SwarmProviderTest {
         publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = true)
         node.ethereum = ""
         assertEquals(-32603, err(call("swarm_publishSingleOwnerChunk", signedSoc())).code)
+        // The node stopping right after preflight is the node's usual answer, not a failed check.
+        node.ethereum = "0x" + "11".repeat(20)
+        node.onRequest = { _, path -> if (path == "/addresses") throw java.io.IOException("connection refused") }
+        assertEquals("node-stopped", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
+        node.onRequest = { _, _ -> }
         assertTrue(asked.isEmpty())
         assertTrue(node.uploads().isEmpty())
         // A node that isn't ready says so first, as for any publish.

@@ -42,7 +42,7 @@
         <item quantity="other">%d files</item>
     </plurals>
     <string name="swarm_publish_chunk">Swarm chunk</string>
-    <string name="swarm_publish_signed_soc">Single owner chunk, signed by the site</string>
+    <string name="swarm_publish_signed_soc">Single owner chunk</string>
     <string name="swarm_publish_data">Data</string>
     <!-- The first three paths (%1$s, comma-separated), and how many more there are -->
     <plurals name="swarm_paths_preview_more">
@@ -64,7 +64,7 @@
     <string name="swarm_detail_request">Request</string>
     <string name="swarm_detail_feed_name">Feed name</string>
     <string name="swarm_detail_signs_as">Signs as</string>
-    <!-- A site-signed single owner chunk: the address of the site's own key that signed it -->
+    <!-- A single owner chunk the site sent already signed: the address whose signature it carries -->
     <string name="swarm_detail_signed_by">Signed by</string>
     <string name="swarm_detail_topic">Topic</string>
     <string name="swarm_detail_room_address">Room address</string>
