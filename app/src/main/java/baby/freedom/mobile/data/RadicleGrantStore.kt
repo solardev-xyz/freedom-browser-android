@@ -20,7 +20,8 @@ import kotlinx.coroutines.flow.map
  * Which sites may use the `window.radicle` provider (#124), and how far:
  * desktop's `radicle-permissions.js`, iOS's `RadiclePermissionStore`.
  *
- *     "grant:<origin>" → "connection" | "signing:<did>"
+ *     "grant:<origin>" → "connection" | "signing:<did>" | "writes:<did>"
+ *     "autowrites:<origin>" → when its rule last wrote without asking
  *
  * `connection` is the first tier (the site may see node status and the
  * seeded list, and ask to seed / unseed); `signing` adds the second
@@ -34,6 +35,15 @@ import kotlinx.coroutines.flow.map
  * two can be linked. `<origin>` is the provider's origin key (a normalized
  * `scheme://host[:port]`, the one site permissions use). A private tab
  * never reads or writes here.
+ *
+ * `writes:<did>` is `signing:<did>` plus the site's "always allow writes"
+ * rule (#544, desktop's `autoApprove.signing`): its issues, comments and
+ * state changes go out without a prompt each, at most
+ * [MAX_AUTO_WRITES_PER_DAY] in any 24 hours ([countAutoWrite], whose
+ * times are kept so a restart doesn't hand the site a fresh day). The
+ * rule lives in the grant's own value, so anything that changes or drops
+ * the grant — [revoke], [dropSigning], a [grantSigning] for another
+ * identity — drops the rule with it.
  *
  * Never throws for storage trouble: an unreadable file reads as "no
  * grants" (the site asks again), a failed write reports `false`, and a
@@ -50,7 +60,13 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
      * device's own identity (the only one the node ran as then), whose DID
      * wasn't recorded.
      */
-    data class Grant(val origin: String, val signingAs: String? = null, val signedAs: String? = null) {
+    data class Grant(
+        val origin: String,
+        val signingAs: String? = null,
+        val signedAs: String? = null,
+        /** Its writes as [signingAs] go out without a prompt each (#544). */
+        val autoWrites: Boolean = false,
+    ) {
         /** It may sign as some identity (maybe not the node's current one). */
         val signing: Boolean get() = signingAs != null
 
@@ -79,6 +95,8 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
         tier == SIGNING || tier == SIGNED_DEVICE -> Grant(origin, signedAs = "")
         tier.startsWith(SIGNING_AS) && tier.length > SIGNING_AS.length ->
             Grant(origin, signingAs = tier.removePrefix(SIGNING_AS))
+        tier.startsWith(WRITES_AS) && tier.length > WRITES_AS.length ->
+            Grant(origin, signingAs = tier.removePrefix(WRITES_AS), autoWrites = true)
         tier.startsWith(SIGNED_AS) && tier.length > SIGNED_AS.length ->
             Grant(origin, signedAs = tier.removePrefix(SIGNED_AS))
         else -> null
@@ -107,10 +125,55 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
         if (did.isEmpty()) return false
         var connected = false
         val written = write {
-            connected = it[keyOf(origin)] != null
-            if (connected) it[keyOf(origin)] = SIGNING_AS + did
+            val tier = it[keyOf(origin)]
+            connected = tier != null
+            // Already allowed as [did]: keep its rule. Any other identity
+            // starts without one.
+            if (connected && tier != WRITES_AS + did) it[keyOf(origin)] = SIGNING_AS + did
         }
         return written && connected
+    }
+
+    /**
+     * Turn on [origin]'s "always allow writes" rule — only while it may
+     * sign as [did], checked in the same edit [revoke] makes, so a site
+     * disconnected (or moved to another identity) while its prompt was up
+     * doesn't get one. `false` if it may not, or the write failed.
+     */
+    suspend fun allowAutoWrites(origin: String, did: String): Boolean {
+        if (did.isEmpty()) return false
+        var signing = false
+        val written = write {
+            val tier = it[keyOf(origin)]
+            signing = tier == SIGNING_AS + did || tier == WRITES_AS + did
+            if (signing) it[keyOf(origin)] = WRITES_AS + did
+        }
+        return written && signing
+    }
+
+    /** Turn [origin]'s rule off, keeping its grant; `false` if the store couldn't be written. */
+    suspend fun stopAutoWrites(origin: String): Boolean = write {
+        val tier = it[keyOf(origin)]
+        if (tier != null && tier.startsWith(WRITES_AS)) it[keyOf(origin)] = SIGNING_AS + tier.removePrefix(WRITES_AS)
+    }
+
+    /**
+     * Count one write [origin]'s rule answers at [now] (wall clock, ms), if
+     * fewer than [MAX_AUTO_WRITES_PER_DAY] were counted in the 24 hours
+     * before; `false` (the write needs a prompt) otherwise, or if the count
+     * couldn't be saved. A time that isn't provably more than a day old —
+     * one ahead of [now], after the clock was set back — still counts.
+     */
+    suspend fun countAutoWrite(origin: String, now: Long): Boolean {
+        var counted = false
+        val written = write {
+            val key = autoWritesKey(origin)
+            val recent = autoWriteTimes(it[key]).filterNot { t -> now - t >= DAY_MS }
+            counted = recent.size < MAX_AUTO_WRITES_PER_DAY
+            val kept = if (counted) recent + now else recent
+            if (kept.isEmpty()) it.remove(key) else it[key] = kept.joinToString(",")
+        }
+        return written && counted
     }
 
     /**
@@ -129,12 +192,16 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
             when {
                 v == SIGNING -> prefs[stringPreferencesKey(k.name)] = SIGNED_DEVICE
                 v.startsWith(SIGNING_AS) -> prefs[stringPreferencesKey(k.name)] = SIGNED_AS + v.removePrefix(SIGNING_AS)
+                v.startsWith(WRITES_AS) -> prefs[stringPreferencesKey(k.name)] = SIGNED_AS + v.removePrefix(WRITES_AS)
             }
         }
     }
 
-    /** Drop [origin]'s grant, both tiers; `false` if the store couldn't be written. */
-    suspend fun revoke(origin: String): Boolean = write { it.remove(keyOf(origin)) }
+    /** Drop [origin]'s grant, both tiers, its rule and its count; `false` if the store couldn't be written. */
+    suspend fun revoke(origin: String): Boolean = write {
+        it.remove(keyOf(origin))
+        it.remove(autoWritesKey(origin))
+    }
 
     private suspend fun write(change: (MutablePreferences) -> Unit): Boolean = try {
         store.edit(change)
@@ -145,6 +212,11 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
     }
 
     private fun keyOf(origin: String) = stringPreferencesKey("$PREFIX$origin")
+
+    private fun autoWritesKey(origin: String) = stringPreferencesKey("$AUTO_WRITES$origin")
+
+    private fun autoWriteTimes(value: String?): List<Long> =
+        value?.split(',')?.mapNotNull { it.toLongOrNull() }.orEmpty()
 
     companion object {
         private const val PREFIX = "grant:"
@@ -160,6 +232,13 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
         private const val SIGNING_AS = "signing:"
         /** Connection tier, once allowed to sign as the DID that follows ([Grant.signedAs]). */
         private const val SIGNED_AS = "signed:"
+        /** [SIGNING_AS] with the "always allow writes" rule on ([Grant.autoWrites]). */
+        private const val WRITES_AS = "writes:"
+        private const val AUTO_WRITES = "autowrites:"
+
+        /** Desktop's `DAILY_MAX` (`auto-write-limiter.js`). */
+        const val MAX_AUTO_WRITES_PER_DAY = 50
+        const val DAY_MS = 24 * 60 * 60 * 1000L
         private const val TAG = "RadicleGrantStore"
 
         private val Context.radicleGrantStore by preferencesDataStore(

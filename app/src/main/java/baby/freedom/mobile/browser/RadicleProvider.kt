@@ -36,6 +36,10 @@ import org.json.JSONObject
  *    and the COB writes `radicle_createIssue`, `radicle_commentIssue`,
  *    `radicle_editIssueState`, `radicle_commentPatch`, which sign with the
  *    user's own node identity and can't be taken back once announced.
+ *    Each write also asks on its own, showing what will be published
+ *    (#544, desktop's R-6) — unless the site's "always allow writes" rule
+ *    is on, and then only within [AutoWriteBurst] and the store's daily
+ *    cap; a write past them asks after all.
  *
  * [origin] is always the platform's word for the requesting top-level
  * document, never something the page says. Parameters are checked
@@ -53,7 +57,11 @@ class RadicleProvider(
     private val node: Node,
     private val clock: () -> Long = System::currentTimeMillis,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** A clock no setting moves, for [AutoWriteBurst]. */
+    monotonic: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
+    private val burst = AutoWriteBurst(monotonic)
+
     /** Where grants live: [baby.freedom.mobile.data.RadicleGrantStore] in the app. */
     interface Grants {
         /**
@@ -73,6 +81,18 @@ class RadicleProvider(
         /** Give connected [origin] the signing tier for [did] only. */
         suspend fun grantSigning(origin: String, did: String): Boolean
         suspend fun revoke(origin: String): Boolean
+
+        /** Whether [origin]'s "always allow writes" rule is on for [did] (#544). */
+        suspend fun autoWrites(origin: String, did: String): Boolean = false
+
+        /** Turn the rule on, only while [origin] may still sign as [did]; false if not, or not saved. */
+        suspend fun allowAutoWrites(origin: String, did: String): Boolean = false
+
+        /** Turn the rule off; false if not saved. */
+        suspend fun stopAutoWrites(origin: String): Boolean = false
+
+        /** Count one rule-answered write at wall-clock [now] within the daily cap; false: it needs a prompt. */
+        suspend fun countAutoWrite(origin: String, now: Long): Boolean = false
     }
 
     /** The node: [RadicleClient] in the app. [call] blocks. */
@@ -154,14 +174,15 @@ class RadicleProvider(
     /**
      * Answer one request from a page on [origin]. [ask] puts a consent
      * prompt up on the page's tab and says whether the user allowed it
-     * (false for a refusal, a dismissal, or a prompt that couldn't be
-     * shown).
+     * (not for a refusal, a dismissal, or a prompt that couldn't be
+     * shown), and for a write, where the user left its "always allow"
+     * switch ([RadicleAnswer.alwaysAllow]).
      */
     suspend fun request(
         origin: String,
         method: String,
         params: JSONObject,
-        ask: suspend (RadicleAsk) -> Boolean,
+        ask: suspend (RadicleAsk) -> RadicleAnswer,
     ): Reply {
         val tier = TIERS[method] ?: return Reply.Err(UNSUPPORTED, "Unknown method: $method")
         if (node.unavailableReason() == RadicleClient.REASON_DISABLED) {
@@ -204,9 +225,9 @@ class RadicleProvider(
             .put("writes", JSONArray(WRITES))
     }
 
-    private suspend fun requestAccess(origin: String, ask: suspend (RadicleAsk) -> Boolean): Reply {
+    private suspend fun requestAccess(origin: String, ask: suspend (RadicleAsk) -> RadicleAnswer): Reply {
         if (grants.signingFor(origin) == null) {
-            if (!ask(RadicleAsk.Connect(origin))) return rejected()
+            if (!ask(RadicleAsk.Connect(origin)).allowed) return rejected()
             if (!grants.connect(origin)) return Reply.Err(INTERNAL, "Couldn't save the connection")
             events.emit(origin, "connect", JSONObject().put("origin", origin))
         }
@@ -217,7 +238,7 @@ class RadicleProvider(
 
     private suspend fun disconnect(origin: String): Reply {
         if (!grants.revoke(origin)) return Reply.Err(INTERNAL, "Couldn't drop the connection")
-        unfollowAll(origin)
+        forget(origin)
         events.emit(origin, "disconnect", JSONObject().put("origin", origin))
         return Reply.Ok(JSONObject().put("connected", false))
     }
@@ -247,7 +268,7 @@ class RadicleProvider(
         origin: String,
         method: String,
         params: JSONObject,
-        ask: suspend (RadicleAsk) -> Boolean,
+        ask: suspend (RadicleAsk) -> RadicleAnswer,
     ): Reply = when (method) {
         "radicle_listSeededRepos" -> when (val a = callIo("listSeededRepos", JSONObject())) {
             is RadicleClient.Answer.Ok -> Reply.Ok(a.value)
@@ -263,7 +284,7 @@ class RadicleProvider(
         "radicle_seed" -> {
             val rid = rid(params) ?: return invalidRid()
             busy(rid)?.let { return it }
-            if (!ask(RadicleAsk.Seed(origin, rid))) return rejected()
+            if (!ask(RadicleAsk.Seed(origin, rid)).allowed) return rejected()
             // Another fetch may have started while the prompt was up: the
             // node would skip this one without a word.
             node.unavailableReason()?.let { return Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it) }
@@ -273,7 +294,7 @@ class RadicleProvider(
         }
         "radicle_unseed" -> {
             val rid = rid(params) ?: return invalidRid()
-            if (!ask(RadicleAsk.Unseed(origin, rid))) return rejected()
+            if (!ask(RadicleAsk.Unseed(origin, rid)).allowed) return rejected()
             if (!node.unseed(rid)) return Reply.Err(INTERNAL, "unseed failed", "unseed_failed")
             synchronized(lock) {
                 tracks.remove(rid)
@@ -440,7 +461,10 @@ class RadicleProvider(
      * [origin]'s grant is gone (the user disconnected it from the Radicle
      * page): it stops hearing `seedStatus` (#201 R1-F2).
      */
-    fun forget(origin: String) = unfollowAll(origin)
+    fun forget(origin: String) {
+        unfollowAll(origin)
+        burst.forget(origin)
+    }
 
     /**
      * Where [rid]'s replication stands (desktop's `getSeedStatus` shape).
@@ -564,7 +588,7 @@ class RadicleProvider(
         method: String,
         params: JSONObject,
         signingAs: String,
-        ask: suspend (RadicleAsk) -> Boolean,
+        ask: suspend (RadicleAsk) -> RadicleAnswer,
     ): Reply {
         // Checked before the prompt: nobody is asked about a write that
         // would be refused anyway.
@@ -592,7 +616,7 @@ class RadicleProvider(
             // the UI's copy of the node state, which lags a restart.
             val wallet = identity?.optBoolean(RadicleNode.WALLET_IDENTITY) == true
             val before = previousIdentity(runCatching { grants.signedBefore(origin) }.getOrNull(), did, wallet)
-            if (!ask(RadicleAsk.Signing(origin, did, wallet, before))) return rejected()
+            if (!ask(RadicleAsk.Signing(origin, did, wallet, before)).allowed) return rejected()
             // The node may have restarted as another identity while the
             // prompt was up: the grant is for the one the user was asked
             // about, and only while the node still runs as it.
@@ -604,18 +628,85 @@ class RadicleProvider(
             if (!grants.grantSigning(origin, did)) return Reply.Err(UNAUTHORIZED, "Origin not connected", "not_connected")
         }
         if (write == null) return Reply.Ok(JSONObject((identity ?: JSONObject()).toString()).apply { remove(RadicleNode.WALLET_IDENTITY) })
+        // Before any prompt: nobody is asked about a write refused anyway.
         if (!takeWriteSlot(origin)) {
             return Reply.Err(INTERNAL, "Too many writes; try again in a minute", "rate_limited")
         }
+        // Each write is the user's to approve (#544), unless the site's
+        // "always allow writes" rule answers it within its limits. A write
+        // past them asks, and one the user approves isn't counted.
+        val ruleOn = grants.autoWrites(origin, did)
+        var turnOn = false
+        if (!(ruleOn && takeAutoWrite(origin))) {
+            val answer = ask(writeAsk(origin, method, params, write, limited = ruleOn))
+            // Only the user's own switch changes the rule — never a prompt
+            // taken down (a navigation, the tab closing, its time running
+            // out), which carries no switch. Off is saved at once, approve
+            // or not; on only once the write has gone out, so a write that
+            // fails leaves no standing permission behind.
+            if (ruleOn && answer.alwaysAllow == false) grants.stopAutoWrites(origin)
+            if (!answer.allowed) return rejected()
+            turnOn = !ruleOn && answer.alwaysAllow == true
+            // The prompt can be up for minutes: the site may have been
+            // disconnected, or moved to another identity, meanwhile.
+            when (grants.signingFor(origin)) {
+                did -> Unit
+                null -> return Reply.Err(UNAUTHORIZED, "Origin not connected", "not_connected")
+                else -> return Reply.Err(UNAUTHORIZED, "Origin lacks the signing grant", "signing_not_granted")
+            }
+        }
         // `:node` refuses the write if the node has meanwhile restarted as another identity.
         val (call, args) = write.call to JSONObject(write.args.toString()).put(RadicleNode.AS_DID, did)
-        return when (val a = callIo(call, args, RadicleClient.WRITE_TIMEOUT_MS)) {
+        val reply = when (val a = callIo(call, args, RadicleClient.WRITE_TIMEOUT_MS)) {
             is RadicleClient.Answer.Failed -> nativeError(a, "write failed")
             is RadicleClient.Answer.Ok -> {
                 val value = a.value as? JSONObject
                 if (value?.has("id") == true) Reply.Ok(value) else Reply.Err(INTERNAL, "write failed", "native_failed")
             }
         }
+        if (turnOn && reply is Reply.Ok) grants.allowAutoWrites(origin, did)
+        return reply
+    }
+
+    /**
+     * Charge one write to [origin]'s rule: a token from [burst], then a
+     * slot in the store's daily count; false (it needs a prompt) if either
+     * is used up, with the token given back if only the day is.
+     */
+    private suspend fun takeAutoWrite(origin: String): Boolean {
+        if (!burst.take(origin)) return false
+        if (grants.countAutoWrite(origin, clock())) return true
+        burst.giveBack(origin)
+        return false
+    }
+
+    /** The per-write prompt for [write]: what's signed, as the node will get it. */
+    private fun writeAsk(
+        origin: String,
+        method: String,
+        params: JSONObject,
+        write: Validated.Ok,
+        limited: Boolean,
+    ): RadicleAsk.Write {
+        val a = write.args
+        val labels = a.optString("labelsJson").takeIf { it.isNotEmpty() }?.let { JSONArray(it) }
+        // A patch comment goes to the revision; the patch id the page gave
+        // isn't sent at all, so it's only what the page says.
+        val revision = a.optString("revisionId")
+        val patchId = params.opt("patchId") as? String
+        return RadicleAsk.Write(
+            origin = origin,
+            kind = method,
+            rid = a.getString("rid"),
+            target = a.optString("issueId").ifEmpty { revision },
+            claimedPatch = if (method == "radicle_commentPatch" && patchId != null && patchId != revision) patchId else "",
+            title = a.optString("title"),
+            body = a.optString("description").ifEmpty { a.optString("body") },
+            labels = labels?.let { l -> (0 until l.length()).map { l.getString(it) } }.orEmpty(),
+            state = a.optString("state"),
+            replyTo = a.optString("replyTo"),
+            limited = limited,
+        )
     }
 
     /**
@@ -833,6 +924,20 @@ class RadicleProvider(
     }
 }
 
+/**
+ * The user's answer to a [RadicleAsk]: whether they allowed it, and for a
+ * [RadicleAsk.Write], where they left its "always allow" switch. That is
+ * null unless the user answered the prompt themselves — one taken down by
+ * a navigation, the tab closing or its time running out says nothing about
+ * the rule.
+ */
+data class RadicleAnswer(val allowed: Boolean, val alwaysAllow: Boolean? = null) {
+    companion object {
+        val ALLOWED = RadicleAnswer(true)
+        val REFUSED = RadicleAnswer(false)
+    }
+}
+
 /** What a consent prompt asks the user, for a page on [origin]. */
 sealed interface RadicleAsk {
     val origin: String
@@ -858,5 +963,29 @@ sealed interface RadicleAsk {
         val did: String = "",
         val wallet: Boolean = false,
         val previousDid: String? = null,
+    ) : RadicleAsk
+
+    /**
+     * Publish one write as the user (#544): [kind] is the provider method,
+     * the rest what the node will sign — [rid]; [target] the issue, or the
+     * patch revision a comment goes to ([claimedPatch]: the patch the page
+     * says that revision belongs to, when it named another); the issue's
+     * [title], [labels], the description or comment [body], the comment
+     * it replies to ([replyTo]), the new issue [state]. [limited]: the
+     * site's "always allow writes" rule is on, but its limit stopped this
+     * one, so its switch starts on.
+     */
+    data class Write(
+        override val origin: String,
+        val kind: String,
+        val rid: String,
+        val target: String = "",
+        val claimedPatch: String = "",
+        val title: String = "",
+        val body: String = "",
+        val labels: List<String> = emptyList(),
+        val state: String = "",
+        val replyTo: String = "",
+        val limited: Boolean = false,
     ) : RadicleAsk
 }

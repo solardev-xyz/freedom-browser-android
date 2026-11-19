@@ -43,6 +43,31 @@ class RadicleProviderTest {
         }
         override suspend fun revoke(origin: String): Boolean {
             map.remove(origin)
+            rules.remove(origin)
+            return true
+        }
+
+        /** origin → the DID its "always allow writes" rule is for. */
+        val rules = HashMap<String, String>()
+        /** origin → the wall-clock times its rule wrote without asking. */
+        val counted = HashMap<String, MutableList<Long>>()
+        var saves = true
+        override suspend fun autoWrites(origin: String, did: String) = rules[origin] == did && map[origin] == did
+        override suspend fun allowAutoWrites(origin: String, did: String): Boolean {
+            if (!saves || map[origin] != did) return false
+            rules[origin] = did
+            return true
+        }
+        override suspend fun stopAutoWrites(origin: String): Boolean {
+            if (!saves) return false
+            rules.remove(origin)
+            return true
+        }
+        override suspend fun countAutoWrite(origin: String, now: Long): Boolean {
+            val times = counted.getOrPut(origin) { mutableListOf() }
+            times.removeAll { now - it >= 24 * 3600_000L }
+            if (!saves || times.size >= 50) return false
+            times += now
             return true
         }
     }
@@ -94,14 +119,22 @@ class RadicleProviderTest {
     private val grants = MemoryGrants()
     private val node = FakeNode()
     private var now = 1_000_000L
-    private val provider = RadicleProvider(grants, node, clock = { now }, io = Dispatchers.Unconfined)
+    private val provider = RadicleProvider(grants, node, clock = { now }, io = Dispatchers.Unconfined, monotonic = { now })
     private val asked = mutableListOf<RadicleAsk>()
     private var answer = true
+    /** Where the user leaves a write prompt's "always allow" switch; null: they leave it as it starts. */
+    private var always: Boolean? = null
+    /** The prompt is taken down (a navigation, the tab closing, time running out) rather than answered. */
+    private var withdrawn = false
 
     private fun req(method: String, params: JSONObject = JSONObject(), origin: String = site) = runBlocking {
         provider.request(origin, method, params) { a ->
             asked += a
-            answer
+            when {
+                withdrawn -> RadicleAnswer.REFUSED
+                a is RadicleAsk.Write -> RadicleAnswer(answer, always ?: a.limited)
+                else -> RadicleAnswer(answer)
+            }
         }
     }
 
@@ -267,7 +300,9 @@ class RadicleProviderTest {
         assertEquals("did:key:z6MkMe", (ok(req("radicle_getIdentity")) as JSONObject).getString("did"))
         val issue = JSONObject().put("rid", rid).put("title", "t").put("description", "d").put("labels", JSONArray().put("bug"))
         assertEquals("abcdef1234", (ok(req("radicle_createIssue", issue)) as JSONObject).getString("id"))
-        assertEquals(2, asked.size)
+        // The grant, then the write itself (#544).
+        assertEquals(2, asked.filterIsInstance<RadicleAsk.Signing>().size)
+        assertEquals(1, asked.filterIsInstance<RadicleAsk.Write>().size)
         val call = node.calls.last { it.first == "createIssue" }.second
         assertEquals("""["bug"]""", call.getString("labelsJson"))
         // Made as the identity the user allowed; `:node` refuses it as any other.
@@ -297,7 +332,7 @@ class RadicleProviderTest {
         assertEquals(ME, (ok(req("radicle_getIdentity")) as JSONObject).getString("did"))
         assertEquals(ME, grants.map[site])
         ok(req("radicle_createIssue", JSONObject(issue.toString())))
-        assertEquals(3, asked.size)
+        assertEquals(3, asked.filterIsInstance<RadicleAsk.Signing>().size)
     }
 
     @Test
@@ -358,6 +393,218 @@ class RadicleProviderTest {
         assertEquals("announce_failed", err(req("radicle_editIssueState", c)).reason)
         node.writeAnswer = RadicleClient.Answer.Ok(JSONObject())
         assertEquals("native_failed", err(req("radicle_editIssueState", JSONObject(c.toString()))).reason)
+    }
+
+    // ---- Each write asks (#544) ----
+
+    private fun comment(body: String = "b") = JSONObject().put("rid", rid).put("issueId", "abcdef").put("body", body)
+    private fun writes() = node.calls.count { it.first == "commentIssue" }
+
+    @Test
+    fun `a signing grant doesn't let a site write without the user seeing each write`() {
+        grants.map[site] = ME
+        answer = false
+        assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_commentIssue", comment("hello"))).code)
+        assertEquals(0, writes())
+        val ask = asked.single() as RadicleAsk.Write
+        assertEquals(RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "hello"), ask)
+        answer = true
+        ok(req("radicle_commentIssue", comment()))
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(2, writes())
+        assertEquals("one prompt per write", 3, asked.size)
+        assertTrue(grants.rules.isEmpty())
+        // getIdentity is no write: no prompt once granted.
+        ok(req("radicle_getIdentity"))
+        assertEquals(3, asked.size)
+    }
+
+    @Test
+    fun `the prompt shows what the node will sign`() {
+        grants.map[site] = ME
+        answer = false
+        req("radicle_createIssue", JSONObject().put("rid", "rad://$bare").put("title", "t").put("description", "line 1\nline 2").put("labels", JSONArray().put("bug")))
+        req("radicle_editIssueState", JSONObject().put("rid", bare).put("issueId", "abcdef").put("state", "closed"))
+        req("radicle_commentPatch", JSONObject().put("rid", rid).put("patchId", "aaaaaa").put("revisionId", "bbbbbb").put("body", "c"))
+        req("radicle_commentPatch", JSONObject().put("rid", rid).put("patchId", "aaaaaa").put("body", "c"))
+        req("radicle_commentIssue", comment().put("replyTo", "cccccc"))
+        assertEquals(
+            listOf(
+                RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", body = "line 1\nline 2", labels = listOf("bug")),
+                RadicleAsk.Write(site, "radicle_editIssueState", rid, target = "abcdef", state = "closed"),
+                // The comment goes to the revision; the patch is only the page's word.
+                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "bbbbbb", claimedPatch = "aaaaaa", body = "c"),
+                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "aaaaaa", body = "c"),
+                RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b", replyTo = "cccccc"),
+            ),
+            asked,
+        )
+        val copy = asked.map { radiclePromptCopy(it).allow }
+        assertEquals(listOf("Open issue", "Change state", "Post comment", "Post comment", "Post comment"), copy)
+        assertTrue(radiclePromptCopy(asked[0]).detail.contains("can't be edited away or taken back"))
+        val lines = radicleWriteLines(asked[0] as RadicleAsk.Write).associate { it.label to it.value }
+        assertEquals("line 1\nline 2", lines["Description"])
+        assertEquals(rid, lines["Repository ID"])
+        assertEquals("aaaaaa", radicleWriteLines(asked[2] as RadicleAsk.Write).single { it.label.startsWith("The page says") }.value)
+        // Hidden characters are shown, not obeyed.
+        val spoof = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = "ok\u202Eevil"))
+        assertEquals("ok\\u202Eevil", spoof.last().value)
+        // Nothing is asked about a write that would fail anyway.
+        asked.clear()
+        req("radicle_commentIssue", comment(" "))
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `always allow is saved only once its write went out, and only by the user's switch`() {
+        grants.map[site] = ME
+        always = true
+        node.writeAnswer = RadicleClient.Answer.Failed("announce refs failed", null)
+        err(req("radicle_commentIssue", comment()))
+        assertTrue("a failed write leaves no rule", grants.rules.isEmpty())
+        answer = false
+        req("radicle_commentIssue", comment())
+        assertTrue("switching it on and rejecting doesn't turn it on", grants.rules.isEmpty())
+        answer = true
+        node.writeAnswer = RadicleClient.Answer.Ok(JSONObject().put("id", "abcdef1234"))
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(ME, grants.rules[site])
+        // Now writes go out without a prompt.
+        asked.clear()
+        always = null
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `the rule writes a burst of five, then one per 30 seconds, then asks`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        repeat(AutoWriteBurst.BURST) { ok(req("radicle_commentIssue", comment())) }
+        assertTrue(asked.isEmpty())
+        // The sixth asks, saying why, with the switch on; approved, it isn't counted.
+        ok(req("radicle_commentIssue", comment()))
+        val ask = asked.single() as RadicleAsk.Write
+        assertTrue(ask.limited)
+        assertTrue(radiclePromptCopy(ask).detail.startsWith("This site has used up its writes without asking"))
+        assertEquals(AutoWriteBurst.BURST, grants.counted[site]!!.size)
+        assertEquals("the rule stays", ME, grants.rules[site])
+        now += AutoWriteBurst.REFILL_MS
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(1, asked.size)
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(2, asked.size)
+        // Another site has its own.
+        grants.map["https://other.example"] = ME
+        grants.rules["https://other.example"] = ME
+        ok(req("radicle_commentIssue", comment(), origin = "https://other.example"))
+        assertEquals(2, asked.size)
+    }
+
+    @Test
+    fun `past 50 a day the rule asks, and a day later it writes again`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        repeat(50) {
+            now += AutoWriteBurst.REFILL_MS
+            ok(req("radicle_commentIssue", comment()))
+        }
+        assertTrue(asked.isEmpty())
+        now += 10 * AutoWriteBurst.REFILL_MS
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue((asked.single() as RadicleAsk.Write).limited)
+        now += 24 * 3600_000L
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(1, asked.size)
+        // A count that can't be saved asks rather than writing uncounted.
+        grants.saves = false
+        now += 24 * 3600_000L
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(2, asked.size)
+    }
+
+    @Test
+    fun `rejecting with the switch off turns the rule off, a withdrawn prompt leaves it`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        repeat(AutoWriteBurst.BURST) { ok(req("radicle_commentIssue", comment())) }
+        // Taken down by a navigation or the clock: not the user's word.
+        withdrawn = true
+        err(req("radicle_commentIssue", comment()))
+        assertEquals(ME, grants.rules[site])
+        withdrawn = false
+        // Rejected with the switch left on: the rule stays.
+        answer = false
+        err(req("radicle_commentIssue", comment()))
+        assertEquals(ME, grants.rules[site])
+        // Rejected with it switched off: the rule goes, nothing is written.
+        val before = writes()
+        always = false
+        err(req("radicle_commentIssue", comment()))
+        assertNull(grants.rules[site])
+        assertEquals(before, writes())
+        // Approved with it switched off: off too.
+        grants.rules[site] = ME
+        answer = true
+        ok(req("radicle_commentIssue", comment()))
+        assertNull(grants.rules[site])
+    }
+
+    @Test
+    fun `a site disconnected while its write prompt is up writes nothing`() {
+        grants.map[site] = ME
+        var during: () -> Unit = {}
+        fun ask() = runBlocking {
+            provider.request(site, "radicle_commentIssue", comment()) { a ->
+                during()
+                RadicleAnswer(true, a is RadicleAsk.Write)
+            }
+        }
+        during = { grants.map.remove(site) }
+        assertEquals("not_connected", err(ask()).reason)
+        grants.map[site] = ME
+        during = { grants.map[site] = "did:key:z6MkOther" }
+        assertEquals("signing_not_granted", err(ask()).reason)
+        assertEquals(0, writes())
+        assertTrue(grants.rules.isEmpty())
+    }
+
+    @Test
+    fun `disconnecting starts the burst over`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        repeat(AutoWriteBurst.BURST) { ok(req("radicle_commentIssue", comment())) }
+        provider.forget(site)
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue(asked.isEmpty())
+        ok(req("radicle_disconnect"))
+        assertNull(grants.rules[site])
+    }
+
+    @Test
+    fun `a write prompt's answer keeps the user's switch even if the page has gone`() {
+        val tab = BrowserState(9_501L)
+        try {
+            val write = RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b")
+            val answer = runBlocking {
+                val result = async { RadicleProviders.askOnTab(tab, 0, write, waitMs = 5_000) }
+                while (tab.radiclePrompt == null) kotlinx.coroutines.yield()
+                tab.radiclePrompt!!.respond(false, alwaysAllow = false)
+                result.await()
+            }
+            assertEquals(RadicleAnswer(false, false), answer)
+            RadicleProviders.allowPrompts(tab.id)
+            // Taken down by a new document: no switch.
+            val gone = runBlocking {
+                val result = async { RadicleProviders.askOnTab(tab, 0, write, waitMs = 5_000) }
+                while (tab.radiclePrompt == null) kotlinx.coroutines.yield()
+                RadicleProviders.onDocumentStarted(tab, "https://next.example/")
+                result.await()
+            }
+            assertEquals(RadicleAnswer.REFUSED, gone)
+        } finally {
+            RadicleProviders.onTabClosed(tab.id)
+        }
     }
 
     // ---- The channel ----
@@ -678,7 +925,7 @@ class RadicleProviderTest {
             provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) {
                 // Another tab (or the Radicle page) starts a fetch meanwhile.
                 node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(other, "connecting", "a (1/3)"))
-                true
+                RadicleAnswer.ALLOWED
             }
         }
         assertEquals("busy", err(r).reason)
@@ -694,9 +941,9 @@ class RadicleProviderTest {
         // B's prompt is up while A's seed is allowed; A's line hasn't arrived over IPC.
         val r = runBlocking {
             provider.request(siteB, "radicle_seed", JSONObject().put("rid", other)) {
-                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) { true }
+                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED }
                 assertTrue((ok(a) as JSONObject).getBoolean("seeded"))
-                true
+                RadicleAnswer.ALLOWED
             }
         }
         assertEquals("busy", err(r).reason)
@@ -863,11 +1110,11 @@ class RadicleProviderTest {
             override fun seed(rid: String) = false
         }
         val p = RadicleProvider(grants, failing, clock = { now }, io = Dispatchers.Unconfined)
-        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid)) { true } }
+        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED } }
         assertEquals("seed_failed", err(r).reason)
-        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other)) { true } }
+        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other)) { RadicleAnswer.ALLOWED } }
         assertEquals("seed_failed", err(r2).reason)
-        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid)) { true } }
+        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED } }
         assertEquals(0, (ok(status) as JSONObject).getInt("attemptCount"))
     }
 
@@ -877,7 +1124,7 @@ class RadicleProviderTest {
         val tab = BrowserState(9_500L)
         try {
             val allowed = runBlocking { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 200) }
-            assertFalse(allowed)
+            assertEquals(RadicleAnswer.REFUSED, allowed)
             assertNull("the prompt is taken down", tab.radiclePrompt)
             // Not a refusal: the next ask still gets a prompt.
             val next = runBlocking {
@@ -886,8 +1133,8 @@ class RadicleProviderTest {
                 tab.radiclePrompt!!.respond(true)
                 result.await()
             }
-            assertTrue(next)
-            assertFalse(runBlocking { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 0) })
+            assertTrue(next.allowed)
+            assertFalse(runBlocking { RadicleProviders.askOnTab(tab, 0, RadicleAsk.Connect(site), waitMs = 0) }.allowed)
         } finally {
             RadicleProviders.onTabClosed(tab.id)
         }

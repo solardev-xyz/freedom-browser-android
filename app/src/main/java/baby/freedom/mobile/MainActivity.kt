@@ -837,6 +837,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                             onUnseed = ::onRadicleUnseed,
                             grants = radicleGrants,
                             onRevoke = ::onRadicleRevoke,
+                            onAskEachTime = this@MainActivity.radicleGrants::stopAutoWrites,
                         ),
                         tor = TorControls(
                             info = torInfo,

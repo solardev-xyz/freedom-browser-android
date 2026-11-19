@@ -57,6 +57,9 @@
     <string name="radicle_section_sites">Connected sites</string>
     <string name="radicle_site_can_sign">Can see your identity and write as you</string>
     <string name="radicle_site_can_connect">Can see your node and ask to seed</string>
+    <string name="radicle_site_auto_writes">Writes as you without asking, at most 50 a day</string>
+    <string name="radicle_site_ask_each_time">Ask each time</string>
+    <string name="radicle_site_ask_each_time_failed">Couldn\'t save that. Try again.</string>
 
     <!-- RadiclePrompt.kt: the window.radicle consent prompt (under the site's name) -->
     <string name="radicle_prompt_connect_request">wants to connect to your Radicle node</string>
@@ -70,11 +73,32 @@
     <string name="radicle_prompt_unseed_allow">Stop seeding</string>
     <string name="radicle_prompt_signing_request">wants to act as you on Radicle</string>
     <string name="radicle_prompt_signing_changed_request">wants to act as your new Radicle identity</string>
-    <string name="radicle_prompt_signing_changed_detail">You allowed it to act as another identity (%1$s). Your Radicle identity has changed since then: allowing this also shows it the one above, so it can link the two. It can then open issues, comment and change issue states signed with this key, without asking again. What it writes is published to the network under your name and can\'t be taken back.</string>
-    <string name="radicle_prompt_signing_changed_detail_device">You allowed it to act as this device\'s own Radicle identity. Your Radicle identity has changed since then: allowing this also shows it the one above, so it can link the two. It can then open issues, comment and change issue states signed with this key, without asking again. What it writes is published to the network under your name and can\'t be taken back.</string>
+    <string name="radicle_prompt_signing_changed_detail">You allowed it to act as another identity (%1$s). Your Radicle identity has changed since then: allowing this also shows it the one above, so it can link the two. It can then ask to open issues, comment and change issue states signed with this key; you\'ll see each one before it goes out. What it writes is published to the network under your name and can\'t be taken back.</string>
+    <string name="radicle_prompt_signing_changed_detail_device">You allowed it to act as this device\'s own Radicle identity. Your Radicle identity has changed since then: allowing this also shows it the one above, so it can link the two. It can then ask to open issues, comment and change issue states signed with this key; you\'ll see each one before it goes out. What it writes is published to the network under your name and can\'t be taken back.</string>
     <string name="radicle_prompt_identity_wallet">Your wallet\'s identity (the same on any device with your recovery phrase)</string>
     <string name="radicle_prompt_identity_own">This device\'s own identity</string>
-    <string name="radicle_prompt_signing_detail">It will see your Radicle identity (DID and node ID) and can open issues, comment and change issue states signed with your key, without asking again. What it writes is published to the network under your name and can\'t be taken back.</string>
+    <string name="radicle_prompt_signing_detail">It will see your Radicle identity (DID and node ID) and can ask to open issues, comment and change issue states signed with your key; you\'ll see each one before it goes out. What it writes is published to the network under your name and can\'t be taken back.</string>
+    <!-- The per-write prompt (#544): one per issue, comment or state change a site publishes as the user. -->
+    <string name="radicle_prompt_write_issue_request">wants to open an issue as you</string>
+    <string name="radicle_prompt_write_issue_allow">Open issue</string>
+    <string name="radicle_prompt_write_comment_request">wants to comment on an issue as you</string>
+    <string name="radicle_prompt_write_patch_comment_request">wants to comment on a patch as you</string>
+    <string name="radicle_prompt_write_comment_allow">Post comment</string>
+    <string name="radicle_prompt_write_state_request">wants to change an issue\'s state as you</string>
+    <string name="radicle_prompt_write_state_allow">Change state</string>
+    <string name="radicle_prompt_write_detail">It\'s signed with your Radicle identity and published to the network under your name. It\'s public and permanent: it can\'t be edited away or taken back.</string>
+    <string name="radicle_prompt_write_limited">This site has used up its writes without asking for now (5 in a row, then one every 30 seconds, at most 50 a day), so this one needs your OK.</string>
+    <string name="radicle_prompt_write_always">Always allow this site to write as you without asking (at most 50 writes a day)</string>
+    <string name="radicle_prompt_write_issue">Issue</string>
+    <string name="radicle_prompt_write_revision">Patch revision</string>
+    <!-- Under the patch revision a comment goes to, when the page named a different patch: only the page's word. -->
+    <string name="radicle_prompt_write_claimed_patch">The page says it belongs to patch</string>
+    <string name="radicle_prompt_write_title">Title</string>
+    <string name="radicle_prompt_write_description">Description</string>
+    <string name="radicle_prompt_write_labels">Labels</string>
+    <string name="radicle_prompt_write_comment">Comment</string>
+    <string name="radicle_prompt_write_reply_to">In reply to comment</string>
+    <string name="radicle_prompt_write_state">New state</string>
 
     <!-- RadApi.kt -->
     <string name="radicle_viewer_missing">The repository browser is missing.</string>

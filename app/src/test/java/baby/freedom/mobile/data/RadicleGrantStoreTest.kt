@@ -102,4 +102,60 @@ class RadicleGrantStoreTest {
         const val DEVICE = "did:key:z6MkDevice"
         const val WALLET = "did:key:z6MkWallet"
     }
+
+    @Test
+    fun `the always-allow-writes rule rides on the grant and goes with it (#544)`() = runBlocking {
+        val a = "https://a.example"
+        assertTrue(store.connect(a))
+        assertFalse("connection only: no rule", store.allowAutoWrites(a, DEVICE))
+        assertTrue(store.grantSigning(a, DEVICE))
+        assertFalse("not for another identity", store.allowAutoWrites(a, WALLET))
+        assertTrue(store.allowAutoWrites(a, DEVICE))
+        assertEquals(RadicleGrantStore.Grant(a, signingAs = DEVICE, autoWrites = true), store.grantFor(a))
+        // Asked again for the same identity, or connected again: kept.
+        assertTrue(store.grantSigning(a, DEVICE))
+        assertTrue(store.connect(a))
+        assertTrue(store.grantFor(a)!!.autoWrites)
+        // Ask each time keeps the grant.
+        assertTrue(store.stopAutoWrites(a))
+        assertEquals(RadicleGrantStore.Grant(a, signingAs = DEVICE), store.grantFor(a))
+        // An identity change drops it, and a grant for the new one starts without.
+        assertTrue(store.allowAutoWrites(a, DEVICE))
+        assertTrue(store.dropSigning())
+        assertEquals(RadicleGrantStore.Grant(a, signedAs = DEVICE), store.grantFor(a))
+        assertTrue(store.grantSigning(a, WALLET))
+        assertFalse(store.grantFor(a)!!.autoWrites)
+        // Allowed for the wallet's, then granted the device's again: gone.
+        assertTrue(store.allowAutoWrites(a, WALLET))
+        assertTrue(store.grantSigning(a, DEVICE))
+        assertFalse(store.grantFor(a)!!.autoWrites)
+        // Disconnected: gone, and nothing turns it on for a site not connected.
+        assertTrue(store.allowAutoWrites(a, DEVICE))
+        assertTrue(store.revoke(a))
+        assertNull(store.grantFor(a))
+        assertFalse(store.allowAutoWrites(a, DEVICE))
+        assertNull(store.grantFor(a))
+    }
+
+    @Test
+    fun `at most 50 writes without asking in any 24 hours, kept on disk (#544)`() = runBlocking {
+        val a = "https://a.example"
+        val day = RadicleGrantStore.DAY_MS
+        val t0 = 1_000_000_000L
+        repeat(RadicleGrantStore.MAX_AUTO_WRITES_PER_DAY) { assertTrue(store.countAutoWrite(a, t0 + it)) }
+        assertFalse(store.countAutoWrite(a, t0 + 100))
+        assertTrue("per site", store.countAutoWrite("https://b.example", t0 + 100))
+        // A new store on the same file: a restart doesn't give the site a new day.
+        val again = RadicleGrantStore(prefs)
+        assertFalse(again.countAutoWrite(a, t0 + day - 1))
+        // A day after the first, one slot is back.
+        assertTrue(again.countAutoWrite(a, t0 + day))
+        assertFalse(again.countAutoWrite(a, t0 + day))
+        // The clock set back: the times ahead of it still count.
+        assertFalse(again.countAutoWrite(a, t0 - 5 * day))
+        // Disconnecting forgets the count.
+        assertTrue(again.revoke(a))
+        assertTrue(again.countAutoWrite(a, t0 + day))
+    }
+
 }
