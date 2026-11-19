@@ -7014,7 +7014,8 @@ private fun fetchOnce(
         if (raw != null && status == 404 && req.isForMainFrame && conn.requestMethod != "HEAD" &&
             GatewayUrls.extractBase(targetUrl)?.protocol == "bzz"
         ) {
-            val head = readAhead(raw, MISSING_PATH_PEEK_BYTES)
+            // Bounded as a whole, not just per read (PR #557 R3-M2).
+            val head = readAheadWithin(raw, conn, MISSING_PATH_PEEK_BYTES, MISSING_PATH_PEEK_MS, abandon)
             missingPath = GatewayProbe.missingPathBody(String(head, Charsets.UTF_8))
             raw = java.io.SequenceInputStream(ByteArrayInputStream(head), raw)
         }
@@ -7087,17 +7088,12 @@ private fun fetchOnce(
 /** How much of a navigation's Swarm 404 body [fetchOnce] reads ahead: ant's JSON is far shorter. */
 private const val MISSING_PATH_PEEK_BYTES = 1_024
 
-/** Up to [max] bytes of [input], fewer only at its end. */
-private fun readAhead(input: java.io.InputStream, max: Int): ByteArray {
-    val buf = ByteArray(max)
-    var n = 0
-    while (n < max) {
-        val r = input.read(buf, n, max - n)
-        if (r < 0) break
-        n += r
-    }
-    return buf.copyOf(n)
-}
+/**
+ * How long [fetchOnce] gives that read-ahead in all: ant writes its 404
+ * body with its headers. Past this the attempt fails as a timeout and is
+ * retried, as one whose headers never came.
+ */
+internal const val MISSING_PATH_PEEK_MS = 3_000L
 
 private fun failedAttempt(t: Throwable, targetUrl: String, media: Boolean): FetchAttempt =
     when (t) {

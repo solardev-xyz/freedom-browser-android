@@ -141,6 +141,45 @@ class GatewayFetchPolicyDeviceTest {
         assertEquals(2, connections.get())
     }
 
+    /**
+     * PR #557 R3-M2: a navigation's Swarm 404 is read ahead for its
+     * `path address not found` tag, and a gateway that sends the headers
+     * and then trickles the body (a byte a second, under the 10 s read
+     * timeout) is cut at [MISSING_PATH_PEEK_MS], not after 1024 reads;
+     * the attempt then counts as a timeout and is retried.
+     */
+    @Test
+    fun aTrickledNavigation404IsCutAtThePeekLimit() {
+        val trickled = AtomicInteger(0)
+        script = { n, out, _ ->
+            if (n == 0) {
+                out.write(head(404, "Not Found", 4_096))
+                out.flush()
+                repeat(4_096) {
+                    out.write('x'.code)
+                    out.flush()
+                    trickled.incrementAndGet()
+                    Thread.sleep(1_000)
+                }
+            } else {
+                out.write(head(200, "OK", 2))
+                out.write("ok".toByteArray())
+                out.flush()
+            }
+        }
+        val url = "$base/bzz/$SWARM_HASH/nope.html"
+        val started = System.nanoTime()
+        val response = fetchWithRetry(
+            FakeRequest(url, mainFrame = true), url, url,
+            fresh = false, policy = gatewayFetchPolicy(mainFrame = true, media = false),
+        )
+        val ms = elapsedMs(started)
+        assertEquals(200, response!!.statusCode)
+        assertEquals(2, connections.get())
+        assertTrue("the first answer never trickled", trickled.get() >= 1)
+        assertTrue("took $ms ms", ms in MISSING_PATH_PEEK_MS..MISSING_PATH_PEEK_MS + 2_000)
+    }
+
     @Test
     fun aBodyClosedMidPauseDropsTheGatewayConnectionAtOnce() {
         val gone = AtomicLong(0)
@@ -892,6 +931,10 @@ class GatewayFetchPolicyDeviceTest {
         companion object {
             const val NAME = "two-addresses.gateway.test"
         }
+    }
+
+    private companion object {
+        const val SWARM_HASH = "b268072928bd99d637992eb54c2a826b83affa36f61cf495297541ac42857c35"
     }
 
     private fun fetch(mainFrame: Boolean) = fetchWithRetry(

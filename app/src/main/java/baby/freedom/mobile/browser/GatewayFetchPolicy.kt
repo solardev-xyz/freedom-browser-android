@@ -585,3 +585,46 @@ internal class DisconnectOnCloseInputStream(
         }
     }
 }
+
+/**
+ * Up to [max] bytes of [input] (fewer only at its end), read within
+ * [limitMs] in all: past that — or once [abandon] fires — [conn] is
+ * disconnected off this thread, which fails the blocked read, and this
+ * throws [SocketTimeoutException] (or the read's own failure, if the page
+ * gave up). The connection's read timeout alone bounds each read, not the
+ * whole: a gateway trickling a byte at a time under it would otherwise
+ * hold the interceptor thread for up to [max] such waits, and a main-frame
+ * fetch has no [AbandonSignal] to cut it short (PR #557 R3-M2).
+ */
+internal fun readAheadWithin(
+    input: InputStream,
+    conn: HttpURLConnection,
+    max: Int,
+    limitMs: Long,
+    abandon: AbandonSignal? = null,
+): ByteArray {
+    val cut = AtomicBoolean(false)
+    val doCut = { if (cut.compareAndSet(false, true)) disconnectAside(conn) }
+    val task = watchdog.schedule({ doCut() }, limitMs, TimeUnit.MILLISECONDS)
+    val unwatch = abandon?.onAbandon { doCut() }
+    try {
+        val buf = ByteArray(max)
+        var n = 0
+        while (n < max) {
+            val r = try {
+                input.read(buf, n, max - n)
+            } catch (e: java.io.IOException) {
+                if (cut.get()) throw SocketTimeoutException("body not read ahead in time") else throw e
+            }
+            if (r < 0) break
+            n += r
+        }
+        // Read to the end, or the cut landed just as the last read returned:
+        // the connection may be gone, so what's left of the body with it.
+        if (cut.get() && n == max) throw SocketTimeoutException("body not read ahead in time")
+        return buf.copyOf(n)
+    } finally {
+        task.cancel(false)
+        unwatch?.invoke()
+    }
+}

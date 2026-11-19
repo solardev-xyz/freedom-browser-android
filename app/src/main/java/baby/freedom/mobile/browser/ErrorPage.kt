@@ -105,7 +105,7 @@ object ErrorPage {
 
     /**
      * Why a Swarm (or IPFS) probe gave up, or (`path_not_found` only) why
- * a failed WebView load's tagged 404 failed, as `error.html` reads it:
+     * a failed WebView load's tagged 404 failed, as `error.html` reads it:
      * [reason] is `path_not_found`, `not_found` (the budget ran out) or
      * `other` (an unexpected HTTP [status]); for `not_found`, [status] is
      * the node's last answer (`no_response` when it gave none in time)
