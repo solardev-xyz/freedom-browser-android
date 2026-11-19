@@ -35,6 +35,20 @@ class ActPublicKeyTest {
     }
 
     @Test
+    fun `this device's node's key is taken only from the overlay the page shows`() {
+        val overlay = "bb98b93aeadabd8b4ae63fe552f2fff47f67d7f9c239b268cb89dece44c356cc"
+        val body = """{"overlay":"$overlay","publicKey":"$compressed"}"""
+        // NodeInfo carries the overlay with 0x; /addresses without.
+        assertEquals(compressed, ActPublicKey.from(body, "0x$overlay"))
+        assertEquals(compressed, ActPublicKey.from(body, overlay.uppercase()))
+        // Restarted under another identity since.
+        assertNull(ActPublicKey.from(body, "0x" + "aa".repeat(32)))
+        assertNull(ActPublicKey.from("""{"publicKey":"$compressed"}""", "0x$overlay"))
+        assertNull(ActPublicKey.from("""{"overlay":"","publicKey":"$compressed"}""", "0x"))
+        assertNull(ActPublicKey.from("""{"overlay":12,"publicKey":"$compressed"}""", "0x$overlay"))
+    }
+
+    @Test
     fun `anything that isn't a key reads as none`() {
         for (body in listOf(
             """{"publicKey":"${"02" + "ab".repeat(31)}"}""", // short
@@ -93,7 +107,7 @@ class ActPublicKeyTest {
         assertNull(ActPublicKey.shown(null, a))
     }
 
-    private fun served(status: String, body: String): String? =
+    private fun served(status: String, body: String, external: Boolean = true, node: String = "x"): String? =
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
             val acceptor = Thread {
                 runCatching {
@@ -106,13 +120,20 @@ class ActPublicKeyTest {
                     }
                 }
             }.apply { isDaemon = true; start() }
-            val source = ActPublicKey.Source("http://127.0.0.1:${server.localPort}", external = true, node = "x")
+            val source = ActPublicKey.Source("http://127.0.0.1:${server.localPort}", external, node)
             runBlocking { ActPublicKey.fetch(source) }.also { acceptor.join(5_000) }
         }
 
     @Test
     fun `a read asks the node's addresses`() {
         assertEquals(compressed, served("200 OK", """{"publicKey":"$compressed"}"""))
+    }
+
+    @Test
+    fun `this device's node is read only for the overlay it was asked about`() {
+        val body = """{"overlay":"${"aa".repeat(32)}","publicKey":"$compressed"}"""
+        assertEquals(compressed, served("200 OK", body, external = false, node = "0x" + "aa".repeat(32)))
+        assertNull(served("200 OK", body, external = false, node = "0x" + "bb".repeat(32)))
     }
 
     @Test

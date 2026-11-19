@@ -228,7 +228,8 @@ fun NodeScreen(
     var confirmCacheClear by rememberSaveable { mutableStateOf(false) }
     var pickCacheSize by rememberSaveable { mutableStateOf(false) }
     // The ACT public key (#541): held here too, so the card scrolling away keeps it.
-    val actKeySource = ActPublicKey.sourceFor(externalSwarmInUse, nodeInfo)
+    // Swarm page only: the Tor and light client pages don't ask the node.
+    val actKeySource = if (page == NodeDestination.Swarm) ActPublicKey.sourceFor(externalSwarmInUse, nodeInfo) else null
     val actKey = rememberActPublicKey(actKeySource)
     // A clear's "Freed …" is for this visit: gone once the page closes.
     DisposableEffect(Unit) { onDispose { SwarmCache.forgetOutcome() } }
