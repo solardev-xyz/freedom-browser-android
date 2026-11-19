@@ -198,6 +198,7 @@ class GatewaysTest {
     @Test
     fun `gatewayUrlFor resolves ens roots from the session registry`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.record("ipns://%2e%2e", "dots.example.tez", EnsTrust.ASSUMED)
         try {
             assertEquals(
                 "http://127.0.0.1:1633/bzz/$ref64/p",
@@ -246,6 +247,7 @@ class GatewaysTest {
         KnownEnsNames.record("bzz://$ref64/site%2Fsub", "bzz.example.tez", EnsTrust.ASSUMED)
         KnownEnsNames.record("ipfs://bafy/site", "ok.example.tez", EnsTrust.ASSUMED)
         KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.record("ipns://%2e%2e", "dots.example.tez", EnsTrust.ASSUMED)
         try {
             // The record's fault, not the request's: the interceptor's 502.
             var byRequest: Boolean? = null
@@ -253,6 +255,11 @@ class GatewaysTest {
             assertEquals(false, byRequest)
             byRequest = null
             assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("bzz.example.tez"), "/x", onEscape = { byRequest = it }))
+            assertEquals(false, byRequest)
+            // A record whose root itself escapes: the record's fault even
+            // for a plain request path.
+            byRequest = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("dots.example.tez"), "/", onEscape = { byRequest = it }))
             assertEquals(false, byRequest)
             // A name served from bzz: asked for an encoded separator: the
             // request's fault (the interceptor's 400), though only known

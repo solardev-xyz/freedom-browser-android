@@ -535,7 +535,8 @@ object Gateways {
      * would leave `/<namespace>/<ref>/` ([DwebPath.isContainedTarget],
      * #534); under `bzz:`, any encoded separator does. [onEscape] is told
      * whether the request's path alone does (a name served from `bzz:`
-     * asked for `/a%2Fb`), or only with the record's base path.
+     * asked for `/a%2Fb`), or only with the record's base path or
+     * because the root a name's record names escapes by itself.
      */
     fun gatewayUrlFor(
         root: ContentRoot,
@@ -561,7 +562,9 @@ object Gateways {
             fun contained(p: String) = (p.isEmpty() || p.startsWith("/") || p.startsWith("?")) &&
                 DwebPath.isContainedTarget(rooted + p, encodedSeparators)
             if (!contained(path)) {
-                onEscape(!contained(pathAndQuery))
+                // A name's answer whose root itself escapes (a `.tez` record
+                // `ipns://%2e%2e`) is the record's fault whatever was asked.
+                onEscape((root !is ContentRoot.Ens || contained("/")) && !contained(pathAndQuery))
                 return null
             }
         }
