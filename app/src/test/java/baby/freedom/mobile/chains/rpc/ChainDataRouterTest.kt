@@ -591,7 +591,8 @@ class ChainDataRouterTest {
         val r = router(net, listOf(BuiltInChains.GNOSIS), sources = mapOf(ChainSource.COLIBRI to colibri))
         try {
             repeat(3) {
-                assertEquals(ChainSource.QUORUM, r.request(100, "eth_getBalance").trust.source)
+                val balance = JSONArray().put("0x" + "ab".repeat(20)).put("latest")
+                assertEquals(ChainSource.QUORUM, r.request(100, "eth_getBalance", balance).trust.source)
             }
             assertEquals(1, created.get())
             assertFalse(r.isWired(ChainSource.COLIBRI, 100))
@@ -602,9 +603,10 @@ class ChainDataRouterTest {
     }
 
     @Test
-    fun aSitesSlowTokenContractThroughWalletRpcDoesntBackColibriOffForTheWallet() = kotlinx.coroutines.runBlocking {
-        // An x402 offer names a token contract whose decimals() the prover
-        // can't prove in time. Read as the site's (#329 R4-F1), the miss
+    fun aSitesSlowReadThroughWalletRpcDoesntBackColibriOffForTheWallet() = kotlinx.coroutines.runBlocking {
+        // A site names a contract whose code the prover can't prove in
+        // time (an eth_call, such as an x402 token's decimals(), isn't
+        // Colibri's at all since #530). Read as the site's (#329 R4-F1), the miss
         // only asks a canary, which proves: the wallet's next balance read
         // is still Colibri's, and the site's read took one of the sites'
         // slots, not the wallet's.
@@ -623,7 +625,7 @@ class ChainDataRouterTest {
             override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
             override fun execute(ctx: Long) = when (byCtx[ctx]) {
                 // The site's contract: a prover round that stalls.
-                "eth_call" -> JSONObject().put("status", "pending")
+                "eth_getCode" -> JSONObject().put("status", "pending")
                     .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5")))
                 "eth_getBlockByNumber" -> JSONObject().put("status", "success").put("result", JSONObject().put("number", "0x10"))
                 else -> JSONObject().put("status", "success").put("result", "0x64")
@@ -649,16 +651,62 @@ class ChainDataRouterTest {
         val site = WalletRpc(r, RoutingContext.forSiteChoice("https://pay.example"))
         val wallet = WalletRpc(r)
         try {
-            val decimals = site.call(100, JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x313ce567"))
-            assertEquals(ChainSource.QUORUM, decimals.trust.source)
+            val code = site.code(100, "0x" + "11".repeat(20))
+            assertEquals(ChainSource.QUORUM, code.trust.source)
             val deadline = System.nanoTime() + 5_000_000_000L
             while ("eth_getBlockByNumber" !in methods && System.nanoTime() < deadline) Thread.sleep(20)
             Thread.sleep(100)
+            // The site's read reached the prover, and its miss ran a canary.
+            assertEquals(listOf("eth_getCode", "eth_getBlockByNumber"), methods.toList())
             assertNull(colibri.backoffRemainingMs(100))
             assertEquals(ChainSource.COLIBRI, wallet.balance(100, "0x" + "ab".repeat(20)).trust.source)
         } finally {
             gate.countDown()
         }
+    }
+
+    @Test
+    fun aColibriReceiptForAnotherTransactionGoesOnToTheQuorum() = kotlinx.coroutines.runBlocking {
+        // #530: the prover's index says where a transaction is, unchecked.
+        // A receipt it proves for another transaction (a successful one,
+        // for a send that failed) isn't Colibri's answer: the RPCs' is
+        // shown, labelled as theirs, not a "verified" foreign receipt.
+        val asked = "0x" + "ab".repeat(32)
+        val other = "0x" + "cd".repeat(32)
+        val created = AtomicInteger()
+        val net = Net()
+        BuiltInChains.GNOSIS.rpcUrls.forEach { url ->
+            net.handlers[url] = { ok(JSONObject().put("transactionHash", asked).put("status", "0x0").put("blockNumber", "0x10")) }
+        }
+        val engine = object : baby.freedom.mobile.ens.EnsColibri.Engine {
+            override val available = true
+            override fun create(method: String, params: String, chainId: Long, proverFlags: Int, verifyFlags: Int, proverMode: Int): Long {
+                created.incrementAndGet()
+                return 7L
+            }
+            override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
+            override fun execute(ctx: Long) = JSONObject().put("status", "success")
+                .put("result", JSONObject().put("transactionHash", other).put("status", "0x1").put("blockNumber", "0x10")).toString()
+            override fun setResponse(req: Long, data: ByteArray, nodeIndex: Int) = Unit
+            override fun setError(req: Long, error: String, nodeIndex: Int) = Unit
+            override fun free(ctx: Long) = Unit
+        }
+        val colibri = ColibriChainSource(
+            baby.freedom.mobile.ens.EnsColibri(engine, http = { _, _, _, _, _ -> throw IOException("no network in this test") }),
+            present = { true },
+        )
+        // Real time: the router's wait mustn't run out on a virtual clock
+        // while the verifier's (real) threads are still answering.
+        val r = ChainDataRouter(
+            chains = { listOf(BuiltInChains.GNOSIS) },
+            transport = net.transport,
+            verifiedSources = mapOf(ChainSource.COLIBRI to colibri),
+        )
+        val receipt = WalletRpc(r).receipt(100, asked)
+        assertEquals(ChainSource.QUORUM, receipt.trust.source)
+        assertEquals("0x0", receipt.value!!.getString("status"))
+        assertEquals("Colibri was asked", 1, created.get())
+        assertNull(colibri.gap(100))
     }
 
     @Test

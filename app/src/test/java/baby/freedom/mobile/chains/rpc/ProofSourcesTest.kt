@@ -168,15 +168,112 @@ class ProofSourcesTest {
     }
 
     @Test
-    fun `a Colibri-proven revert is a deterministic error`() = runTest {
-        val v = Verifier(JSONObject().put("status", "revert").put("data", "0xdead"))
-        try {
-            colibri(v).request(1, "eth_call", JSONArray().put(JSONObject().put("to", address)).put("latest"), emptyList())
-            fail()
-        } catch (e: ChainRpcException.Rpc) {
-            assertTrue(e.deterministic)
-            assertEquals("0xdead", e.data)
+    fun `reads Colibri can't tie to the block asked about never reach the verifier`() = runTest {
+        // #530 (desktop #1046/#1060): each would come back from some
+        // proven block, or from an RPC's unchecked code, labelled verified.
+        val v = Verifier(JSONObject().put("status", "success").put("result", "0x1"))
+        val call = JSONObject().put("to", address).put("data", "0x313ce567")
+        for ((method, params) in listOf(
+            // A call runs on contract code the core never checks.
+            "eth_call" to JSONArray().put(call).put("latest"),
+            "eth_call" to JSONArray().put(call),
+            // An account read anywhere but latest.
+            "eth_getBalance" to JSONArray().put(address).put("0x10"),
+            "eth_getBalance" to JSONArray().put(address).put("0x" + "ab".repeat(32)),
+            "eth_getBalance" to JSONArray().put(address).put("safe"),
+            "eth_getTransactionCount" to JSONArray().put(address).put("finalized"),
+            "eth_getCode" to JSONArray().put(address).put("earliest"),
+            "eth_getStorageAt" to JSONArray().put(address).put("0x0").put("justified"),
+            "eth_getBalance" to JSONArray().put(address).put(JSONObject().put("blockHash", "0x" + "ab".repeat(32))),
+            "eth_getBalance" to JSONArray().put(address).put("latest").put("extra"),
+            "eth_getStorageAt" to JSONArray().put(address),
+            // A block the core would match with any proven one, or answer from an RPC.
+            "eth_getBlockByNumber" to JSONArray().put("finalized").put(false),
+            "eth_getBlockByNumber" to JSONArray().put("safe").put(false),
+            "eth_getBlockByNumber" to JSONArray().put("pending").put(false),
+            "eth_getBlockByNumber" to JSONArray().put("earliest").put(false),
+            "eth_getBlockByNumber" to JSONArray().put("0X10").put(false),
+            "eth_getBlockByNumber" to JSONArray().put("0x010").put(false),
+            "eth_getBlockByNumber" to JSONArray().put(JSONObject().put("blockNumber", "0x10")).put(false),
+            "eth_getBlockByHash" to JSONArray().put("0x10").put(false),
+            "eth_getBlockByHash" to JSONArray(),
+            "eth_blockNumber" to JSONArray().put("finalized"),
+        )) {
+            try {
+                colibri(v).request(1, method, params, emptyList())
+                fail("$method $params")
+            } catch (_: ColibriChainSource.Unanswered) {
+            }
         }
+        assertTrue(v.created.toString(), v.created.isEmpty())
+    }
+
+    @Test
+    fun `reads tied to the block asked about are proven, an account read with no block at latest`() = runTest {
+        val v = Verifier(JSONObject().put("status", "success").put("result", JSONObject().put("number", "0x10")))
+        val blockHash = "0x" + "AB".repeat(32)
+        for (params in listOf(
+            JSONArray().put("latest").put(false),
+            JSONArray().put("0x0").put(false),
+            JSONArray().put("0xffffffffffffffff").put(false),
+            JSONArray().put(blockHash).put(false),
+            JSONArray(),
+        )) {
+            assertEquals(ChainTrust.Level.VERIFIED, colibri(v).request(1, "eth_getBlockByNumber", params, emptyList()).trust.level)
+        }
+        colibri(v).request(1, "eth_getBlockByHash", JSONArray().put(blockHash).put(false), emptyList())
+        assertEquals(6, v.created.size)
+
+        val account = Verifier(JSONObject().put("status", "success").put("result", "0x64"))
+        val noBlock = JSONArray().put(address).put("0x0")
+        assertEquals("0x64", colibri(account).request(1, "eth_getStorageAt", noBlock, emptyList()).result)
+        colibri(account).request(1, "eth_getBalance", JSONArray().put(address), emptyList())
+        colibri(account).request(1, "eth_getCode", JSONArray().put(address).put("latest"), emptyList())
+        assertEquals(
+            listOf(
+                Triple("eth_getStorageAt", """["$address","0x0","latest"]""", 1L),
+                Triple("eth_getBalance", """["$address","latest"]""", 1L),
+                Triple("eth_getCode", """["$address","latest"]""", 1L),
+            ),
+            account.created,
+        )
+        // The caller's params are the router's, shared with the other tiers: untouched.
+        assertEquals("""["$address","0x0"]""", noBlock.toString())
+    }
+
+    @Test
+    fun `a receipt or transaction is Colibri's only for the hash asked about`() = runTest {
+        val other = "0x" + "ef".repeat(32)
+        fun receipt(of: String?) = Verifier(
+            JSONObject().put("status", "success").put(
+                "result",
+                JSONObject().put("status", "0x1").put("blockNumber", "0x10").apply { if (of != null) put("transactionHash", of) },
+            ),
+        )
+        // The prover's own index says where a transaction is: a lying one
+        // could prove another transaction's (successful) receipt.
+        for (v in listOf(receipt(other), receipt(null))) {
+            try {
+                colibri(v).request(1, "eth_getTransactionReceipt", JSONArray().put(hash), emptyList())
+                fail()
+            } catch (_: ColibriChainSource.Unanswered) {
+            }
+        }
+        val mine = colibri(receipt(hash.uppercase().replace("0X", "0x"))).request(1, "eth_getTransactionReceipt", JSONArray().put(hash), emptyList())
+        assertEquals(ChainTrust.Level.VERIFIED, mine.trust.level)
+        assertEquals(ChainSource.COLIBRI, mine.trust.source)
+
+        fun tx(of: String) = Verifier(JSONObject().put("status", "success").put("result", JSONObject().put("hash", of).put("blockNumber", "0x10")))
+        try {
+            colibri(tx(other)).request(1, "eth_getTransactionByHash", JSONArray().put(hash), emptyList())
+            fail()
+        } catch (_: ColibriChainSource.Unanswered) {
+        }
+        assertEquals(ChainTrust.Level.VERIFIED, colibri(tx(hash)).request(1, "eth_getTransactionByHash", JSONArray().put(hash), emptyList()).trust.level)
+        // A mismatch isn't the prover being unreachable: the chain isn't backed off.
+        val source = colibri(receipt(other))
+        runCatching { source.request(1, "eth_getTransactionReceipt", JSONArray().put(hash), emptyList()) }
+        assertNull(source.gap(1))
     }
 
     @Test
@@ -312,7 +409,8 @@ class ProofSourcesTest {
         // it would read as block 0x10 + 720 and skip real blocks past it.
         val now = AtomicLong(1_000_000)
         val receipt = Verifier(
-            JSONObject().put("status", "success").put("result", JSONObject().put("blockNumber", "0x10")),
+            JSONObject().put("status", "success")
+                .put("result", JSONObject().put("blockNumber", "0x10").put("transactionHash", "0x" + "ab".repeat(32))),
         )
         val source = ColibriChainSource(
             EnsColibri(receipt, http = { _, _, _, _, _ -> throw IOException("no network in this test") }),
@@ -321,12 +419,11 @@ class ProofSourcesTest {
         )
         source.request(1, "eth_getTransactionReceipt", JSONArray().put("0x" + "ab".repeat(32)), emptyList())
         source.request(1, "eth_getBlockByNumber", JSONArray().put("0x10").put(false), emptyList())
-        source.request(1, "eth_getBlockByNumber", JSONArray().put("finalized").put(false), emptyList())
         assertNull(source.knownHead(1))
         now.addAndGet(3_600_000)
         // Block 0x1a0 (416) exists by now: it's still asked.
-        source.request(1, "eth_getBalance", JSONArray().put(address).put("0x1a0"), emptyList())
-        assertEquals(4, receipt.created.size)
+        source.request(1, "eth_getBlockByNumber", JSONArray().put("0x1a0").put(false), emptyList())
+        assertEquals(3, receipt.created.size)
 
         // A proven `latest` block does set it.
         val latest = Verifier(JSONObject().put("status", "success").put("result", JSONObject().put("number", "0x1a0")))
@@ -368,8 +465,8 @@ class ProofSourcesTest {
             fail()
         } catch (_: ColibriChainSource.Unanswered) {
         }
-        // State at a future block likewise; the head itself, a block
-        // before it, "latest" and another chain are still asked.
+        // State at a numbered block isn't asked at all (#530); the head
+        // itself, a block before it, "latest" and another chain are.
         try {
             source.request(100, "eth_getBalance", JSONArray().put(address).put("0x65"), emptyList())
             fail()
@@ -377,7 +474,7 @@ class ProofSourcesTest {
         }
         assertEquals(2, v.created.size)
         source.request(100, "eth_getBlockByNumber", JSONArray().put("0x64").put(false), emptyList())
-        source.request(100, "eth_getBalance", JSONArray().put(address).put("0x10"), emptyList())
+        source.request(100, "eth_getBlockByNumber", JSONArray().put("0x10").put(false), emptyList())
         source.request(100, "eth_getBalance", balance, emptyList())
         source.request(1, "eth_getBlockByNumber", ahead, emptyList())
         assertEquals(6, v.created.size)
@@ -566,7 +663,7 @@ class ProofSourcesTest {
     // ---- Colibri: a page's read doesn't back the wallet's off (R2-F1) ----
 
     /**
-     * A verifier whose `eth_call`s ask for one prover request (which
+     * A verifier whose storage reads ask for one prover request (which
      * [http] may stall or fail) and whose `latest`-block canaries answer
      * [canary] at once, or ask for a request too when [canary] is null.
      */
@@ -598,11 +695,12 @@ class ProofSourcesTest {
     }
 
     private val page = RoutingContext.forPage("https://dapp.example")
-    private val call = JSONArray().put(JSONObject().put("to", "0x" + "11".repeat(20)).put("data", "0x")).put("latest")
+    /** A site's read of a contract's storage slot: one it chose, which the prover may be slow to prove. */
+    private val storage = JSONArray().put("0x" + "11".repeat(20)).put("0x0").put("latest")
     private val latestBlock = JSONObject().put("status", "success")
         .put("result", JSONObject().put("number", "0x10"))
 
-    /** `eth_call`s ask for a prover request ([http] may stall it); everything else proves at once. */
+    /** Storage reads ask for a prover request ([http] may stall it); everything else proves at once. */
     private class SlowCalls : EnsColibri.Engine {
         override val available = true
         val methods = java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -616,7 +714,7 @@ class ProofSourcesTest {
         override fun setMinLatestBlockTs(ctx: Long, unixSeconds: Long) = Unit
         override fun execute(ctx: Long): String {
             val round = rounds.merge(ctx, 1, Int::plus)!!
-            if (byCtx[ctx] != "eth_call") return JSONObject().put("status", "success").put("result", "0x64").toString()
+            if (byCtx[ctx] != "eth_getStorageAt") return JSONObject().put("status", "success").put("result", "0x64").toString()
             return if (round == 1) {
                 JSONObject().put("status", "pending")
                     .put("requests", JSONArray().put(JSONObject().put("type", "prover").put("req_ptr", "5")))
@@ -642,13 +740,13 @@ class ProofSourcesTest {
             present = { true },
         )
         try {
-            // A site keeps slow calls going: each misses the router's wait
+            // A site keeps slow reads going: each misses the router's wait
             // and carries on in the background, holding its slot.
             repeat(ColibriChainSource.MAX_IN_FLIGHT) {
-                runCatching { withRouterWait(200) { source.request(100, "eth_call", call, emptyList(), page) } }
+                runCatching { withRouterWait(200) { source.request(100, "eth_getStorageAt", storage, emptyList(), page) } }
             }
             // Only the sites' share of them reached the verifier.
-            assertEquals(ColibriChainSource.MAX_PAGE_IN_FLIGHT, v.methods.count { it == "eth_call" })
+            assertEquals(ColibriChainSource.MAX_PAGE_IN_FLIGHT, v.methods.count { it == "eth_getStorageAt" })
             // The wallet's reads are still proven, one after another and side by side.
             repeat(3) {
                 assertEquals("0x64", source.request(100, "eth_getBalance", balance, emptyList()).result)
@@ -666,9 +764,9 @@ class ProofSourcesTest {
         val deadline = System.nanoTime() + 5_000_000_000L
         var admitted = false
         while (!admitted && System.nanoTime() < deadline) {
-            val before = v.methods.count { it == "eth_call" }
-            runCatching { withRouterWait(500) { source.request(100, "eth_call", call, emptyList(), page) } }
-            admitted = v.methods.count { it == "eth_call" } > before
+            val before = v.methods.count { it == "eth_getStorageAt" }
+            runCatching { withRouterWait(500) { source.request(100, "eth_getStorageAt", storage, emptyList(), page) } }
+            admitted = v.methods.count { it == "eth_getStorageAt" } > before
             if (!admitted) Thread.sleep(20)
         }
         assertTrue(admitted)
@@ -686,7 +784,7 @@ class ProofSourcesTest {
             present = { true },
         )
         // The router's 2 s page wait runs out on a call the prover is slow to prove.
-        assertNull(withRouterWait(200) { source.request(100, "eth_call", call, emptyList(), page) })
+        assertNull(withRouterWait(200) { source.request(100, "eth_getStorageAt", storage, emptyList(), page) })
         // A canary no page shapes checks the prover; it proves at once.
         val deadline = System.nanoTime() + 5_000_000_000L
         while ("eth_getBlockByNumber" !in v.methods && System.nanoTime() < deadline) Thread.sleep(20)
@@ -709,7 +807,7 @@ class ProofSourcesTest {
             present = { true },
         )
         try {
-            source.request(100, "eth_call", call, emptyList(), page)
+            source.request(100, "eth_getStorageAt", storage, emptyList(), page)
             fail()
         } catch (e: EnsColibri.Failure) {
             assertTrue(e.unreachable)
@@ -717,7 +815,7 @@ class ProofSourcesTest {
         val deadline = System.nanoTime() + 5_000_000_000L
         while (source.isAvailable(100) && System.nanoTime() < deadline) Thread.sleep(20)
         assertEquals(ProofTierGap.UNREACHABLE, source.gap(100))
-        assertEquals(listOf("eth_call", "eth_getBlockByNumber"), v.methods.toList())
+        assertEquals(listOf("eth_getStorageAt", "eth_getBlockByNumber"), v.methods.toList())
     }
 
     @Test
@@ -729,7 +827,7 @@ class ProofSourcesTest {
             present = { true },
             clock = now::get,
         )
-        repeat(5) { runCatching { source.request(100, "eth_call", call, emptyList(), page) } }
+        repeat(5) { runCatching { source.request(100, "eth_getStorageAt", storage, emptyList(), page) } }
         val deadline = System.nanoTime() + 5_000_000_000L
         while ("eth_getBlockByNumber" !in v.methods && System.nanoTime() < deadline) Thread.sleep(20)
         Thread.sleep(100)
@@ -737,7 +835,7 @@ class ProofSourcesTest {
         assertTrue(source.isAvailable(100))
         // Past the interval, the next page miss may check again.
         now.addAndGet(ColibriChainSource.CANARY_INTERVAL_MS)
-        runCatching { source.request(100, "eth_call", call, emptyList(), page) }
+        runCatching { source.request(100, "eth_getStorageAt", storage, emptyList(), page) }
         val d2 = System.nanoTime() + 5_000_000_000L
         while (v.methods.count { it == "eth_getBlockByNumber" } < 2 && System.nanoTime() < d2) Thread.sleep(20)
         assertEquals(2, v.methods.count { it == "eth_getBlockByNumber" })
@@ -751,9 +849,9 @@ class ProofSourcesTest {
             EnsColibri(v, http = { _, _, _, _, _ -> throw IOException("connect timed out") }),
             present = { true },
         )
-        runCatching { source.request(100, "eth_call", call, emptyList()) }
+        runCatching { source.request(100, "eth_getStorageAt", storage, emptyList()) }
         assertEquals(ProofTierGap.UNREACHABLE, source.gap(100))
-        assertEquals(listOf("eth_call"), v.methods.toList())
+        assertEquals(listOf("eth_getStorageAt"), v.methods.toList())
     }
 
     @Test
