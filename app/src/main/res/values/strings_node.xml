@@ -20,6 +20,16 @@
     <string name="node_identity_own">This device\'s own</string>
     <string name="node_address">Address</string>
     <string name="node_overlay">Overlay</string>
+    <!-- The Swarm node's ACT public key (#541): what someone adds to an access-control (ACT) grantee list to share access-controlled Swarm content with this node. -->
+    <string name="node_act_key">ACT public key</string>
+    <string name="node_act_key_unknown">Unknown</string>
+    <string name="node_act_key_about">Give this key to someone so they can share access-controlled Swarm content with your node.</string>
+    <!-- Under the key when it's the external Swarm node's (Settings › Nodes); %1$s is that node's URL. -->
+    <string name="node_act_key_external">From your external node at %1$s</string>
+    <!-- Accessibility label of the copy button next to the key. -->
+    <string name="node_act_key_copy">Copy ACT public key</string>
+    <string name="node_act_key_clip_label">Swarm ACT public key</string>
+    <string name="node_act_key_copied">ACT public key copied</string>
     <string name="node_error">Error</string>
     <!-- The Swarm node's error when the wallet's node keys are on the device but couldn't be opened (#357): it doesn't start as the device's own identity instead. Unlocking the wallet seals the keys again. -->
     <string name="node_swarm_identity_unreadable">Couldn\'t open your wallet\'s Swarm identity, so the node isn\'t running (it won\'t start as this device\'s own instead). Reopening the app or unlocking the wallet tries again.</string>

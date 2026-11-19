@@ -124,6 +124,8 @@ fun NodeScreen(
     val settings = remember(context) { NodeSettings.get(context) }
     val externalSwarm by remember(settings) { settings.externalSwarmEndpoint }
         .collectAsState(initial = "")
+    // The normalized endpoint bzz:// actually goes to, `""` for this device's node.
+    val externalSwarmInUse by Gateways.externalSwarmBaseFlow.collectAsState()
     // The mode setting (#114); MainActivity relays it to the node, which
     // restarts into it. Null until read, so the switch doesn't flicker.
     val lightModeWanted by remember(settings) { settings.swarmLightMode }
@@ -225,6 +227,9 @@ fun NodeScreen(
     val cacheStatus = rememberSwarmCacheStatus(swarmRunning, refresh = cacheClear to cacheSize)
     var confirmCacheClear by rememberSaveable { mutableStateOf(false) }
     var pickCacheSize by rememberSaveable { mutableStateOf(false) }
+    // The ACT public key (#541): held here too, so the card scrolling away keeps it.
+    val actKeySource = ActPublicKey.sourceFor(externalSwarmInUse, nodeInfo)
+    val actKey = rememberActPublicKey(actKeySource)
     // A clear's "Freed …" is for this visit: gone once the page closes.
     DisposableEffect(Unit) { onDispose { SwarmCache.forgetOutcome() } }
 
@@ -259,7 +264,7 @@ fun NodeScreen(
                 )
             }
             if (page == NodeDestination.Swarm) item("details") {
-                DetailsSection(nodeInfo = nodeInfo)
+                DetailsSection(nodeInfo = nodeInfo, actKey = actKey, actKeySource = actKeySource)
             }
             if (page == NodeDestination.Swarm) item("publishing") {
                 PublishingSection(
@@ -443,7 +448,7 @@ private fun CacheRows(cache: SwarmCacheView, onClear: () -> Unit, onPickSize: ()
 }
 
 @Composable
-private fun DetailsSection(nodeInfo: NodeInfo) {
+private fun DetailsSection(nodeInfo: NodeInfo, actKey: String?, actKeySource: ActPublicKey.Source?) {
     SectionCard(title = stringResource(R.string.node_details)) {
         // What the node runs as, from the node itself: the setting can be
         // ahead of it while it restarts.
@@ -468,6 +473,7 @@ private fun DetailsSection(nodeInfo: NodeInfo) {
         if (nodeInfo.overlay.isNotBlank()) {
             DetailRow(stringResource(R.string.node_overlay), nodeInfo.overlay, mono = true, singleLine = false)
         }
+        ActPublicKeyRow(actKey, actKeySource)
         val err = nodeInfo.errorMessage
         if (!err.isNullOrBlank()) {
             // Not always an error: a node waiting to restart after a
