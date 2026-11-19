@@ -201,7 +201,9 @@
             // reason: a failed load, or a page from before #536.
             const peers = Number.isFinite(swarmPeers) ? swarmPeers : null;
             let description;
-            if (protocol !== 'swarm') description = fmt('page_ipfs_not_found');
+            // An ENS site's failed load (protocol `ens`) is as likely a
+            // Swarm one as not; only a known IPFS load gets IPFS copy.
+            if (protocol === 'ipfs' || protocol === 'ipns') description = fmt('page_ipfs_not_found');
             else if (peers === 1) description = fmt('page_swarm_one_peer');
             else if (peers !== null && peers < LOW_PEER_COUNT) description = fmt('page_swarm_few_peers', peers);
             else description = fmt('page_swarm_not_found');
