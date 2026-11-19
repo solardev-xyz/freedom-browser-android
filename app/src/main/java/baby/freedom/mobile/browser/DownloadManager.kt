@@ -1355,8 +1355,12 @@ class DownloadManager private constructor(context: Context) {
             )
         }
         is DownloadTarget.Dweb -> {
-            val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery, private = private)
-                ?: throw DownloadFailure(
+            var escaped = false
+            val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery, private = private, onEscape = { escaped = true })
+                ?: throw if (escaped) {
+                    // Refused for leaving its content root (#534): no retry changes that.
+                    DownloadFailure(DownloadNote.of(R.string.library_download_path_refused))
+                } else DownloadFailure(
                     if (target.root is ContentRoot.Ens) DownloadNote.of(
                         R.string.library_download_ens_unresolved,
                         // As the row's address shows it (#490 R2-M1).
@@ -1415,7 +1419,7 @@ class DownloadManager private constructor(context: Context) {
                 throw DownloadFailure(DownloadNote.of(R.string.library_download_node_not_running), retriable = true)
             } catch (e: IOException) {
                 currentCoroutineContext().ensureActive()
-                Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
+                Log.i(LOG_TAG, "dweb download attempt failed: ${gatewayUrlForLog(gatewayUrl)} (${e.javaClass.simpleName})")
                 if (!dwebHeaderFailureRetries(e)) break
                 continue
             }
@@ -1424,7 +1428,7 @@ class DownloadManager private constructor(context: Context) {
             lastStatus = status
             conn.disconnect()
             if (status !in DWEB_TRANSIENT_STATUSES) break
-            Log.i(LOG_TAG, "dweb download: transient $status for $gatewayUrl")
+            Log.i(LOG_TAG, "dweb download: transient $status for ${gatewayUrlForLog(gatewayUrl)}")
         }
         throw DownloadFailure(
             when (lastStatus) {

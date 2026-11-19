@@ -328,7 +328,7 @@ internal object StampClient {
             null
         } ?: return Answer.Failed(NOT_BOUND)
         val raw = try {
-            RadicleClient.readAll(pipe, timeoutMs, MAX_ANSWER_BYTES)
+            (RadicleClient.readAll(pipe, timeoutMs, MAX_ANSWER_BYTES) as? RadicleClient.Read.Done)?.text
         } finally {
             runCatching { pipe.close() }
         }

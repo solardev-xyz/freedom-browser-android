@@ -147,7 +147,7 @@ class GatewayProbe {
                         return Outcome.Aborted
                     }
                     if (missingPath && (attemptMs < warm404Ms || coldMissingPath)) {
-                        Log.i(TAG, "path not in manifest: $headUrl")
+                        Log.i(TAG, "path not in manifest: ${gatewayUrlForLog(headUrl)}")
                         return Outcome.PathNotFound
                     }
                     coldMissingPath = missingPath
@@ -250,7 +250,7 @@ class GatewayProbe {
             null
         } finally {
             if (!work.isCompleted) {
-                Log.i(TAG, "side request cut at ${timeoutMs}ms: $url")
+                Log.i(TAG, "side request cut at ${timeoutMs}ms: ${gatewayUrlForLog(url)}")
                 cut.abort()
                 work.cancel()
             }

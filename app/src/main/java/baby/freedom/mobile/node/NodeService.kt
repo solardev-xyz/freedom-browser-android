@@ -367,7 +367,8 @@ class NodeService : Service() {
             scope.launch(Dispatchers.IO) {
                 // A few at a time (#201 R1-F4); a call whose reader gave
                 // up (its deadline, a closed page) while it queued isn't
-                // run at all.
+                // run at all. One already running can't be stopped: it
+                // keeps its permit until the native call returns.
                 val answer = radicleCalls.withPermit {
                     if (readerGone(write)) {
                         null

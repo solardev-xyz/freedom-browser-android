@@ -149,6 +149,26 @@ class RadBrowserTest {
     }
 
     @Test
+    fun `read limits answer as desktop's rad reads do`() {
+        fun status(reason: String, message: String = "x not found") =
+            RadApi.serveApiWith(
+                "$bare/issues/abcdef",
+                FakeNode(answers = mapOf("issue" to RadicleClient.Answer.Failed(message, reason))),
+            ).status
+        // Ahead of the not-found phrasing, which a page-chosen path could otherwise steer.
+        assertEquals(503, status(RadicleClient.REASON_BUSY))
+        assertEquals(503, status(RadicleClient.REASON_CANCELLED))
+        assertEquals(504, status(RadicleClient.REASON_TIMEOUT))
+        assertEquals(502, status(RadicleClient.REASON_TOO_LARGE))
+        // With its reason, which the viewer words in the app's language.
+        val busy = RadApi.serveApiWith(
+            "$bare/issues/abcdef",
+            FakeNode(answers = mapOf("issue" to RadicleClient.Answer.Failed("busy", RadicleClient.REASON_BUSY))),
+        )
+        assertEquals(RadicleClient.REASON_BUSY, JSONObject(body(busy)).getString("reason"))
+    }
+
+    @Test
     fun `issue lists filter by status and paginate`() {
         val items = JSONArray((1..45).map { i ->
             JSONObject().put("id", "%06x".format(i)).put("state", JSONObject().put("status", if (i % 3 == 0) "closed" else "open"))

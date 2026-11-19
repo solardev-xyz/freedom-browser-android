@@ -23,6 +23,8 @@
     <!-- %1$s: an ENS name, e.g. vitalik.eth -->
     <string name="library_download_ens_unresolved">Couldn\'t resolve %1$s</string>
     <string name="library_download_node_not_running">Node not running</string>
+    <!-- A dweb download whose path climbs out of its content root (#534). -->
+    <string name="library_download_path_refused">Address leaves the site\'s content</string>
     <!-- %1$s: a URL scheme, e.g. ftp -->
     <string name="library_download_scheme_unsupported">%1$s: downloads aren\'t supported</string>
     <!-- A blob: download: the file only exists inside the page that made it, which Freedom reads it from. -->

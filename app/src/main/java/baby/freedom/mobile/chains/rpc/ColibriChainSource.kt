@@ -24,12 +24,21 @@ import org.json.JSONObject
  * prover learns which accounts and storage a read touches, as the RPCs
  * do.
  *
- * It answers [METHODS] — what the core can prove — and nothing else:
- * a `pending` nonce or balance (the mempool is nothing a proof covers)
+ * It answers [METHODS] — what the core can prove, less `eth_call`, which
+ * it runs on contract code it never checks — and only where the proof is
+ * tied to the block asked about ([asked], #530): an account read at
+ * `latest`, a block by number or hash. A read at `pending`, `safe`,
+ * `finalized`, a numbered or hashed block's state, or any other block
  * goes to the next tier, as does a `null` receipt, transaction or block,
- * which says only that the prover didn't find it, never a proven "no".
- * `eth_blockNumber` is answered from a proven `latest` block, no older
- * than [EnsColibri.MAX_LATEST_AGE_SECONDS]. At most [maxInFlight] reads
+ * which says only that the prover didn't find it, never a proven "no",
+ * and a receipt or transaction whose hash isn't the one asked about. The
+ * pinned core (v3.0.0) already ties those to the hash asked for: it
+ * checks the proven transaction hashes to it (`c4_tx_verify_tx_hash`)
+ * and that the receipt names that transaction (`c4_tx_verify_receipt_data`),
+ * so this re-check is defence in depth, as on desktop (#1060), against a
+ * core that ever stops doing so, not a gap that's open. `eth_blockNumber` is
+ * answered from a proven `latest` block, no older than
+ * [EnsColibri.MAX_LATEST_AGE_SECONDS]. At most [maxInFlight] reads
  * at once: past that the router moves straight on rather than queueing
  * behind the verifier's one lock. Never
  * broadcasts.
@@ -53,9 +62,9 @@ import org.json.JSONObject
  * read not checking out doesn't count: it says nothing about the others.
  *
  * Only the wallet's and the Swarm node's own reads count directly. A
- * site's read ([RoutingContext.site]: `window.ethereum`, `web3://`,
- * an x402 offer's token contract) is one the site chose — a call that takes the prover long
- * to prove, or never proves, under a 2 s wait — so its miss or failure
+ * site's read ([RoutingContext.site]: `window.ethereum`, `web3://`) is
+ * one the site chose — a contract's code or storage that takes the prover
+ * long to prove, or never proves, under a 2 s wait — so its miss or failure
  * proves nothing about the prover, and on its own would let any site
  * take the tier away from the wallet. It only asks for a **canary**: a
  * proven `latest` block, which no page shapes, run in the background
@@ -65,7 +74,7 @@ import org.json.JSONObject
  *
  * Nor may pages take the tier's slots: a page's read the router stopped
  * waiting for keeps its slot in the background (up to [backgroundMs]),
- * so a site looping slow calls would otherwise hold all [maxInFlight]
+ * so a site looping slow reads would otherwise hold all [maxInFlight]
  * and every wallet read would find Colibri busy. Sites together get at
  * most [maxPageInFlight] of them (as [baby.freedom.mobile.node.RouterReadSlots]
  * does for Myotis); a page read past that share moves straight on to the
@@ -76,7 +85,8 @@ import org.json.JSONObject
  * verifier name resolution shares, each answering its own 500 ("the
  * block after N can not be found"): a read at a numbered block past the
  * chain's head as last proven here ([knownHead]: the block a proven
- * `latest` read named, moved on by one [SLOT_MS] per slot since), such as
+ * `latest` read named, moved on by one [SLOT_MS] per slot since; only a
+ * block lookup is asked at a numbered block now), such as
  * [baby.freedom.mobile.wallet.Send]'s check that a block some way past
  * the head doesn't exist yet; and, for one slot after a prover refused it, the same receipt or
  * transaction by hash, which a receipt poll in the head block asks for
@@ -166,11 +176,9 @@ internal class ColibriChainSource(
         if (!enabled()) throw Unanswered("Colibri proofs are off")
         backoffRemainingMs(chainId)?.let { throw Unanswered("backing off for ${it}ms: the prover couldn't be reached") }
         if (method !in METHODS) throw Unanswered("Colibri doesn't prove $method")
-        TAG_PARAM[method]?.let { i ->
-            val tag = params.opt(i)
-            if (tag == "pending") throw Unanswered("$method at \"pending\" can't be proven")
-            val number = (tag as? String)?.takeIf { it.startsWith("0x") && it.length in 3..17 }
-                ?.let { runCatching { it.substring(2).toLong(16) }.getOrNull() }
+        val asked = asked(method, params)
+        if (method == "eth_getBlockByNumber") {
+            val number = (asked.opt(0) as? String)?.takeIf { BLOCK_NUMBER.matches(it) }?.let { runCatching { it.substring(2).toLong(16) }.getOrNull() }
             val head = knownHead(chainId)
             if (number != null && head != null && number > head) {
                 throw Unanswered("block $number is past the proven head ($head)")
@@ -214,7 +222,7 @@ internal class ColibriChainSource(
                     if (blockNumber) {
                         colibri.request(chainId, "eth_getBlockByNumber", JSONArray().put("latest").put(false), rpcs)
                     } else {
-                        colibri.request(chainId, method, params, rpcs)
+                        colibri.request(chainId, method, asked, rpcs)
                     }
                 }.also { if (it != null) backoff.succeeded() else failed() }
             } catch (e: CancellationException) {
@@ -242,16 +250,20 @@ internal class ColibriChainSource(
             if (call.isActive && routerWait?.ranOut == true) failed()
             throw e
         }
-        if (status.optString("status") == "revert") {
-            if (method != "eth_call") throw Unanswered("the verifier reported a revert for $method")
-            throw ChainRpcException.Rpc(
-                ChainRpcException.EXECUTION_REVERTED,
-                "execution reverted",
-                status.optString("data", "0x").ifEmpty { "0x" },
-            )
-        }
+        // Only an eth_call reverts, and none is asked (see [METHODS]).
+        if (status.optString("status") == "revert") throw Unanswered("the verifier reported a revert for $method")
         val raw = status.opt("result")
         if (raw == null || raw == JSONObject.NULL) throw Unanswered("no proven answer for $method")
+        // Defence in depth: the core already ties a by-hash proof to the
+        // hash asked for (`c4_tx_verify_tx_hash`), so this only fails if a
+        // later core stops doing so.
+        BY_HASH[method]?.let { field ->
+            val answered = (raw as? JSONObject)?.opt(field) as? String
+            val requested = params.opt(0) as? String
+            if (answered == null || requested == null || !answered.equals(requested, ignoreCase = true)) {
+                throw Unanswered("the proven $method is not for the transaction asked about")
+            }
+        }
         val result: Any = if (blockNumber) {
             (raw as? JSONObject)?.opt("number") as? String ?: throw Unanswered("a block without a number")
         } else {
@@ -380,10 +392,18 @@ internal class ColibriChainSource(
         /** The least time between two canaries for one chain: a page looping misses mustn't loop them. */
         const val CANARY_INTERVAL_MS = 10_000L
 
-        /** What the core proves (colibri.h, `c4_get_method_support` PROOFABLE), and the router asks. */
+        /**
+         * What the router asks: what the core proves (colibri.h,
+         * `c4_get_method_support` PROOFABLE) less `eth_call` (#530, desktop
+         * #1046). With privacy mode basic the core runs a call itself on
+         * contract code it fetches from an RPC and never checks against
+         * the proven code hash, and a call that reads no storage fetches
+         * no proof at all: its answer is one RPC's code, run here, and
+         * would be labelled verified. [asked] narrows the rest further.
+         */
         val METHODS = setOf(
             "eth_blockNumber", "eth_getBalance", "eth_getTransactionCount", "eth_getCode", "eth_getStorageAt",
-            "eth_call", "eth_getTransactionReceipt", "eth_getTransactionByHash",
+            "eth_getTransactionReceipt", "eth_getTransactionByHash",
             "eth_getBlockByNumber", "eth_getBlockByHash",
         )
 
@@ -403,13 +423,78 @@ internal class ColibriChainSource(
         const val HOLD_MS = 12_000L
         private const val MAX_HOLDS = 64
 
-        private val BY_HASH = setOf("eth_getTransactionReceipt", "eth_getTransactionByHash")
+        /** The by-hash reads, and the field of their answer that names the hash asked for. */
+        private val BY_HASH = mapOf("eth_getTransactionReceipt" to "transactionHash", "eth_getTransactionByHash" to "hash")
 
-        /** Where each state read's block tag sits in its params. */
-        private val TAG_PARAM = mapOf(
-            "eth_getBalance" to 1, "eth_getTransactionCount" to 1, "eth_getCode" to 1,
-            "eth_getStorageAt" to 2, "eth_call" to 1, "eth_getBlockByNumber" to 0,
+        /**
+         * The account reads, and where their block sits. The core proves
+         * an account against whichever header its proof carries and
+         * compares no requested number or hash with it; only `latest` is
+         * held to a block, by the freshness gate
+         * ([EnsColibri.MAX_LATEST_AGE_SECONDS]). So these are asked only
+         * at `latest` (#530, desktop #1060).
+         */
+        private val ACCOUNT_READS = mapOf(
+            "eth_getBalance" to 1, "eth_getTransactionCount" to 1, "eth_getCode" to 1, "eth_getStorageAt" to 2,
         )
+
+        /** A block number the core compares with the proven block's: no leading zero, 64 bits at most. */
+        private val BLOCK_NUMBER = Regex("^0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,15})$")
+
+        /** A block hash the core compares with the proven block's. */
+        private val BLOCK_HASH = Regex("^0x[0-9a-fA-F]{64}$")
+
+        /**
+         * The params the verifier is asked [method] with, or [Unanswered]
+         * when its proof wouldn't be tied to the block asked about (#530,
+         * desktop #1046/#1060), so the next tier answers instead:
+         *
+         * - an account read ([ACCOUNT_READS]) only at `latest`, its last
+         *   param; one that names no block is asked with `latest`
+         *   appended, which every tier reads it at anyway, so the
+         *   freshness gate holds it;
+         * - `eth_getBlockByNumber` at `latest`, a number or a 32-byte
+         *   hash, which the core compares with the proven block, or at no
+         *   block (`latest`). Not `pending` or `earliest`, which it would
+         *   answer from an RPC unproven, nor `safe`, `finalized`,
+         *   `justified` or another string, which it would match with any
+         *   proven block;
+         * - `eth_getBlockByHash` at a 32-byte hash;
+         * - `eth_blockNumber` with no params: the core matches any other
+         *   first param with any proven block.
+         *
+         * A block that isn't a string (an EIP-1898 object) is never asked.
+         */
+        internal fun asked(method: String, params: JSONArray): JSONArray {
+            fun refuse(why: String): Nothing = throw Unanswered("Colibri can't prove $method $why")
+            ACCOUNT_READS[method]?.let { i ->
+                return when (params.length()) {
+                    i -> JSONArray(params.toString()).put("latest")
+                    i + 1 -> when (val block = params.opt(i)) {
+                        "latest" -> params
+                        is String -> refuse("at block \"$block\"")
+                        else -> refuse("at a block that isn't a string")
+                    }
+                    else -> refuse("with ${params.length()} params")
+                }
+            }
+            when (method) {
+                "eth_blockNumber" -> if (params.length() != 0) refuse("with params")
+                "eth_getBlockByHash" -> when (val block = params.opt(0)) {
+                    is String -> if (!BLOCK_HASH.matches(block)) refuse("at block \"$block\"")
+                    null -> refuse("without a block hash")
+                    else -> refuse("at a block that isn't a string")
+                }
+                "eth_getBlockByNumber" -> when (val block = params.opt(0)) {
+                    null -> Unit
+                    is String -> if (block != "latest" && !BLOCK_NUMBER.matches(block) && !BLOCK_HASH.matches(block)) {
+                        refuse("at block \"$block\"")
+                    }
+                    else -> refuse("at a block that isn't a string")
+                }
+            }
+            return params
+        }
 
         /** The block a proven receipt, transaction or block is in, when it says. */
         private fun blockOf(result: Any?): Long? {

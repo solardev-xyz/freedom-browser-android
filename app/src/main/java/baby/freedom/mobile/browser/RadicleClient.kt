@@ -12,8 +12,8 @@ import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleStatus
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -66,32 +66,76 @@ object RadicleClient {
 
     /**
      * Run [method] (one of `RadicleNode.BROWSER_CALLS`) with [args] on the
-     * node and wait up to [timeoutMs] for its answer. Never throws.
+     * node and wait up to [timeoutMs] for its answer, the wait for a slot
+     * included. Never throws.
+     *
+     * [requester] is the tab and document asking ([requesterFor]); by
+     * default whoever the calling coroutine runs for ([requesterContext]),
+     * else no tab. Calls go through [admission] (#533): a read is refused
+     * at once when its tab already has too many waiting ([REASON_BUSY]),
+     * and is dropped — queued or running — once its document goes away
+     * ([REASON_CANCELLED]).
      */
-    fun call(method: String, args: JSONObject = JSONObject(), timeoutMs: Long = READ_TIMEOUT_MS): Answer {
+    internal fun call(
+        method: String,
+        args: JSONObject = JSONObject(),
+        timeoutMs: Long = READ_TIMEOUT_MS,
+        requester: RadicleAdmission.Requester = currentRequester.get() ?: NO_REQUESTER,
+    ): Answer {
         unavailableReason()?.let { return Answer.Failed(unavailableMessage(it), it) }
-        // At most [MAX_CALLS] at once, each holding up to [MAX_ANSWER_BYTES]
-        // (#201 R1-F4). The wait counts against the call's deadline.
         val start = SystemClock.uptimeMillis()
-        val permitted = try {
-            calls.tryAcquire(timeoutMs, TimeUnit.MILLISECONDS)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            false
+        val slot = when (val admit = admission.admit(requester, write = method in WRITE_CALLS, waitMs = timeoutMs)) {
+            is RadicleAdmission.Admit.Granted -> admit.slot
+            RadicleAdmission.Admit.Busy -> return Answer.Failed("The Radicle node is busy; try again", REASON_BUSY)
+            RadicleAdmission.Admit.Cancelled -> return Answer.Failed("request cancelled", REASON_CANCELLED)
         }
-        if (!permitted) return Answer.Failed("The Radicle node is busy", REASON_TIMEOUT)
         try {
             val left = timeoutMs - (SystemClock.uptimeMillis() - start)
             if (left <= 0) return Answer.Failed("The Radicle node didn't answer in time", REASON_TIMEOUT)
-            return callNow(method, args, left)
+            return callNow(method, args, left, slot)
         } finally {
-            calls.release()
+            slot.release()
         }
     }
 
-    private val calls = Semaphore(MAX_CALLS, true)
+    /**
+     * What every call waits on: desktop's limits for `rad:` reads (#533).
+     * Its slots bound what this process waits for; `:node` bounds the
+     * native calls themselves (`MAX_RADICLE_CALLS`), and skips one whose
+     * reader gave up (a cancelled call's pipe is closed) before it starts.
+     * A native call already running can't be stopped: a cancelled one
+     * frees its slot here at once, but keeps its `:node` permit until it
+     * returns, so abandoned calls can still make another tab's admitted
+     * read wait in `:node` (as on main; desktop holds its own slot instead).
+     */
+    private val admission = RadicleAdmission()
 
-    private fun callNow(method: String, args: JSONObject, timeoutMs: Long): Answer {
+    private val currentRequester = ThreadLocal<RadicleAdmission.Requester?>()
+
+    private val NO_REQUESTER = RadicleAdmission.Requester(RadicleAdmission.NO_TAB, 0)
+
+    /** The requester [tab]'s document is now, captured when its request arrives. */
+    internal fun requesterFor(tab: Long?): RadicleAdmission.Requester = admission.requester(tab)
+
+    /** Who [call] runs for by default on this thread (tests). */
+    internal fun currentRequester(): RadicleAdmission.Requester? = currentRequester.get()
+
+    /** A coroutine context in which [call] runs for [requester]. */
+    internal fun requesterContext(requester: RadicleAdmission.Requester): CoroutineContext =
+        currentRequester.asContextElement(requester)
+
+    /** [tab]'s main-frame request for [url] reached the interceptor (its thread). */
+    fun navigationRequested(tab: Long, url: String) = admission.navigationRequested(tab, url)
+
+    /** [tab] committed a document on [url]; null: it was torn down with none in its place. */
+    fun documentStarted(tab: Long, url: String?) =
+        admission.documentStarted(tab, url, gone = url == null, blank = url == ABOUT_BLANK)
+
+    /** [tab] closed. */
+    fun tabClosed(tab: Long) = admission.tabClosed(tab)
+
+    private fun callNow(method: String, args: JSONObject, timeoutMs: Long, slot: RadicleAdmission.Slot): Answer {
+        if (slot.cancelled) return Answer.Failed("request cancelled", REASON_CANCELLED)
         val binder = service ?: return Answer.Failed(unavailableMessage(REASON_STOPPED), REASON_STOPPED)
         val pipe = try {
             binder.radicleCall(method, args.toString())
@@ -99,14 +143,17 @@ object RadicleClient {
             Log.w(TAG, "radicle call $method failed: ${e.message}")
             null
         } ?: return Answer.Failed(unavailableMessage(REASON_STOPPED), REASON_STOPPED)
-        val raw = try {
-            readAll(pipe, timeoutMs, MAX_ANSWER_BYTES)
+        val read = try {
+            readAll(pipe, timeoutMs, MAX_ANSWER_BYTES) { slot.cancelled }
         } finally {
             runCatching { pipe.close() }
         }
-        return when (raw) {
-            null -> Answer.Failed("The Radicle node didn't answer in time", REASON_TIMEOUT)
-            else -> parseAnswer(raw)
+        return when (read) {
+            is Read.Done -> parseAnswer(read.text)
+            Read.TimedOut -> Answer.Failed("The Radicle node didn't answer in time", REASON_TIMEOUT)
+            Read.TooLarge -> Answer.Failed("repository data too large to serve here", REASON_TOO_LARGE)
+            Read.Cancelled -> Answer.Failed("request cancelled", REASON_CANCELLED)
+            Read.Failed -> Answer.Failed("unreadable answer from the Radicle node", "native-failed")
         }
     }
 
@@ -150,41 +197,57 @@ object RadicleClient {
         else -> "The Radicle node is not running"
     }
 
+    /** How [readAll] ended. */
+    internal sealed interface Read {
+        data class Done(val text: String) : Read
+        data object TimedOut : Read
+        data object TooLarge : Read
+        data object Cancelled : Read
+        data object Failed : Read
+    }
+
     /**
-     * Everything written to [pipe] until it's closed, or null if that
-     * takes longer than [timeoutMs] or runs past [maxBytes]. Waits with
-     * `poll()` rather than a blocking read, so the deadline holds however
-     * slowly (or never) the other end writes.
+     * Everything written to [pipe] until it's closed — or why not: it took
+     * longer than [timeoutMs], ran past [maxBytes], or [cancelled] turned
+     * true (checked at least every [CANCEL_CHECK_MS]). Waits with `poll()`
+     * rather than a blocking read, so the deadline holds however slowly
+     * (or never) the other end writes.
      */
-    internal fun readAll(pipe: ParcelFileDescriptor, timeoutMs: Long, maxBytes: Int): String? {
+    internal fun readAll(
+        pipe: ParcelFileDescriptor,
+        timeoutMs: Long,
+        maxBytes: Int,
+        cancelled: () -> Boolean = { false },
+    ): Read {
         val fd = pipe.fileDescriptor
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         val out = ByteArrayOutputStream()
         val buf = ByteArray(64 * 1024)
         while (true) {
+            if (cancelled()) return Read.Cancelled
             val left = deadline - SystemClock.uptimeMillis()
-            if (left <= 0) return null
+            if (left <= 0) return Read.TimedOut
             val poll = StructPollfd().apply {
                 this.fd = fd
                 events = OsConstants.POLLIN.toShort()
             }
             val ready = try {
-                Os.poll(arrayOf(poll), left.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                Os.poll(arrayOf(poll), left.coerceAtMost(CANCEL_CHECK_MS).toInt())
             } catch (e: ErrnoException) {
                 if (e.errno == OsConstants.EINTR) continue
-                return null
+                return Read.Failed
             }
-            if (ready == 0) return null
+            if (ready == 0) continue
             val n = try {
                 Os.read(fd, buf, 0, buf.size)
             } catch (e: ErrnoException) {
                 if (e.errno == OsConstants.EINTR || e.errno == OsConstants.EAGAIN) continue
-                return null
+                return Read.Failed
             } catch (e: java.io.InterruptedIOException) {
                 continue
             }
-            if (n <= 0) return out.toString(Charsets.UTF_8.name())
-            if (out.size() + n > maxBytes) return null
+            if (n <= 0) return Read.Done(out.toString(Charsets.UTF_8.name()))
+            if (out.size() + n > maxBytes) return Read.TooLarge
             out.write(buf, 0, n)
         }
     }
@@ -193,6 +256,12 @@ object RadicleClient {
     const val REASON_STOPPED = "node-stopped"
     const val REASON_NOT_READY = "node-not-ready"
     const val REASON_TIMEOUT = "timeout"
+    /** Too many calls waiting, or none got a slot in time (#533). */
+    const val REASON_BUSY = "busy"
+    /** The document that asked went away (#533). */
+    const val REASON_CANCELLED = "cancelled"
+    /** The answer ran past [MAX_ANSWER_BYTES]. */
+    const val REASON_TOO_LARGE = "too-large"
     /** `:node` refused a write made as an identity the node no longer runs as (#328). */
     const val REASON_IDENTITY_CHANGED = RadicleNode.IDENTITY_CHANGED
 
@@ -202,11 +271,18 @@ object RadicleClient {
     /** A COB write's: it signs, stores and announces the new refs. */
     const val WRITE_TIMEOUT_MS = 60_000L
 
-    /** Calls waiting on the node at once (its own side runs as many). */
-    private const val MAX_CALLS = 4
+    /** The COB writes: never cancelled or refused for a full queue ([RadicleAdmission]). */
+    internal val WRITE_CALLS = setOf("createIssue", "commentIssue", "editIssueState", "commentPatch")
 
-    /** The biggest answer taken (a big repository's issue list, a blob). */
-    private const val MAX_ANSWER_BYTES = 32 * 1024 * 1024
+    /**
+     * The biggest answer taken (a big repository's issue list, a blob):
+     * desktop's 16 MiB (#533). Counted in UTF-8 bytes, so never more
+     * than desktop's 16 Mi characters.
+     */
+    internal const val MAX_ANSWER_BYTES = 16 * 1024 * 1024
+
+    /** How often a running call checks whether its document went away. */
+    private const val CANCEL_CHECK_MS = 200L
 
     private const val TAG = "RadicleClient"
 }

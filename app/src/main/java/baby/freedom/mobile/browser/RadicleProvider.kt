@@ -129,6 +129,17 @@ class RadicleProvider(
      */
     private val followed = HashMap<String, LinkedHashSet<String>>()
     private val tracks = HashMap<String, Track>()
+
+    /**
+     * rid → whether the node last said it has that repository in storage,
+     * least recently asked first. A `repoInfo` that got no answer — refused
+     * as busy, timed out, the node stopped — tells nothing either way
+     * (#533 R3-F2), so [status] reads this instead of calling a fetched
+     * repository idle.
+     */
+    private val stored = object : LinkedHashMap<String, Boolean>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>) = size > MAX_FOLLOWED_REPOS
+    }
     private val writes = HashMap<String, ArrayDeque<Long>>()
     private var watcher: Job? = null
 
@@ -245,7 +256,9 @@ class RadicleProvider(
         "radicle_getSeedStatus" -> {
             val rid = rid(params) ?: return invalidRid()
             follow(origin, rid)
-            Reply.Ok(withContext(io) { status(rid) })
+            withContext(io) { status(rid) }?.let { Reply.Ok(it) }
+                ?: node.unavailableReason()?.let { Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it) }
+                ?: storageUnknown()
         }
         "radicle_seed" -> {
             val rid = rid(params) ?: return invalidRid()
@@ -256,13 +269,16 @@ class RadicleProvider(
             node.unavailableReason()?.let { return Reply.Err(UNAVAILABLE, RadicleClient.unavailableMessage(it), it) }
             busy(rid)?.let { return it }
             startFetch(origin, rid)?.let { return it }
-            Reply.Ok(JSONObject().put("rid", rid).put("seeded", true).put("status", withContext(io) { status(rid) }))
+            Reply.Ok(JSONObject().put("rid", rid).put("seeded", true).put("status", withContext(io) { status(rid) } ?: JSONObject.NULL))
         }
         "radicle_unseed" -> {
             val rid = rid(params) ?: return invalidRid()
             if (!ask(RadicleAsk.Unseed(origin, rid))) return rejected()
             if (!node.unseed(rid)) return Reply.Err(INTERNAL, "unseed failed", "unseed_failed")
-            synchronized(lock) { tracks.remove(rid) }
+            synchronized(lock) {
+                tracks.remove(rid)
+                stored.remove(rid)
+            }
             Reply.Ok(JSONObject().put("rid", rid).put("seeded", false))
         }
         "radicle_sync" -> {
@@ -278,7 +294,7 @@ class RadicleProvider(
             if (!seeded) return Reply.Err(INVALID_PARAMS, "Repository is not seeded", "not_seeded")
             busy(rid)?.let { return it }
             startFetch(origin, rid)?.let { return it }
-            Reply.Ok(JSONObject().put("rid", rid).put("status", withContext(io) { status(rid) }))
+            Reply.Ok(JSONObject().put("rid", rid).put("status", withContext(io) { status(rid) } ?: JSONObject.NULL))
         }
         else -> Reply.Err(UNSUPPORTED, "Unknown method: $method")
     }
@@ -429,8 +445,13 @@ class RadicleProvider(
     /**
      * Where [rid]'s replication stands (desktop's `getSeedStatus` shape).
      * Blocking: it may ask the node whether the repository is in storage.
+     * Null when that decides the state and the node gave no answer (busy,
+     * timed out, stopped) with none known from before: "idle" would say a
+     * fetched repository isn't there. Where the seed line already gives
+     * the state, a missing answer only leaves `inStorage` at what was last
+     * known, or at whether this line says it's fetched.
      */
-    internal fun status(rid: String): JSONObject {
+    internal fun status(rid: String): JSONObject? {
         val line = node.state.value.seed?.takeIf { it.rid == rid }
         val track = synchronized(lock) { tracks[rid] }
         // Asked of the node a moment ago, and its seed line hasn't moved yet.
@@ -441,7 +462,7 @@ class RadicleProvider(
             fromLine -> stateOf(line!!)
             else -> null
         }
-        val inStorage = if (state == "fetched") true else inStorage(rid)
+        val inStorage = if (state == "fetched") true else inStorage(rid) ?: if (state == null) return null else false
         val finalState = state ?: if (inStorage) "fetched" else "idle"
         val progress: Any = when {
             pending -> JSONObject().put("phase", "starting")
@@ -469,8 +490,27 @@ class RadicleProvider(
             .put("finishedAt", track?.finishedAt ?: JSONObject.NULL)
     }
 
-    private fun inStorage(rid: String): Boolean =
-        callBlocking("repoInfo", JSONObject().put("rid", rid)) is RadicleClient.Answer.Ok
+    /** Whether [rid] is in the node's storage; null when the node didn't say and nothing's known from before. */
+    private fun inStorage(rid: String): Boolean? {
+        val known = when (val a = callBlocking("repoInfo", JSONObject().put("rid", rid))) {
+            is RadicleClient.Answer.Ok -> true
+            // It's there; it's only too large to read here.
+            is RadicleClient.Answer.Failed -> if (a.reason == RadicleClient.REASON_TOO_LARGE) {
+                true
+            } else if (a.reason in NO_ANSWER) {
+                null
+            } else {
+                false
+            }
+        }
+        return synchronized(lock) {
+            if (known != null) stored[rid] = known
+            known ?: stored[rid]
+        }
+    }
+
+    private fun storageUnknown() =
+        Reply.Err(UNAVAILABLE, "The Radicle node is busy; try again", RadicleClient.REASON_BUSY)
 
     private fun stateOf(line: RadicleSeed): String = when {
         line.active -> "fetching"
@@ -501,7 +541,9 @@ class RadicleProvider(
             followers[line.rid]?.toList().orEmpty()
         }
         if (targets.isEmpty()) return
-        val status = withContext(io) { status(line.rid) }
+        // No word from the node on storage, and the line doesn't say: the
+        // next move of the line tells the followers, not a wrong "idle".
+        val status = withContext(io) { status(line.rid) } ?: return
         for (origin in targets) {
             // A follower whose grant was dropped some other way (another
             // process, a cleared store) doesn't hear it either.
@@ -762,6 +804,12 @@ class RadicleProvider(
 
         /** Repositories each site's `seedStatus` follows are kept for ([followed]). */
         const val MAX_FOLLOWED_REPOS = 512
+
+        /** A failed `repoInfo` that got no answer from the node: it says nothing about storage. */
+        private val NO_ANSWER = setOf(
+            RadicleClient.REASON_BUSY, RadicleClient.REASON_TIMEOUT, RadicleClient.REASON_CANCELLED,
+            RadicleClient.REASON_STOPPED, RadicleClient.REASON_NOT_READY, RadicleClient.REASON_DISABLED,
+        )
 
         private val COB_ID = Regex("^[0-9a-f]{6,40}$")
         private val ISSUE_STATES = setOf("open", "closed", "solved")

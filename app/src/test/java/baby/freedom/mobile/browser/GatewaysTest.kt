@@ -7,6 +7,7 @@ import baby.freedom.mobile.ens.EnsTrust
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -198,6 +199,7 @@ class GatewaysTest {
     @Test
     fun `gatewayUrlFor resolves ens roots from the session registry`() {
         KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.record("ipns://%2e%2e", "dots.example.tez", EnsTrust.ASSUMED)
         try {
             assertEquals(
                 "http://127.0.0.1:1633/bzz/$ref64/p",
@@ -206,6 +208,169 @@ class GatewaysTest {
         } finally {
             KnownEnsNames.clear()
         }
+    }
+
+    @Test
+    fun `gatewayUrlFor refuses a path that leaves its content root`() {
+        // #534: as written, a gateway that decodes before it resolves dot
+        // segments would serve another root, or its own API, here.
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        listOf(
+            ContentRoot.Ipfs("bafy") to "/..%2f..%2fapi/v0/id",
+            ContentRoot.Ipfs("bafy") to "/%2e%2e%2f%2e%2e%2fipns/example.com",
+            ContentRoot.IpnsName("ipfs.tech") to "/a%5c..%5c..%5capi/v0/id",
+            ContentRoot.IpnsKey("k51key") to "/a/.%2E%2F.%2e/x",
+            ContentRoot.Bzz(ref64) to "/a/..\\..\\..\\stamps",
+            // Under bzz: any encoded separator, climbing or not.
+            ContentRoot.Bzz(ref64) to "/a%2Fb",
+        ).forEach { (root, path) ->
+            var byRequest: Boolean? = null
+            assertNull("$root $path", Gateways.gatewayUrlFor(root, path, onEscape = { byRequest = it }))
+            assertEquals("$root $path", true, byRequest)
+        }
+        // Names that only look like dot segments, and a query, still pass.
+        assertEquals(
+            "http://127.0.0.1:58312/ipfs/bafy/..foo/%2e%2ebar/a%2Fb?q=..%2f",
+            Gateways.gatewayUrlFor(ContentRoot.Ipfs("bafy"), "/..foo/%2e%2ebar/a%2Fb?q=..%2f"),
+        )
+        assertEquals(
+            "http://127.0.0.1:1633/bzz/$ref64/.well-known/caf%C3%A9",
+            Gateways.gatewayUrlFor(ContentRoot.Bzz(ref64), "/.well-known/caf%C3%A9"),
+        )
+    }
+
+    @Test
+    fun `gatewayUrlFor refuses a name record whose base path leaves its content root`() {
+        // A `.tez` website URI is the domain owner's, and its path is
+        // appended to the request's (desktop #814).
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        KnownEnsNames.record("ipfs://bafy/..%2F..%2Fapi/v0", "docs.example.tez", EnsTrust.ASSUMED)
+        KnownEnsNames.record("bzz://$ref64/site%2Fsub", "bzz.example.tez", EnsTrust.ASSUMED)
+        KnownEnsNames.record("ipfs://bafy/site", "ok.example.tez", EnsTrust.ASSUMED)
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
+        KnownEnsNames.record("ipns://%2e%2e", "dots.example.tez", EnsTrust.ASSUMED)
+        try {
+            // The record's fault, not the request's: the interceptor's 502.
+            var byRequest: Boolean? = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("docs.example.tez"), "/id", onEscape = { byRequest = it }))
+            assertEquals(false, byRequest)
+            byRequest = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("bzz.example.tez"), "/x", onEscape = { byRequest = it }))
+            assertEquals(false, byRequest)
+            // A record whose root itself escapes: the record's fault even
+            // for a plain request path.
+            byRequest = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("dots.example.tez"), "/", onEscape = { byRequest = it }))
+            assertEquals(false, byRequest)
+            // A name served from bzz: asked for an encoded separator: the
+            // request's fault (the interceptor's 400), though only known
+            // once the name resolved.
+            byRequest = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("swarm.eth"), "/a%2Fb", onEscape = { byRequest = it }))
+            assertEquals(true, byRequest)
+            byRequest = null
+            assertEquals(
+                "http://127.0.0.1:58312/ipfs/bafy/site/id",
+                Gateways.gatewayUrlFor(ContentRoot.Ens("ok.example.tez"), "/id", onEscape = { byRequest = it }),
+            )
+            assertNull(byRequest)
+        } finally {
+            KnownEnsNames.clear()
+        }
+    }
+
+    @Test
+    fun `the readiness probe asks only for a root that stays beneath its namespace`() {
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        // Roots that leave `/<namespace>/<ref>/`: no HEAD at all (#534).
+        listOf(
+            "bzz://%2e%2e/stamps",
+            "bzz://%2E%2e",
+            "ipfs://%2e%2e/api/v0/id",
+            "ipns://%2e%2e",
+            "ipns://..",
+            "ipns://../api/v0/id",
+            "ipns://.",
+            // The whole first segment is the root, not the part the gateway
+            // base pattern recognizes: these ids can't be label-encoded, so
+            // the tab would load the gateway URL itself with no interceptor
+            // in front of it.
+            "bzz://$ref64%2f..%2f..%2fstamps",
+            "bzz://$ref64%2F%2E%2E%2Fstamps",
+            "bzz://$ref64%2fdocs",
+            "ipns://a%2f..%2f..%2fapi",
+            "ipfs://a\\..\\api",
+            "ipfs://bafy%2f..%2f..%2fapi/v0/id",
+            // A sound but non-label-encodable root loads the gateway URL
+            // itself, so its path must stay beneath the root as well.
+            "bzz://zz/%2e%2e/%2e%2e/stamps",
+            "bzz://zz/../../stamps",
+            "bzz://zz/a%2Fb",
+        ).forEach { assertNull(it, Gateways.probeUrlFor(it)) }
+        // A sound root is probed alone, whatever path the request carries:
+        // the interceptor refuses that path once the tab loads it.
+        assertEquals("http://127.0.0.1:1633/bzz/$ref64", Gateways.probeUrlFor("bzz://$ref64"))
+        assertEquals("http://127.0.0.1:1633/bzz/$ref64", Gateways.probeUrlFor("bzz://$ref64/a%2Fb"))
+        assertEquals("http://127.0.0.1:58312/ipfs/bafy", Gateways.probeUrlFor("ipfs://bafy/..%2f..%2fapi/v0/id"))
+        assertEquals("http://127.0.0.1:58312/ipns/docs.eth", Gateways.probeUrlFor("ipns://docs.eth/x"))
+        // A ref the base pattern doesn't know gets its root, slash-ended,
+        // once its whole (gateway-loaded) path stays beneath it.
+        assertEquals("http://127.0.0.1:1633/bzz/zz/", Gateways.probeUrlFor("bzz://zz"))
+        assertEquals("http://127.0.0.1:1633/bzz/zz/", Gateways.probeUrlFor("bzz://zz/docs/index.html"))
+        assertNull(Gateways.probeUrlFor("https://example.com/"))
+        // With nothing to probe and no virtual origin to refuse it in place,
+        // the submit flow shows the path-refused page, not "not ready yet,
+        // try again" (R4-F1): these never map to a virtual origin.
+        listOf("bzz://$ref64%2f..%2f..%2fstamps", "bzz://zz/a%2Fb", "bzz://zz/../../stamps").forEach {
+            assertNull(it, Gateways.probeUrlFor(it))
+            assertFalse(it, VirtualOrigin.isVirtualUrl(Gateways.toLoadable(it)))
+        }
+        // Every answer stays beneath its root as sent.
+        listOf("bzz://$ref64", "ipfs://bafy/x", "ipns://docs.eth", "bzz://zz").forEach { uri ->
+            val probe = Gateways.probeUrlFor(uri)!!
+            val path = "/" + probe.substringAfter("://").substringAfter('/')
+            assertTrue(uri, DwebPath.isContainedTarget(path, encodedSeparators = !uri.startsWith("bzz:")))
+        }
+    }
+
+    @Test
+    fun `a refused path is known from the address alone, before any node is up`() {
+        // The submit flow asks this before it waits for, or lazily starts,
+        // a node (R5-F1), so it must not depend on a gateway base: same
+        // answer with no IPFS node yet, with one, and behind an external
+        // endpoint, and exactly where the probe has nothing to HEAD.
+        val refused = listOf(
+            "bzz://%2e%2e/stamps",
+            "ipns://..",
+            "bzz://$ref64%2f..%2f..%2fstamps",
+            "ipfs://bafy%2f..%2f..%2fapi/v0/id",
+            "ipns://a%2f..%2f..%2fapi",
+            "bzz://zz/../../stamps",
+        )
+        val sound = listOf(
+            "bzz://$ref64",
+            "bzz://$ref64/a%2Fb",
+            "ipfs://bafy/..%2f..%2fapi/v0/id",
+            "ipns://docs.eth/x",
+            "bzz://zz/docs/index.html",
+            "https://example.com/",
+        )
+        listOf<() -> Unit>(
+            { Gateways.setIpfsBase("") },
+            { Gateways.setIpfsBase("http://127.0.0.1:58312") },
+            { Gateways.setExternalEndpoints("http://192.168.1.10:1633", "https://gw.example/sub") },
+        ).forEach { setUp ->
+            setUp()
+            refused.forEach {
+                assertTrue(it, Gateways.pathRefused(it))
+                assertNull(it, Gateways.probeUrlFor(it))
+            }
+            sound.forEach { assertFalse(it, Gateways.pathRefused(it)) }
+        }
+        // With a gateway base in place, every address not refused has a probe.
+        Gateways.setExternalEndpoints("", "")
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        sound.filter { !it.startsWith("https:") }.forEach { assertNotNull(it, Gateways.probeUrlFor(it)) }
     }
 
     private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"
