@@ -183,10 +183,16 @@ internal fun adblockPageSummary(enabled: Int, total: Int, allowed: Int): String 
 internal fun walletPageSummary(wallet: String, chains: Int): String =
     "$wallet · ${Strings.plural(R.plurals.settings_page_wallet_chains, chains, chains)}"
 
-/** "Colibri proofs on · 5 RPC endpoints": [endpoints] is the resolution order's length. */
+/**
+ * "5 RPC endpoints · Colibri chain-read proofs on": [endpoints] is the
+ * resolution order's length. The endpoints lead because names are
+ * resolved on them; the Colibri switch on this page governs chain reads
+ * only (names are never proven through Colibri, #529), so its state
+ * comes second and says so.
+ */
 internal fun namesPageSummary(colibri: Boolean, endpoints: Int): String = listOf(
-    Strings.get(if (colibri) R.string.settings_page_names_colibri_on else R.string.settings_page_names_colibri_off),
     rpcCountLabel(endpoints),
+    Strings.get(if (colibri) R.string.settings_page_names_colibri_on else R.string.settings_page_names_colibri_off),
 ).joinToString(" · ")
 
 internal fun nodesPageSummary(externalSwarm: String, externalIpfs: String, radicle: String): String {

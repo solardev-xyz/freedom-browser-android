@@ -1461,9 +1461,7 @@ private fun NameTrustLine(trust: NameTrust) {
     val green = if (MaterialTheme.colorScheme.isLight) Color(0xFF15803D) else trust.tier.color
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            // A proof of an off-chain (CCIP-Read) answer shows only that the
-            // resolver accepted it, not that the chain holds it (#205): said so here too.
-            stringResource(if (trust.trust.offchain) R.string.send_name_proven_offchain else R.string.send_name_verified),
+            stringResource(R.string.send_name_verified),
             style = MaterialTheme.typography.labelLarge,
             color = green,
             modifier = Modifier.weight(1f, fill = false),

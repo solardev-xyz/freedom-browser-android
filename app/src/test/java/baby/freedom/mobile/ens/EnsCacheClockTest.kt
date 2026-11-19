@@ -50,7 +50,7 @@ class EnsCacheClockTest {
         val real = 1_800_000_000_000L
         var now = real + 6 * 3_600_000L
         val resolver = EnsResolver(
-            settings = { EnsResolver.Settings((1..3).map { "https://rpc$it.test/" }, colibri = false) },
+            settings = { EnsResolver.Settings((1..3).map { "https://rpc$it.test/" }) },
             http = http,
             clock = { now },
         )

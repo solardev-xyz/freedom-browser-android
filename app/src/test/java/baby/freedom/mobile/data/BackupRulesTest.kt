@@ -103,7 +103,6 @@ class BackupRulesTest {
      */
     private val keyless = listOf(
         // Name-independent sync-committee state (#205's allowlist).
-        "app/src/main/java/baby/freedom/mobile/MainActivity.kt" to "File(filesDir, \"colibri\")",
         "app/src/main/java/baby/freedom/mobile/chains/rpc/ChainDataRouter.kt" to
             "File(app.filesDir, if (suffix.isEmpty()) \"colibri\" else \"colibri-\$suffix\")",
         // The light client's chain sync state.

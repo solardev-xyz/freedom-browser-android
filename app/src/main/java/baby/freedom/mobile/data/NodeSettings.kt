@@ -712,8 +712,8 @@ class NodeSettings private constructor(
     val ensColibri: Flow<Boolean> = store.data.map { prefs -> prefs[Keys.ENS_COLIBRI] ?: true }
 
     /**
-     * Whether name resolution asks the Colibri verifier for a proof first
-     * (#100), and the chain-data router's reads go to it (#329).
+     * Whether the chain-data router's reads go to the Colibri verifier
+     * (#329). Name resolution never asks it (#529).
      */
     suspend fun setEnsColibri(enabled: Boolean): EnsEdit =
         editEnsRpc({ it }) {

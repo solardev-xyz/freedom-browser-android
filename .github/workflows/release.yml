@@ -68,9 +68,10 @@
 # the Tor client, and with fat LTO (see the build step).
 #
 # COLIBRI_REF pins the corpus-core/colibri-stateless tag libc4.so (the
-# Colibri verifier behind proven name resolution, #100) is built from;
-# bump it with the vendored swarmnode/src/main/cpp/colibri.h. A local
-# build without libc4.so still works (names start at the RPC quorum), so
+# Colibri verifier behind proven chain reads, #329; it proves no name,
+# #529) is built from; bump it with the vendored
+# swarmnode/src/main/cpp/colibri.h. A local build without libc4.so still
+# works (chain reads start at the RPC quorum), so
 # this workflow checks every APK carries it.
 
 name: release

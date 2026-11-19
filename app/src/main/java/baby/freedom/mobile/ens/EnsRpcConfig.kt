@@ -57,7 +57,11 @@ data class EnsRpcConfig(
     /** Provider id ([KEYED_PROVIDERS]) → API key. */
     val apiKeys: Map<String, String> = emptyMap(),
     val ccipRead: Boolean = true,
-    /** Ask the Colibri verifier for a proven answer first (#100). */
+    /**
+     * Prove chain reads (wallet, dapps, the Swarm node) with the Colibri
+     * verifier (#329). Names are never asked of it (#529): Colibri runs
+     * a name's `eth_call` on contract code it doesn't prove.
+     */
     val colibri: Boolean = true,
 ) {
     /** One entry of the resolution order, for the settings page. */
@@ -127,7 +131,7 @@ data class EnsRpcConfig(
 
     /** What [EnsResolver] needs from this, compared to spot a change. */
     val resolverSettings: EnsResolver.Settings
-        get() = EnsResolver.Settings(endpoints = endpoints, ccipRead = ccipRead, colibri = colibri)
+        get() = EnsResolver.Settings(endpoints = endpoints, ccipRead = ccipRead)
 
     /**
      * Whether removing one of the user's own endpoints / switching off a

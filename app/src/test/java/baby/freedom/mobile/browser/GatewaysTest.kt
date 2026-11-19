@@ -347,47 +347,6 @@ class GatewaysTest {
     }
 
     @Test
-    fun `a re-check waits out the proof on top of its own deadline while Colibri is asked first`() {
-        // A proof that takes longer than the RPC share of the deadline
-        // (an ordinary 2-3 s proof against a 3 s deadline) must still be
-        // taken, not time out onto the earlier answer and open the
-        // failure window for a network that is working fine.
-        KnownEnsNames.record("bzz://$ref64", "proving.eth", EnsTrust.ASSUMED)
-        val deadline = Gateways.reverifyDeadlineMs
-        val allowance = Gateways.colibriAllowanceMs
-        val asked = java.util.concurrent.atomic.AtomicReference<baby.freedom.mobile.ens.EnsResolver.Settings?>()
-        Gateways.reverifyDeadlineMs = 100
-        Gateways.colibriAllowanceMs = { settings, _ -> asked.set(settings); 1_000 }
-        try {
-            withLookup({ name ->
-                Thread.sleep(400) // longer than the RPC share, well inside the proof's
-                EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef, EnsTrust.ASSUMED)
-            }) {
-                val pins = EnsDocumentPins()
-                assertNull(Gateways.reverifyEnsDocument("proving.eth", pins))
-                assertEquals("bzz://$otherRef", pins.uriFor("proving.eth"))
-                assertEquals(0, Gateways.ensLookupFailureCount())
-                assertTrue(asked.get() != null)
-            }
-            // With the verifier not being asked (off, backing off), the
-            // deadline is the RPC share alone again.
-            Gateways.colibriAllowanceMs = { _, _ -> 0 }
-            KnownEnsNames.record("bzz://$ref64", "slowrpc.eth", EnsTrust.ASSUMED)
-            withLookup({ name ->
-                Thread.sleep(400)
-                EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef, EnsTrust.ASSUMED)
-            }) {
-                val pins = EnsDocumentPins()
-                assertNull(Gateways.reverifyEnsDocument("slowrpc.eth", pins))
-                assertEquals("bzz://$ref64", pins.uriFor("slowrpc.eth"))
-            }
-        } finally {
-            Gateways.reverifyDeadlineMs = deadline
-            Gateways.colibriAllowanceMs = allowance
-        }
-    }
-
-    @Test
     fun `a re-check waits out the light client on top of its own deadline while it would be asked first`() {
         // A light-client answer (or a miss it falls back from to a quick
         // RPC answer) that takes longer than the RPC share of the
@@ -395,11 +354,9 @@ class GatewaysTest {
         // answer and open the failure window on a working network.
         KnownEnsNames.record("bzz://$ref64", "myotis.eth", EnsTrust.ASSUMED)
         val deadline = Gateways.reverifyDeadlineMs
-        val colibri = Gateways.colibriAllowanceMs
         val lightClient = Gateways.lightClientAllowanceMs
         val asked = java.util.concurrent.atomic.AtomicReference<String?>()
         Gateways.reverifyDeadlineMs = 100
-        Gateways.colibriAllowanceMs = { _, _ -> 0 }
         Gateways.lightClientAllowanceMs = { _, name, _ -> asked.set(name); 1_000 }
         try {
             withLookup({ name ->
@@ -412,21 +369,8 @@ class GatewaysTest {
                 assertEquals(0, Gateways.ensLookupFailureCount())
                 assertEquals("myotis.eth", asked.get())
             }
-            // With both allowances, the deadline covers both tiers.
-            Gateways.lightClientAllowanceMs = { _, _, _ -> 300 }
-            Gateways.colibriAllowanceMs = { _, _ -> 300 }
-            KnownEnsNames.record("bzz://$ref64", "bothtiers.eth", EnsTrust.ASSUMED)
-            withLookup({ name ->
-                Thread.sleep(550)
-                EnsResult.Ok(name, "bzz", "bzz://$otherRef", otherRef, EnsTrust.ASSUMED)
-            }) {
-                val pins = EnsDocumentPins()
-                assertNull(Gateways.reverifyEnsDocument("bothtiers.eth", pins))
-                assertEquals("bzz://$otherRef", pins.uriFor("bothtiers.eth"))
-            }
         } finally {
             Gateways.reverifyDeadlineMs = deadline
-            Gateways.colibriAllowanceMs = colibri
             Gateways.lightClientAllowanceMs = lightClient
         }
     }
@@ -439,13 +383,11 @@ class GatewaysTest {
         // be inside its own budget opens no failure window.
         KnownEnsNames.record("bzz://$ref64", "stalled.eth", EnsTrust.ASSUMED)
         val deadline = Gateways.reverifyDeadlineMs
-        val colibri = Gateways.colibriAllowanceMs
         val lightClient = Gateways.lightClientAllowanceMs
         val share = Gateways.reverifyLightClientShareMs
         val finished = java.util.concurrent.CountDownLatch(1)
         Gateways.reverifyDeadlineMs = 100
         Gateways.reverifyLightClientShareMs = 200
-        Gateways.colibriAllowanceMs = { _, _ -> 0 }
         Gateways.lightClientAllowanceMs = { _, _, _ -> 20_000 } // a stalled engine's whole budget
         try {
             withLookup({ name ->
@@ -469,7 +411,6 @@ class GatewaysTest {
         } finally {
             Gateways.reverifyDeadlineMs = deadline
             Gateways.reverifyLightClientShareMs = share
-            Gateways.colibriAllowanceMs = colibri
             Gateways.lightClientAllowanceMs = lightClient
         }
     }

@@ -409,8 +409,8 @@
         <item quantity="one">%d chain</item>
         <item quantity="other">%d chains</item>
     </plurals>
-    <string name="settings_page_names_colibri_on">Colibri proofs on</string>
-    <string name="settings_page_names_colibri_off">Colibri proofs off</string>
+    <string name="settings_page_names_colibri_on">Colibri chain-read proofs on</string>
+    <string name="settings_page_names_colibri_off">Colibri chain-read proofs off</string>
     <!-- %1$s and %2$s: settings_page_nodes_embedded or settings_external; %3$s: the Radicle node's state. -->
     <string name="settings_page_nodes_summary">Swarm: %1$s · IPFS: %2$s · Radicle: %3$s</string>
     <string name="settings_page_nodes_embedded">embedded</string>

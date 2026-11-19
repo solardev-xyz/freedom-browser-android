@@ -8,8 +8,8 @@
 # [out dir] defaults to swarmnode/src/main/jniLibs (gitignored), where the
 # swarmnode CMake step links libfreedom_colibri.so (the JNI shim,
 # swarmnode/src/main/cpp/colibri_jni.c) against it and Gradle packages it.
-# Without it the app still builds and runs: name resolution skips the
-# Colibri tier and starts at the RPC quorum (see README § Colibri).
+# Without it the app still builds and runs: chain reads skip the Colibri
+# tier and start at the RPC quorum (see README § Colibri).
 #
 # The C core does no I/O of its own: the app runs every HTTP request it
 # asks for (EnsColibri.kt), so no curl, no CLI, no server. The build's

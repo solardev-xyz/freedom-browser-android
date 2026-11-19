@@ -2,9 +2,10 @@ package baby.freedom.mobile.chains.rpc
 
 /**
  * The *Colibri proofs* switch (Settings → Name resolution) as this
- * process's chain-data router reads it ([ColibriChainSource]): the one
- * switch covers name lookups and the router's wallet and Swarm-node
- * reads, so turning it off sends nothing to the prover.
+ * process's chain-data router reads it ([ColibriChainSource]): it covers
+ * the router's wallet, Swarm-node and site reads, so turning it off sends
+ * nothing to the prover. Name lookups never go through Colibri (#529),
+ * whatever the switch says.
  *
  * The setting lives in the UI process's DataStore, which another process
  * can't watch, so it's pushed here: in the app process by `MainActivity`

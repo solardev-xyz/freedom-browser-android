@@ -46,7 +46,7 @@ class EnsPrivateCacheTest {
     }
 
     private fun resolver() = EnsResolver(
-        settings = { EnsResolver.Settings((1..3).map { "https://rpc$it.test/" }, colibri = false) },
+        settings = { EnsResolver.Settings((1..3).map { "https://rpc$it.test/" }) },
         http = http,
     )
 

@@ -703,10 +703,9 @@ class ChainDataRouter internal constructor(
          * The proof tiers (#329): the light client through this process's
          * binding to `:myotis` ([baby.freedom.mobile.node.MyotisLink]) and
          * the Colibri verifier. Colibri keeps its sync-committee state in
-         * `colibri` in the app's own process — the directory name
-         * resolution uses, since the verifier is set up once per process —
-         * and in `colibri-<process>` elsewhere (the Swarm node's `:node`),
-         * so two processes never write one directory.
+         * `colibri` in the app's own process and in `colibri-<process>`
+         * elsewhere (the Swarm node's `:node`), so two processes never
+         * write one directory.
          */
         internal fun verifiedSources(context: Context): Map<ChainSource, VerifiedChainSource> {
             val app = context.applicationContext

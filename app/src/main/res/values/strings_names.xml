@@ -208,9 +208,9 @@
     <!-- browser/NameResolutionSettings.kt -->
     <string name="names_section_ens">Name resolution</string>
     <string name="names_section_rpc">RPC providers</string>
-    <string name="names_ens_about">How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With Colibri proofs on, an answer is proven first: checked on this device against Ethereum\'s own consensus. An answer that can\'t be proven is cross-checked: it\'s only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads.</string>
+    <string name="names_ens_about">How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With the P2P light client running, an answer is proven first: checked on this device against Ethereum\'s own consensus. An answer it can\'t give is cross-checked: it\'s only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads.</string>
     <string name="names_colibri_title">Colibri proofs</string>
-    <string name="names_colibri_help">Each name\'s record is proven by corpus.core\'s Colibri prover (colibri-proof.tech) and the proof checked on this device against Ethereum\'s sync committee, so no server can make up the answer. The prover learns which contract storage a lookup reads; the reads themselves go to the endpoints in the resolution order. If no proof comes back within a few seconds, the endpoints are cross-checked instead. The wallet\'s and the Swarm node\'s Ethereum and Gnosis reads (balances, token balances, nonces, receipts), and the reads sites make through window.ethereum and web3:// (every contract call and balance a dapp asks for), are proven the same way, each against its own chain\'s sync committee, when the P2P light client isn\'t answering them, so the prover also learns the addresses and contracts they read. Off: nothing goes to the prover; every name and read is cross-checked on the RPCs.</string>
+    <string name="names_colibri_help">When the P2P light client isn\'t answering them, the wallet\'s and the Swarm node\'s Ethereum and Gnosis reads, and the reads sites make through window.ethereum and web3://, go to corpus.core\'s Colibri prover (colibri-proof.tech), and its proof is checked on this device against each chain\'s own sync committee. The prover learns the addresses and contracts they read. That proves an account\'s balance and nonce at the latest block. It doesn\'t yet prove a contract call (a token balance, most of what a dapp reads): Colibri runs it on code it doesn\'t check, so a server could make up the answer. Nor a transaction receipt, which isn\'t matched to the transaction asked for, or a read at an earlier block, which isn\'t tied to the proven latest one. Names aren\'t proven this way either: a name lookup is a contract call, so names are cross-checked on the RPCs instead. Off: nothing goes to the prover; every read is cross-checked on the RPCs.</string>
     <string name="names_order_title">Resolution order</string>
     <string name="names_order_help">The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can\'t agree or don\'t answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers.</string>
     <string name="names_ccip_title">Off-chain lookups (CCIP-Read)</string>
@@ -228,21 +228,12 @@
         <item quantity="one">The %1$d endpoints that are on come from only %2$d provider, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
         <item quantity="other">The %1$d endpoints that are on come from only %2$d different providers, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
     </plurals>
-    <plurals name="names_too_few_providers_colibri">
-        <item quantity="one">The %1$d endpoints that are on come from only %2$d provider, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
-        <item quantity="other">The %1$d endpoints that are on come from only %2$d different providers, and a provider\'s answer counts once. Cross-checking needs %3$d different providers (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
-    </plurals>
     <!-- %1$d: endpoints needed -->
     <string name="names_one_endpoint">Only one endpoint is on, so answers can\'t be cross-checked: you\'ll be asked before each name loads. Turn on %1$d or more to cross-check.</string>
-    <string name="names_one_endpoint_colibri">Only one endpoint is on, so an answer Colibri can\'t prove can\'t be cross-checked: you\'ll be asked before that name loads. Turn on %1$d or more to cross-check.</string>
     <!-- %1$d: endpoints on (the plural's count), %2$d: endpoints needed -->
     <plurals name="names_too_few_endpoints">
         <item quantity="one">Only %1$d endpoint is on. Cross-checking needs %2$d (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
         <item quantity="other">Only %1$d endpoints are on. Cross-checking needs %2$d (to agree on a block), so answers aren\'t cross-checked: you\'ll be asked before each name loads.</item>
-    </plurals>
-    <plurals name="names_too_few_endpoints_colibri">
-        <item quantity="one">Only %1$d endpoint is on. Cross-checking needs %2$d (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
-        <item quantity="other">Only %1$d endpoints are on. Cross-checking needs %2$d (to agree on a block), so an answer Colibri can\'t prove isn\'t cross-checked: you\'ll be asked before that name loads.</item>
     </plurals>
     <string name="names_on">On</string>
     <string name="names_off">Off</string>
@@ -315,16 +306,9 @@
     <!-- Where a record was read, as %…$s in the summaries below. %1$s: block number -->
     <string name="names_trust_at_block">block #%1$s</string>
     <string name="names_trust_at_latest_block">the latest block</string>
-    <!-- Between provers' hosts, as in "a and b". -->
-    <string name="names_trust_prover_separator">" and "</string>
-    <string name="names_trust_colibri_prover">the Colibri prover</string>
     <string name="names_trust_one_rpc_server">one RPC server</string>
     <!-- What a page's name answer's trust means. %1$s: ENS/WNS/GNS/Tezos Domains, %2$s: the name, %3$s: names_trust_at_* -->
     <string name="names_summary_light_client">The Myotis light client on this device read the %1$s record for %2$s at %3$s and checked it against Ethereum state proofs signed off by the chain\'s sync committee. No RPC server\'s word was involved.</string>
-    <!-- %1$s: the name, %2$s: its system, %3$s: the prover, %4$s: names_trust_at_* -->
-    <string name="names_summary_proven_offchain">%1$s\'s %2$s record comes from an off-chain gateway (CCIP-Read). This device checked a proof from %3$s against Ethereum\'s sync committee that the name\'s resolver contract accepted that answer at %4$s; the record itself isn\'t on chain.</string>
-    <!-- %1$s: the prover, %2$s: the name, %3$s: its system, %4$s: names_trust_at_* -->
-    <string name="names_summary_proven">This device checked a proof from %1$s against Ethereum\'s sync committee: %2$s\'s %3$s record is what the chain itself holds at %4$s, not just what RPC servers agree on.</string>
     <!-- %1$d: servers (the plural's count, 2 or more), %2$s: system, %3$s: name, %4$s: names_trust_at_* -->
     <plurals name="names_summary_verified">
         <item quantity="one">%1$d independent RPC server returned the same %2$s record for %3$s at %4$s.</item>
@@ -335,10 +319,6 @@
     <string name="names_summary_unverified">Only %1$s answered for %2$s, so its %3$s record wasn\'t checked against another server. A single misbehaving server could have picked where this page comes from.</string>
     <!-- The same, for a send's recipient. %1$s: name, %2$s: system, %3$s: names_trust_at_* -->
     <string name="names_recipient_light_client">The Myotis light client on this device read %1$s\'s %2$s address record at %3$s and checked it against Ethereum state proofs signed off by the chain\'s sync committee. No RPC server\'s word was involved.</string>
-    <!-- %1$s: name, %2$s: the prover, %3$s: names_trust_at_* -->
-    <string name="names_recipient_proven_offchain">%1$s\'s address comes from an off-chain gateway (CCIP-Read). This device checked a proof from %2$s against Ethereum\'s sync committee that the name\'s resolver contract accepted that answer at %3$s; the record itself isn\'t on chain.</string>
-    <!-- %1$s: the prover, %2$s: name, %3$s: system, %4$s: names_trust_at_* -->
-    <string name="names_recipient_proven">This device checked a proof from %1$s against Ethereum\'s sync committee: this is the address %2$s\'s %3$s record holds at %4$s, not just what RPC servers agree on.</string>
     <!-- %1$d: servers (the plural's count, 2 or more), %2$s: name, %3$s: names_trust_at_* -->
     <plurals name="names_recipient_verified">
         <item quantity="one">%1$d independent RPC server returned the same address for %2$s at %3$s.</item>
@@ -353,7 +333,6 @@
     <string name="names_fact_block">Block</string>
     <string name="names_fact_block_latest">latest</string>
     <string name="names_fact_verified_by">Verified by</string>
-    <string name="names_fact_proof_from">Proof from</string>
     <!-- %1$d: how many servers -->
     <string name="names_fact_agreed">Agreed (%1$d)</string>
     <string name="names_fact_answered_by">Answered by</string>
