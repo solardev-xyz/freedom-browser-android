@@ -32,7 +32,7 @@ import org.json.JSONObject
  * it was granted:
  *
  *  - none: `swarm_getCapabilities`, and the reads of public Swarm data —
- *    `swarm_readFeedEntry`, `swarm_readChunk`,
+ *    `swarm_readFeedEntry`, `swarm_readChunk`, `swarm_readData`,
  *    `swarm_readSingleOwnerChunk` — plus `swarm_listFeeds` (the site's
  *    own feed records). Reads are rate-limited per origin (desktop's
  *    budgets: more for a connected site).
@@ -292,6 +292,7 @@ class SwarmProvider(
             "swarm_requestAccess" -> requestAccess(origin, ask)
             "swarm_getCapabilities" -> Reply.Ok(capabilities(origin))
             "swarm_readChunk" -> readChunk(origin, params)
+            "swarm_readData" -> readData(origin, params)
             "swarm_readSingleOwnerChunk" -> readSoc(origin, params)
             "swarm_readFeedEntry" -> readFeedEntry(origin, params)
             "swarm_listFeeds" -> listFeeds(origin)
@@ -1080,6 +1081,70 @@ class SwarmProvider(
         )
     }
 
+    /**
+     * desktop's `handleReadData` (#538, desktop #722): a whole blob, as
+     * `swarm_publishData` or `/bytes` uploaded it, by its root reference,
+     * joined by the node (`GET /bytes`), which checks every chunk and
+     * recovers erasure-coded content. No grant; one request against the
+     * read budget whatever the size. The root chunk is read and checked
+     * first and charged as soon as it's read; the blob's size comes from
+     * its span, redundancy level cleared. A blob past the window's whole
+     * byte budget is `data_too_large` before the join; a blob that fits the
+     * root chunk is its payload, with no join; a larger one has the rest of
+     * its size reserved first (`rate_limited` if it doesn't fit what is left
+     * of the window, so parallel reads can't together pass it), and the join
+     * is held to that size. A reservation stands if the join fails. Only
+     * 32-byte references: an encrypted one is `invalid_reference`.
+     */
+    private suspend fun readData(origin: String, params: JSONObject): Reply {
+        emptyOptions(params)
+        val reference = hex32(params.opt("reference"), "invalid_reference", "reference")
+        spendBudget(origin, requests = 1)
+        reachableOrFail()
+        val raw = chunk(reference) ?: return invalid("Data not found: ${reference.swarmHex()}", "chunk_not_found")
+        // The root came off the network: it's paid for whatever happens next.
+        val rootRefusal = chargeBudget(origin, bytes = raw.size.toLong())
+        val root = SwarmChunks.parseCac(reference, raw)
+            ?: return invalid("Downloaded bytes do not validate as the requested content-addressed chunk", "chunk_type_mismatch")
+        val size = dataSize(root.spanValue)
+        val maxBytes = readMaxBytes(origin)
+        if (size > maxBytes.toULong()) {
+            return invalid(
+                "Data exceeds the maximum read size of $maxBytes bytes", "data_too_large",
+                JSONObject().put("limit", maxBytes).put("actual", spanJson(size)),
+            )
+        }
+        rootRefusal?.let { return it }
+        val expected = size.toInt()
+        val data = if (size <= SwarmChunks.MAX_PAYLOAD.toULong()) {
+            // Held to the span: the root's payload is the whole blob, already checked.
+            if (root.payload.size < expected) {
+                return Reply.Err(INTERNAL, "Node returned ${root.payload.size} bytes for a $expected-byte blob")
+            }
+            root.payload.copyOf(expected)
+        } else {
+            if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
+            val answer = try {
+                withContext(io) {
+                    node.request("GET", "/bytes/${reference.swarmHex()}", emptyMap(), null, READ_TIMEOUT_MS, maxBytes = expected)
+                }
+            } catch (e: Http.AnswerTooLarge) {
+                return Reply.Err(INTERNAL, "Node returned more than $expected bytes for a $expected-byte blob")
+            }
+            if (answer.status == 404) return invalid("Data not found: ${reference.swarmHex()}", "chunk_not_found")
+            if (!answer.ok) return Reply.Err(INTERNAL, "Data can't be read: ${answer.message()}")
+            if (answer.body.size != expected) {
+                return Reply.Err(INTERNAL, "Node returned ${answer.body.size} bytes for a $expected-byte blob")
+            }
+            answer.body
+        }
+        return Reply.Ok(
+            JSONObject()
+                .put("data", Base64.getEncoder().encodeToString(data))
+                .put("encoding", "base64"),
+        )
+    }
+
     private suspend fun readSoc(origin: String, params: JSONObject): Reply {
         emptyOptions(params)
         fun given(key: String) = params.opt(key).let { it != null && it != JSONObject.NULL }
@@ -1554,6 +1619,7 @@ class SwarmProvider(
             "swarm_listFeeds",
             "swarm_publishChunk",
             "swarm_readChunk",
+            "swarm_readData",
             "swarm_writeSingleOwnerChunk",
             "swarm_readSingleOwnerChunk",
             "swarm_getSigningIdentity",

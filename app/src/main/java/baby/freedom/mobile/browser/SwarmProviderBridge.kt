@@ -1353,7 +1353,7 @@ internal fun swarmProviderJs(channel: String): String {
   var LONG = { swarm_publishData: 1, swarm_publishFiles: 1, swarm_publishChunk: 1, swarm_createFeed: 1,
     swarm_updateFeed: 1, swarm_writeFeedEntry: 1, swarm_writeSingleOwnerChunk: 1, swarm_getSigningIdentity: 1,
     swarm_requestAccess: 1, swarm_sendPss: 1, swarm_sendGsoc: 1, swarm_getMessagingIdentity: 1,
-    swarm_subscribe: 1 };
+    swarm_subscribe: 1, swarm_readData: 1 };
   port.addEventListener('message', function (ev) {
     var msg;
     try { msg = parse(ev.data); } catch (e) { return; }
@@ -1436,6 +1436,7 @@ internal fun swarmProviderJs(channel: String): String {
     listFeeds: method('swarm_listFeeds'),
     publishChunk: method('swarm_publishChunk'),
     readChunk: method('swarm_readChunk'),
+    readData: method('swarm_readData'),
     writeSingleOwnerChunk: method('swarm_writeSingleOwnerChunk'),
     readSingleOwnerChunk: method('swarm_readSingleOwnerChunk'),
     getSigningIdentity: method('swarm_getSigningIdentity'),
