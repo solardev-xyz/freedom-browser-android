@@ -190,11 +190,17 @@ class SettingsPagesTest {
             groups("gnosis"),
         )
         assertEquals(listOf(SettingsPage.Privacy to listOf(SettingsSection.Tor)), groups("orbot"))
-        // IPFS, once behind "Show advanced options", is found without it.
+        // IPFS, once behind "Show advanced options", is found without it;
+        // so is "Always open without gateway" (#537), which opens pages
+        // straight from IPFS.
         assertEquals(
-            listOf(SettingsPage.Nodes to listOf(SettingsSection.Nodes, SettingsSection.Ipfs)),
+            listOf(
+                SettingsPage.Names to listOf(SettingsSection.Ens),
+                SettingsPage.Nodes to listOf(SettingsSection.Nodes, SettingsSection.Ipfs),
+            ),
             groups("ipfs"),
         )
+        assertEquals(listOf(SettingsPage.Names to listOf(SettingsSection.Ens)), groups("eth.limo"))
         assertEquals(listOf(SettingsPage.Names to listOf(SettingsSection.Ens)), groups("colibri"))
         // #548: the switch's plain name, and the technical words now only
         // under its Advanced fold, both still find it.

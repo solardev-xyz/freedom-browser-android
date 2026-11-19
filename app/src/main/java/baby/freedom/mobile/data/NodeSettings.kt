@@ -833,7 +833,24 @@ class NodeSettings private constructor(
         store.edit { it[Keys.ASK_WHERE_TO_SAVE] = enabled }
     }
 
+    /**
+     * *Always open without gateway* (#537): a page on an ENS/Swarm gateway
+     * (`vitalik.eth.limo`, `<name>.bzz.link`, …) that has a native version
+     * opens that `ipfs://` / `bzz://` address instead
+     * ([baby.freedom.mobile.browser.GatewayOffer]).
+     * Off by default, like desktop's `openWithoutGateway`: without it the
+     * address bar only offers the native version.
+     */
+    val openWithoutGateway: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.OPEN_WITHOUT_GATEWAY] ?: false
+    }
+
+    suspend fun setOpenWithoutGateway(enabled: Boolean) {
+        store.edit { it[Keys.OPEN_WITHOUT_GATEWAY] = enabled }
+    }
+
     private object Keys {
+        val OPEN_WITHOUT_GATEWAY = booleanPreferencesKey("open_without_gateway")
         val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
         /** The engine id *Search suggestions* was turned on for (see [searchSuggestions]). */
         val SEARCH_SUGGESTIONS_ENGINE = stringPreferencesKey("search_suggestions_engine")

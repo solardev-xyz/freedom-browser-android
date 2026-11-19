@@ -316,6 +316,7 @@ internal fun SettingsScreen(
     val appUpdate by AppUpdates.state.collectAsState()
     val checkForUpdates by settings.checkForUpdates.collectAsState(initial = true)
     val askWhereToSave by settings.askWhereToSave.collectAsState(initial = false)
+    val openWithoutGateway by settings.openWithoutGateway.collectAsState(initial = false)
     // Language (#280): only on Android 13+ and once there is more than one.
     val appLanguage = rememberAppLanguage()
     val defaultBrowser = rememberDefaultBrowserState()
@@ -336,7 +337,7 @@ internal fun SettingsScreen(
             adblockSectionRows(adblockCategories, adblockAllowlist, adblockStatus, adblockUpdate),
         SettingsSection.Wallet to walletSettingsRows(walletState),
         SettingsSection.Chains to chainSettingsRows(chains) { readAssurance(it, chainRouter) },
-        SettingsSection.Ens to ensSectionRows(ensRpcConfig),
+        SettingsSection.Ens to ensSectionRows(ensRpcConfig, openWithoutGateway),
         SettingsSection.Rpc to rpcSectionRows(ensRpcConfig),
         SettingsSection.Nodes to
             nodeRows(externalSwarm, externalIpfs) + swarmCacheSizeRow(swarmCacheSize) + radicleSettingsRow(radicle),
@@ -483,6 +484,7 @@ internal fun SettingsScreen(
             visible = visible,
             config = ensRpcConfig,
             settings = settings,
+            openWithoutGateway = openWithoutGateway,
             // Only among search results, not on the Name resolution page.
             query = if (searching && page == null) query else "",
         )

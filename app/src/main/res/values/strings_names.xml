@@ -218,6 +218,12 @@
     <string name="names_order_help">The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can\'t agree or don\'t answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers.</string>
     <string name="names_ccip_title">Off-chain lookups (CCIP-Read)</string>
     <string name="names_ccip_help">Some names (base.eth and cb.id subnames, NameStone names) are answered by a gateway their resolver names. The gateway sees the name you look up. Off: those names don\'t resolve.</string>
+    <!-- "Always open without gateway" (#537): the switch, and the pill over the address bar on a gateway page -->
+    <string name="names_open_without_gateway_title">Always open without gateway</string>
+    <string name="names_open_without_gateway_help">A page on a public gateway (name.eth.limo, name.eth.link, name.bzz.link) opens straight from IPFS or Swarm instead, checked like a name you type. Off: the address bar only offers it.</string>
+    <string name="gateway_offer_open">Open without gateway</string>
+    <!-- %1$s: the native address, e.g. ipfs://vitalik.eth/ -->
+    <string name="gateway_offer_open_described">Open without gateway: %1$s</string>
     <string name="names_custom_title">Your endpoints</string>
     <string name="names_custom_help">First in the resolution order, as listed here. These are Ethereum\'s own RPCs (Settings → Wallet &amp; chains → Ethereum), so every mainnet read uses them too.</string>
     <string name="names_add_endpoint">Add endpoint</string>

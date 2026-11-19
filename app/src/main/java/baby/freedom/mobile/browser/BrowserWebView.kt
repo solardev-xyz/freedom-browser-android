@@ -3258,6 +3258,10 @@ private fun buildRefreshableWebView(
                 // later load of that address (#419).
                 state.typedAddress = typedAddressAfterCommit(state.typedAddress, url)
                 mainFrameChain.committed()
+                // "Open without gateway" (#537): a gateway page's native
+                // version, worked out for this document. A Back / Forward
+                // the chrome asked for is never redirected by "always".
+                state.gatewayOffer.committed(url, traversal = (view as? PageWebView)?.historyStepPending == true)
                 (view as? PageWebView)?.historyStepCommitted()
                 // A Hard reload's load committed: its finish ends the
                 // cache bypass (#262).
@@ -3774,6 +3778,7 @@ private fun buildRefreshableWebView(
             // and this doesn't install it (see [requestBottomUiProbe]).
             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                 committedPageUrl = url
+                state.gatewayOffer.located(url)
                 // A fragment navigation's finish, right behind this, isn't a
                 // Hard-reloaded document's end (#262 R3-M1).
                 (view as? PageWebView)?.cacheBypass?.historyUpdated(url)
@@ -5692,6 +5697,9 @@ internal class PageWebView(context: Context) : WebView(context) {
     /** The index [pendingHistoryStep] was headed for, if it set out from [currentIndex]. */
     fun historyStepTarget(currentIndex: Int): Int? =
         pendingHistoryStep?.takeIf { it.first == currentIndex }?.second
+
+    /** The chrome's Back / Forward is what is committing now ([pendingHistoryStep]). */
+    val historyStepPending: Boolean get() = pendingHistoryStep != null
 
     /** A document committed: no history step in flight. */
     fun historyStepCommitted() {
