@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import baby.freedom.mobile.R
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.swarm.NodeInfo
@@ -136,6 +137,32 @@ internal object ActPublicKey {
         }
     }
 
+    /**
+     * Keeps [source]'s key read for the page, handing each answer to
+     * [publish]: only while [lifecycle] is in the foreground (#472),
+     * asking again (backing off) while the node has no key to give, and
+     * once a key is read, once more on each return to the foreground.
+     * An external endpoint is known only by its URL, so the node behind
+     * it can be replaced or re-keyed while the page stays open; that
+     * read on return shows and copies the new node's key rather than
+     * the old one. A re-read that gets no answer keeps the key already
+     * read (a passing outage shouldn't blank it) and asks again, backing
+     * off, until the node answers. Never returns while the lifecycle
+     * lives: cancel the calling coroutine to end it.
+     */
+    suspend fun keepRead(
+        lifecycle: Lifecycle,
+        source: Source,
+        fetch: suspend (Source) -> String?,
+        publish: (Read) -> Unit,
+    ) {
+        lifecycle.pollWhileStartedBackingOff(RETRY_MS, RETRY_MAX_MS) {
+            val key = fetch(source) ?: return@pollWhileStartedBackingOff true
+            publish(Read(source, key))
+            false
+        }
+    }
+
     fun copy(context: Context, key: String) {
         val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
         clipboard.setPrimaryClip(ClipData.newPlainText(Strings.get(R.string.node_act_key_clip_label), key))
@@ -156,22 +183,16 @@ internal object ActPublicKey {
 /**
  * The ACT public key of the node [source] names, for the Swarm node
  * page: read while the page is on screen, asked again (5 s, then
- * backing off to a minute) until the node answers with one, then kept
- * until the source changes. A node switched on is a new source, read at
- * once. Null reads Unknown.
+ * backing off to a minute) until the node answers with one, then read
+ * once more on each return to the foreground ([ActPublicKey.keepRead]).
+ * A node switched on is a new source, read at once. Null reads Unknown.
  */
 @Composable
 internal fun rememberActPublicKey(source: ActPublicKey.Source?): String? {
     val lifecycle = currentLifecycle()
     val read by produceState<ActPublicKey.Read?>(null, source, lifecycle) {
         if (source == null) return@produceState
-        // Only while the app is in the foreground (#472), backing off
-        // while the node has no key to give, and not at all once read.
-        lifecycle.pollWhileStartedBackingOff(ActPublicKey.RETRY_MS, ActPublicKey.RETRY_MAX_MS) {
-            if (value?.source == source) return@pollWhileStartedBackingOff false
-            ActPublicKey.fetch(source)?.let { value = ActPublicKey.Read(source, it) }
-            value?.source != source
-        }
+        ActPublicKey.keepRead(lifecycle, source, ActPublicKey::fetch) { value = it }
     }
     return ActPublicKey.shown(read, source)
 }
