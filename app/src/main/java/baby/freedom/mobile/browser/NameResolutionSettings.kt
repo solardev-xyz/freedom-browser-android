@@ -37,6 +37,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -149,6 +150,21 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
     settingsRow("ccip", ROW_CCIP, onOff(config.ccipRead), CCIP_HELP, "EIP-3668"),
 )
 
+/**
+ * Whether a Settings search for [query] should open the Proof check
+ * switch's Advanced fold: the query is found only in the text under it
+ * ("colibri", "sync committee"), not in what the switch row shows. The
+ * fold starts collapsed, so without this the row is listed as a match
+ * while none of the matched words are on screen (#548).
+ */
+internal fun colibriAdvancedOpensFor(query: String, colibriOn: Boolean): Boolean {
+    val q = query.trim()
+    if (q.isEmpty()) return false
+    val shown = listOf(ROW_COLIBRI, onOff(colibriOn), COLIBRI_HELP)
+    return COLIBRI_ADVANCED.contains(q, ignoreCase = true) &&
+        shown.none { it.contains(q, ignoreCase = true) }
+}
+
 private fun onOff(on: Boolean): String = Strings.get(if (on) R.string.names_on else R.string.names_off)
 
 private fun keyedSubtitle(config: EnsRpcConfig, provider: KeyedRpcProvider): String =
@@ -183,6 +199,7 @@ internal fun NameResolutionSection(
     visible: Set<Any>,
     config: EnsRpcConfig,
     settings: NodeSettings,
+    query: String = "",
 ) {
     val scope = rememberCoroutineScope()
     SectionCard(title = SECTION_ENS) {
@@ -223,11 +240,18 @@ internal fun NameResolutionSection(
                 enabled = true,
                 onCheckedChange = { on -> scope.launch { settings.setEnsColibri(on) } },
             )
-            // Lined up with the switch row's title, past its icon column.
-            DetailsExpander(
-                title = stringResource(R.string.names_advanced),
-                modifier = Modifier.padding(start = 48.dp, end = 12.dp),
-            ) { HelpText(COLIBRI_ADVANCED) }
+            // Opened by a search that matched only the text under it, so
+            // the words it was found by are on screen; keyed so that
+            // state is its own and clearing the query folds it again.
+            val searchOpens = colibriAdvancedOpensFor(query, config.colibri)
+            key(searchOpens) {
+                // Lined up with the switch row's title, past its icon column.
+                DetailsExpander(
+                    title = stringResource(R.string.names_advanced),
+                    initiallyExpanded = searchOpens,
+                    modifier = Modifier.padding(start = 48.dp, end = 12.dp),
+                ) { HelpText(COLIBRI_ADVANCED) }
+            }
         }
         if ("ccip" in visible) {
             if ("about" in visible || "order" in visible || "colibri" in visible) Spacer(Modifier.height(12.dp))

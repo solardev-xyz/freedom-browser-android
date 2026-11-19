@@ -59,6 +59,38 @@ class NetworkSourceCopyTest {
     }
 
     @Test
+    fun `the visible Proof check help says what it never proves`() {
+        val help = Strings.get(R.string.names_colibri_help)
+        // Not only under the fold (#563 R1-F3): a contract call, a read at
+        // an earlier block and a name are cross-checked, never proven.
+        for (fact in listOf("Contract calls", "earlier block", "names", "cross-checked")) {
+            assertTrue(help, fact in help)
+        }
+    }
+
+    @Test
+    fun `the wallet's trust explanation names the sources as the trust line does`() {
+        val explain = Strings.get(R.string.wallet_assets_trust_explain)
+        for (source in listOf(ChainSource.MYOTIS, ChainSource.COLIBRI)) {
+            val line = Strings.get(R.string.wallet_accounts_trust_verified_source, source.label)
+            assertTrue(explain, line in explain)
+        }
+        assertFalse(explain, Regex("light client|P2P|prover|Colibri").containsMatchIn(explain))
+    }
+
+    @Test
+    fun `a search found only under the Advanced fold opens it`() {
+        for (q in listOf("colibri", "Sync Committee", "colibri-proof.tech")) {
+            assertTrue(q, colibriAdvancedOpensFor(q, colibriOn = true))
+        }
+        // Blank, or found in what the switch row already shows: stays folded.
+        for (q in listOf("", "  ", "proof check", "learns the addresses", "on", "name resolution")) {
+            assertFalse(q, colibriAdvancedOpensFor(q, colibriOn = true))
+        }
+        assertFalse(colibriAdvancedOpensFor("off", colibriOn = false))
+    }
+
+    @Test
     fun `name resolution's intro and the chain list's statuses use plain words`() {
         val about = Strings.get(R.string.names_ens_about)
         assertFalse(about, Regex("light client|P2P|\\bRPC\\b|endpoint").containsMatchIn(about))
