@@ -1404,6 +1404,13 @@ fun BrowserWebViewHost(
                             // the new one commits (#185 R4-F1).
                             val keepsPage = tab.takePutBackKeepsPage()
                             if (!keepsPage) wv.stopLoading()
+                            // That stop isn't the user's for the chrome's
+                            // Back / Forward: the step is still on its way,
+                            // and no gateway answer redirects over it
+                            // (#537 R1-F1).
+                            if (pending == HISTORY_BACK_JS || pending == HISTORY_FORWARD_JS) {
+                                tab.gatewayOffer.historyStep()
+                            }
                             // The user's submit scheduled this very load?
                             // Then its redirects may end in an app link
                             // (#173) — this load's, no other's.
@@ -3002,6 +3009,9 @@ private fun buildRefreshableWebView(
             userNamedChain.ended()
             // A 402 whose page never commits isn't paid for later (#218 R2-M2).
             X402Payments.onNavigationSuperseded(state)
+            // Nor does "always open without gateway" send the page the
+            // user stopped anywhere; its pill stays (#537 R1-F1).
+            state.gatewayOffer.stopped()
         }
 
         // Whether this WebView has started a document yet. A popup
@@ -3087,6 +3097,8 @@ private fun buildRefreshableWebView(
                 // load's, whatever the answer's headers suggested.
                 state.mainFrameKeptPage()
                 adblockPage.kept()
+                // Its gateway offer too (#537 R1-M1).
+                state.gatewayOffer.stayed()
                 // Nor does a Hard reload that became a file: its cache
                 // bypass ends here, or it spills into the page's next
                 // navigation and its subresources (#262, R5-M1).
@@ -3565,6 +3577,9 @@ private fun buildRefreshableWebView(
                 (view as? PageWebView)?.usersNavigation?.loadFinished(url, committedPageUrl)
                 // A 402 whose load ended without committing (#218 R2-M2).
                 X402Payments.onLoadFinished(state, url)
+                // A link off a gateway page that ended without a commit
+                // (a 204): the page keeps its offer (#537 R1-M1).
+                state.gatewayOffer.loadFinished(url)
                 // Re-probe: a page's own stylesheet (or its first
                 // script) can be what sets `touch-action: none`, and
                 // that is not necessarily in place at first paint (#56).
@@ -3816,9 +3831,6 @@ private fun buildRefreshableWebView(
                 // Scriptlets for the page it's heading to (#318), before a
                 // service worker can answer it unseen by the interceptor.
                 if (request.isForMainFrame) scriptlets?.ensure(target)
-                // A link the page follows: a gateway lookup still out for
-                // it answers for nothing now (#537).
-                if (request.isForMainFrame && !request.isRedirect) state.gatewayOffer.loadStarted()
                 // Before the navigation starts, in any frame, redirect hops
                 // included (#524 R1-F1): WebAuthn off for a document on
                 // this device ([PasskeyGate]).
@@ -3910,6 +3922,7 @@ private fun buildRefreshableWebView(
                         pendingNavigationUrls.clear()
                         state.mainFrameKeptPage()
                         adblockPage.kept()
+                        state.gatewayOffer.stayed()
                         // A Hard reload handed to another app commits
                         // nothing either: its cache bypass ends (R5-M1).
                         (view as? PageWebView)?.cacheBypass?.stopped()
@@ -4045,6 +4058,10 @@ private fun buildRefreshableWebView(
                 if (request.isForMainFrame && view is PageWebView) {
                     view.documents.navigationStarted(target)
                 }
+                // A link the page follows: a gateway lookup still out
+                // never redirects over it, and is held for the page on
+                // screen in case the link never commits (#537 R1-M1).
+                if (request.isForMainFrame && !request.isRedirect) state.gatewayOffer.linkFollowed()
                 // A new top-level navigation supersedes whatever was
                 // pending, which may never report back (an ERR_ABORTED
                 // fetch sends nothing): drop it, or a service worker's

@@ -1,13 +1,18 @@
 package baby.freedom.mobile.browser
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,6 +53,9 @@ import kotlinx.coroutines.delay
  * is dropped ([protectedPress]), re-armed for each new offer
  * ([offerKey]). Unlike [rememberArmedTapGuard] it doesn't hide other
  * apps' overlays: it is up for as long as a gateway page is.
+ *
+ * The × beside it ([onDismiss]) closes it for the page, which it may
+ * otherwise cover for good on a page that never scrolls (R1-M4).
  */
 @Composable
 internal fun GatewayOfferPill(
@@ -56,6 +64,8 @@ internal fun GatewayOfferPill(
     /** The offer the pill is for: a new one re-arms the tap guard. */
     offerKey: Any?,
     onOpen: () -> Unit,
+    /** Closes the pill for this page (R1-M4): it may cover the page's own controls. */
+    onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val described = stringResource(R.string.gateway_offer_open_described, destination)
@@ -66,38 +76,67 @@ internal fun GatewayOfferPill(
         while (!tap.guard.accepts()) delay(tap.guard.remainingMs().coerceAtLeast(1))
         tap.armed = true
     }
-    Surface(
-        onClick = onOpen,
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        shadowElevation = 2.dp,
-        modifier = modifier
-            .restartsTapGuard(tap.guard)
-            .protectedPress(tap)
-            .heightIn(min = 48.dp)
-            .testTag("gateway-offer-pill")
-            .semantics {
-                role = Role.Button
-                contentDescription = described
-            },
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Surface(
+            onClick = onOpen,
+            shape = RoundedCornerShape(50),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            shadowElevation = 2.dp,
+            // Never squeezes the × out on a narrow screen or a large font.
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .restartsTapGuard(tap.guard)
+                .protectedPress(tap)
+                .heightIn(min = 48.dp)
+                .testTag("gateway-offer-pill")
+                .semantics {
+                    role = Role.Button
+                    contentDescription = described
+                },
         ) {
-            Image(
-                painter = painterResource(if (protocol == "bzz") R.drawable.ic_swarm else R.drawable.ic_ipfs),
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            // Read out through the pill's own description, which names the destination.
-            Text(
-                stringResource(R.string.gateway_offer_open),
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.clearAndSetSemantics {},
-            )
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Image(
+                    painter = painterResource(if (protocol == "bzz") R.drawable.ic_swarm else R.drawable.ic_ipfs),
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                // Read out through the pill's own description, which names the destination.
+                Text(
+                    stringResource(R.string.gateway_offer_open),
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.clearAndSetSemantics {},
+                )
+            }
+        }
+        Spacer(Modifier.width(4.dp))
+        // Closing only takes the pill down: no need to guard it. A 48 dp
+        // target, drawn as a small disc beside the pill.
+        Surface(
+            onClick = onDismiss,
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            shadowElevation = 2.dp,
+            modifier = Modifier
+                .size(48.dp)
+                .testTag("gateway-offer-dismiss")
+                .semantics { role = Role.Button },
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = stringResource(R.string.gateway_offer_dismiss),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
     }
 }

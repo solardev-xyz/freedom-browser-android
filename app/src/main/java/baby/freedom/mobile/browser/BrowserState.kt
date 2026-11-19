@@ -1201,6 +1201,8 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         blankOpenerOrigin = null
         userNavigated()
         cancelPendingProbe()
+        // A gateway answer still out never redirects over Home (#537 R1-F1).
+        gatewayOffer.loadStarted()
         capsuleCollapse.expand()
         override = null
         nameTrust = null

@@ -44,6 +44,7 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
@@ -1069,6 +1070,8 @@ fun BrowserScreen(
             BackAction.History -> {
                 // A navigation of its own (#94, see [BrowserState.loadGeneration]).
                 state.beginLoad()
+                // No gateway answer redirects over it (#537 R1-F1).
+                state.gatewayOffer.historyStep()
                 state.loadUrl(HISTORY_BACK_JS)
             }
             BackAction.Home -> {
@@ -1085,6 +1088,7 @@ fun BrowserScreen(
     val goForward: () -> Unit = {
         if (state.canGoForward) {
             state.beginLoad()
+            state.gatewayOffer.historyStep()
             state.loadUrl(HISTORY_FORWARD_JS)
         }
     }
@@ -2064,28 +2068,36 @@ fun BrowserScreen(
                     if (!tab.gatewayOffer.take(lookup)) continue
                     // One per tab: the next commit or load cancels it.
                     tab.gatewayOffer.running = scope.launch {
-                        val shape = lookup.shape
-                        val direct = GatewayOffer.offerWithoutLookup(shape)
-                        val result = if (direct != null || shape.ensName == null) {
-                            null
-                        } else {
-                            try {
-                                ensResolver.resolveContenthash(shape.ensName, tab.private)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
+                        try {
+                            val shape = lookup.shape
+                            val direct = GatewayOffer.offerWithoutLookup(shape)
+                            val result = if (direct != null || shape.ensName == null) {
                                 null
+                            } else {
+                                try {
+                                    ensResolver.resolveContenthash(shape.ensName, tab.private)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    null
+                                }
                             }
-                        }
-                        val found = direct ?: GatewayOffer.offerFor(shape, result)
-                        // A Swarm CID names its content itself; a name's
-                        // answer must have been cross-checked (#96).
-                        val verified = direct != null || (result as? EnsResult.Ok)?.trust?.verified == true
-                        val always = runCatching { NodeSettings.get(context).openWithoutGateway.first() }
-                            .getOrDefault(false)
-                        val verdict = tab.gatewayOffer.answered(lookup, found, verified, always)
-                        if (verdict is GatewayOfferTab.Verdict.AutoOpen && tab in tabs.tabs) {
-                            submit(tab, verdict.destination, SubmitSource.Renderer)
+                            val found = direct ?: GatewayOffer.offerFor(shape, result)
+                            // A Swarm CID names its content itself; a name's
+                            // answer must have been cross-checked (#96).
+                            val verified = direct != null || (result as? EnsResult.Ok)?.trust?.verified == true
+                            val always = runCatching { NodeSettings.get(context).openWithoutGateway.first() }
+                                .getOrDefault(false)
+                            val verdict = tab.gatewayOffer.answered(lookup, found, verified, always)
+                            if (verdict is GatewayOfferTab.Verdict.AutoOpen && tab in tabs.tabs) {
+                                submit(tab, verdict.destination, SubmitSource.Renderer)
+                            }
+                        } catch (e: CancellationException) {
+                            // Cancelled with this screen (an Activity
+                            // recreation) rather than by a later load:
+                            // the next screen runs it (R1-M6).
+                            tab.gatewayOffer.interrupted(lookup)
+                            throw e
                         }
                     }
                 }
@@ -2989,13 +3001,18 @@ fun BrowserScreen(
             visible = gatewayPillShown,
             enter = fadeIn(),
             exit = fadeOut(),
+            // Centred and capped like the capsule, the pill at its end:
+            // the address bar's right end on a wide screen too (R1-M3).
             modifier = Modifier
-                .align(Alignment.BottomEnd)
+                .align(Alignment.BottomCenter)
                 .windowInsetsPadding(chromeInsets)
                 .padding(horizontal = CapsuleSideMargin)
                 .animatedPadding(
                     bottom = { capsuleSlot() + CapsuleBottomMargin + IpfsStatusGap + popupLift },
-                ),
+                )
+                .widthIn(max = CHROME_MAX_WIDTH)
+                .fillMaxWidth()
+                .wrapContentWidth(Alignment.End),
         ) {
             // Keep drawing the last offer while it fades out.
             var shown by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -3011,6 +3028,9 @@ fun BrowserScreen(
                         // The page's current address, read at the tap.
                         state.gatewayOffer.destination()?.let { submit(state, it) }
                     },
+                    // Gone for this page: it may cover the page's own
+                    // controls, and folds away only on scroll (R1-M4).
+                    onDismiss = { state.gatewayOffer.dismissed() },
                     modifier = Modifier.onSizeChanged { gatewayPillHeightPx = it.height },
                 )
             }

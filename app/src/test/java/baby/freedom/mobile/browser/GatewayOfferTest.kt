@@ -321,8 +321,139 @@ class GatewayOfferTest {
     fun `a link the page follows while always looks the name up is not overridden`() {
         val tab = GatewayOfferTab()
         val lookup = tab.committed(limoUrl, traversal = false)!!
-        tab.loadStarted() // `shouldOverrideUrlLoading`: the user tapped a link
+        tab.linkFollowed() // `shouldOverrideUrlLoading`: the user tapped a link
         assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertNull(tab.offer)
+        // It commits: nothing comes back.
+        assertNull(tab.committed("https://example.com/", traversal = false))
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a link that never commits gives the page its lookup back`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertTrue(tab.take(lookup))
+        tab.linkFollowed()
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        tab.stayed() // the link became a download, or another app's
+        assertEquals(lookup, tab.pending)
+        assertTrue(tab.take(lookup))
+        assertEquals(
+            GatewayOfferTab.Verdict.AutoOpen("ipfs://vitalik.eth/blog"),
+            tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true),
+        )
+    }
+
+    @Test
+    fun `a link answered with a 204 ends at its finish, not the page's own`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.linkFollowed()
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false)
+        tab.loadFinished(limoUrl) // the page on screen's own load event
+        assertNull(tab.pending)
+        tab.loadFinished("https://vitalik.eth.limo/empty") // the 204
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        // Inferred from a finish: the pill, never a redirect.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertEquals("ipfs://vitalik.eth/blog", tab.destination())
+    }
+
+    @Test
+    fun `a superseded link's finish never lets a redirect over the next link`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.linkFollowed() // link A
+        tab.linkFollowed() // link B, a second tap
+        tab.loadFinished("https://vitalik.eth.limo/a") // A's synthetic finish
+        assertTrue(tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true) !is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `the chrome's Back is never redirected over`() {
+        // R1-F1: Back pressed right after the gateway page committed,
+        // its lookup answering before the step commits.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.historyStep()
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertNull(tab.committed("https://example.com/", traversal = true))
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a Back that stays in the document keeps the pill, with no redirect`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.historyStep()
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        tab.located("https://vitalik.eth.limo/") // a pushState entry
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertEquals("ipfs://vitalik.eth/", tab.destination())
+    }
+
+    @Test
+    fun `the user's Stop keeps the page, with its pill and no redirect`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.stopped()
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        // The next commit is redirected as usual.
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `a closed pill stays closed for the page, through pushState`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false)
+        tab.dismissed()
+        assertNull(tab.offer)
+        tab.located("https://vitalik.eth.limo/other")
+        assertNull(tab.destination())
+        // A late second answer for the same document doesn't bring it back.
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        // The next document gets its own.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit(limoUrl, traversal = true))
+    }
+
+    @Test
+    fun `a lookup cut off with the screen is run again, a superseded one is not`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.interrupted(lookup) // an Activity recreation
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        tab.loadStarted()
+        tab.interrupted(lookup)
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `the pill's destination is state, so it follows pushState`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false)
+        val reads = mutableListOf<String?>()
+        val snapshot = androidx.compose.runtime.snapshots.Snapshot.takeSnapshot(readObserver = { reads += it.toString() })
+        try {
+            snapshot.enter { tab.destination() }
+        } finally {
+            snapshot.dispose()
+        }
+        // Both the offer and the URL were read through snapshot state.
+        assertEquals(2, reads.size)
     }
 
     @Test
