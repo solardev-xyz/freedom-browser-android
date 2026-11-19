@@ -228,6 +228,7 @@ object SwarmProviders {
                 override fun site(origin: String) = identities.site(origin)
                 override fun ensureSite(origin: String) = identities.ensureSite(origin)
                 override fun signingKey(identity: PublisherIdentity) = PublisherKeys.signingKey(vault, identity)
+                override fun lockCount() = vault.lockCount()
                 override fun noteActivity() = vault.noteActivity()
             },
             node = GatewayHttp,

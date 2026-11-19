@@ -146,9 +146,10 @@ class Vault internal constructor(
     private val _state = MutableStateFlow(initialState())
     val state: StateFlow<State> = _state.asStateFlow()
 
-    /** Guards [seed], [policy] and [inForeground]. */
+    /** Guards [seed], [locks], [policy] and [inForeground]. */
     private val lock = Any()
     private var seed: ByteArray? = null
+    private var locks = 0L
     private val policy = AutoLockPolicy()
     private var inForeground = true
     private var lockJob: Job? = null
@@ -422,6 +423,7 @@ class Vault internal constructor(
         synchronized(lock) {
             seed?.fill(0)
             seed = null
+            locks++
             lockJob?.cancel()
             lockJob = null
             val s = _state.value
@@ -518,6 +520,16 @@ class Vault internal constructor(
     fun unlockedNow(): Boolean = synchronized(lock) {
         lockIfExpiredLocked()
         seed != null
+    }
+
+    /**
+     * How many times the vault has locked (an auto-lock or a removal
+     * included). A key read under one count must not sign once it has
+     * moved on, even if the vault was unlocked again since (#531).
+     */
+    fun lockCount(): Long = synchronized(lock) {
+        lockIfExpiredLocked()
+        locks
     }
 
     /** Locks now if the auto-lock deadline has passed (the timer can run late in deep sleep). */
