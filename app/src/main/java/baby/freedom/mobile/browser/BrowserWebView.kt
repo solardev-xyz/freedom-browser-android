@@ -131,6 +131,7 @@ internal val HEADERS_TO_STRIP = setOf(
     // [nameResolutionErrorIn] and [NodeApiGuard.isRefusal]).
     NAME_RESOLUTION_ERROR_HEADER.lowercase(),
     NodeApiGuard.REFUSAL_HEADER.lowercase(),
+    DwebPath.REFUSAL_HEADER.lowercase(),
     // Would let a gateway-served worker script claim a scope wider than
     // its own path on the virtual origin (#355; desktop drops it too).
     "service-worker-allowed",
@@ -4403,6 +4404,12 @@ private fun buildRefreshableWebView(
                     Log.i(LOG_TAG, "main-frame HTTP $status for $failed → node API refused in place")
                     return
                 }
+                // And a path refused for leaving its content root (#534):
+                // retrying it would only be refused again.
+                if (DwebPath.isRefusal(errorResponse?.responseHeaders)) {
+                    Log.i(LOG_TAG, "main-frame HTTP $status for ${dwebUrlForLog(failed)} → path refused in place")
+                    return
+                }
                 val errorCode =
                     if (status == 502) "ERR_CONNECTION_REFUSED"
                     else "swarm_content_not_found"
@@ -6585,7 +6592,7 @@ private fun interceptVirtualRequestFor(
         val parsed = VirtualOrigin.parseContentUrl(url) ?: return null
         root = parsed.first
         pathAndQuery = parsed.second.ifEmpty { "/" }
-        Log.v(LOG_TAG, "scheme subresource: $url served via gateway mapping")
+        Log.v(LOG_TAG, "$scheme: subresource served via gateway mapping")
     } else {
         root = VirtualOrigin.parseHostOfUrl(url) ?: return null
         pathAndQuery = VirtualOrigin.pathAndQueryOf(url)
@@ -6605,6 +6612,20 @@ private fun interceptVirtualRequestFor(
             405, "Method Not Allowed",
             "Virtual dweb origins are read-only (GET/HEAD). " +
                 "Pages publish with window.swarm, which asks the user first.",
+        )
+    }
+
+    // An encoded `..` (`..%2f..%2fapi/v0/id`) or a `\` would take the
+    // gateway request out of the content root (#534, [DwebPath]): refused
+    // before any name is resolved. `bzz:` refuses any encoded separator;
+    // a name's namespace isn't known yet, so its target is checked once
+    // built ([Gateways.gatewayUrlFor]).
+    if (!DwebPath.isContainedPath(DwebPath.pathnameOf(pathAndQuery), encodedSeparators = root !is ContentRoot.Bzz)) {
+        // Fetched from no node: no "IPFS: fetching" line for it.
+        if (req.isForMainFrame) onMainFrameRoot(null)
+        return syntheticResponse(
+            400, "Bad Request", Strings.english(R.string.dweb_path_refusal),
+            mapOf(DwebPath.REFUSAL_HEADER to "1"),
         )
     }
 
@@ -6649,12 +6670,25 @@ private fun interceptVirtualRequestFor(
     // deliberate settings change, so more than one retry is a bound,
     // not a path.
     repeat(GATEWAY_SWITCH_RETRIES) {
-        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page, private = private)
-            ?: return syntheticResponse(
-                502, "Bad Gateway",
-                "No local gateway can serve this content root " +
-                    "(node not running, or name resolution failed).",
-            )
+        var escaped: Boolean? = null
+        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page, private = private, onEscape = { escaped = it })
+            ?: return when (escaped) {
+                // A name served from `bzz:`, asked for `/a%2Fb`: the path's fault.
+                true -> syntheticResponse(
+                    400, "Bad Request", Strings.english(R.string.dweb_path_refusal),
+                    mapOf(DwebPath.REFUSAL_HEADER to "1"),
+                )
+                // The name's record supplied the path that leaves.
+                false -> syntheticResponse(
+                    502, "Bad Gateway", Strings.english(R.string.dweb_target_refusal),
+                    mapOf(DwebPath.REFUSAL_HEADER to "1"),
+                )
+                null -> syntheticResponse(
+                    502, "Bad Gateway",
+                    "No local gateway can serve this content root " +
+                        "(node not running, or name resolution failed).",
+                )
+            }
 
         // An unverified external IPFS gateway (#125) shares the root's
         // virtual origin with the verified embedded node: note the origin
@@ -6836,7 +6870,7 @@ internal fun fetchWithRetry(
     var lastResponse: WebResourceResponse? = null
     fun abandoned(): WebResourceResponse {
         lastResponse?.data?.let { runCatching { it.close() } }
-        Log.i(LOG_TAG, "abandoned by the page: $originalUrl")
+        Log.i(LOG_TAG, "abandoned by the page: ${dwebUrlForLog(originalUrl)}")
         return abandonedResponse()
     }
     for ((index, delayMs) in ESCAPE_RETRY_DELAYS_MS.withIndex()) {
@@ -6868,7 +6902,7 @@ internal fun fetchWithRetry(
                 lastResponse = attempt.response
                 Log.i(
                     LOG_TAG,
-                    "transient ${attempt.response.statusCode} for $originalUrl → $targetUrl " +
+                    "transient ${attempt.response.statusCode} for ${dwebUrlForLog(originalUrl)} → ${gatewayUrlForLog(targetUrl)} " +
                         "(attempt ${index + 1}/${ESCAPE_RETRY_DELAYS_MS.size})",
                 )
             }
@@ -6948,7 +6982,7 @@ private fun fetchOnce(
             // that as a download and the navigation never finishes —
             // the tab just hangs. Plain text renders the error inline.
             ?: if (status >= 400) "text/plain" else "application/octet-stream"
-        Log.v(LOG_TAG, "fetch: $targetUrl status=$status mime=$mime rawCt=$rawCt")
+        Log.v(LOG_TAG, "fetch: ${gatewayUrlForLog(targetUrl)} status=$status mime=$mime rawCt=$rawCt")
         val charset = rawCt
             ?.substringAfter("charset=", "")
             ?.trim()
@@ -6980,7 +7014,7 @@ private fun fetchOnce(
             // means the validator failed, not that Range was ignored.
             val ifRange = req.requestHeaders?.keys?.any { it.equals("If-Range", ignoreCase = true) } == true
             val reply = mediaReplyFor(range, status, reason, headers, conn.contentLengthLong, ifRange)
-            Log.v(LOG_TAG, "media ${reply.status}: $targetUrl range=$range gateway=$status")
+            Log.v(LOG_TAG, "media ${reply.status}: ${gatewayUrlForLog(targetUrl)} range=$range gateway=$status")
             val data = when {
                 reply.empty -> {
                     runCatching { body.close() }
@@ -7008,7 +7042,7 @@ private fun fetchOnce(
             FetchAttempt.Abandoned
         } else if (deadline?.expired == true) {
             // The header deadline disconnected it: a timeout, worth another attempt.
-            Log.w(LOG_TAG, "gateway sent no headers in time (${policy.baseHeaderTimeoutMs}/${policy.headerTimeoutMs} ms): $targetUrl")
+            Log.w(LOG_TAG, "gateway sent no headers in time (${policy.baseHeaderTimeoutMs}/${policy.headerTimeoutMs} ms): ${gatewayUrlForLog(targetUrl)}")
             FetchAttempt.Retry
         } else {
             failedAttempt(t, targetUrl, media)
@@ -7023,19 +7057,19 @@ private fun failedAttempt(t: Throwable, targetUrl: String, media: Boolean): Fetc
     when (t) {
         // Refused by policy, not by a failing node: no retry will change it.
         is TorRouting.RefusedException -> {
-            Log.w(LOG_TAG, "gateway fetch refused: $targetUrl", t)
+            Log.w(LOG_TAG, "gateway fetch refused: ${gatewayUrlForLog(targetUrl)} (${t.javaClass.simpleName})")
             if (media) FetchAttempt.Unreachable else FetchAttempt.Retry
         }
         is java.net.ConnectException -> {
-            Log.w(LOG_TAG, "gateway unreachable: $targetUrl", t)
+            Log.w(LOG_TAG, "gateway unreachable: ${gatewayUrlForLog(targetUrl)} (${t.javaClass.simpleName})")
             FetchAttempt.Unreachable
         }
         is IOException -> {
-            Log.w(LOG_TAG, "gateway fetch failed: $targetUrl", t)
+            Log.w(LOG_TAG, "gateway fetch failed: ${gatewayUrlForLog(targetUrl)} (${t.javaClass.simpleName})")
             FetchAttempt.Retry
         }
         else -> {
-            Log.w(LOG_TAG, "gateway fetch unexpected failure: $targetUrl", t)
+            Log.w(LOG_TAG, "gateway fetch unexpected failure: ${gatewayUrlForLog(targetUrl)} (${t.javaClass.simpleName})")
             FetchAttempt.Unreachable
         }
     }

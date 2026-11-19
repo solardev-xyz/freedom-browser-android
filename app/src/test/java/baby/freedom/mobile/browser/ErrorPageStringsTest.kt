@@ -52,6 +52,18 @@ class ErrorPageStringsTest {
     }
 
     @Test
+    fun `a refused dweb path gets its own page, with no Try Again`() {
+        // #534 R4-F1: refused for good, so neither the "not ready yet"
+        // copy nor a retry that would only be refused again.
+        val branch = page.substringAfter("} else if (error === '${ErrorPage.DWEB_PATH_REFUSED}') {")
+            .substringBefore("} else if")
+        assertTrue(branch.contains("fmt('page_dweb_path_refused_title')"))
+        assertTrue(branch.contains("fmt('page_dweb_path_refused')"))
+        assertTrue(branch.contains("document.getElementById('retry-btn').hidden = true;"))
+        assertFalse(branch.contains("page_swarm_not_ready"))
+    }
+
+    @Test
     fun `the table carries the English text`() {
         val json = ErrorPage.stringsJson()
         assertTrue(json.startsWith("{\"page_default_title\":\"Content Unavailable\","))

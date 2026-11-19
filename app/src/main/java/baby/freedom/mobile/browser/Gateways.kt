@@ -417,6 +417,68 @@ object Gateways {
     }
 
     /**
+     * Is [contentUri] (`bzz://` / `ipfs://` / `ipns://`) an address
+     * [probeUrlFor] has nothing to probe for: its root — the whole first
+     * segment — leaves `/<namespace>/<id>/`, or it falls back to the
+     * gateway URL itself and its whole path does (#534). A question about
+     * the address alone, never about a node or its gateway base, so the
+     * submit flow asks it before waiting for (or starting) a node. `false`
+     * for any other scheme.
+     */
+    fun pathRefused(contentUri: String): Boolean {
+        val namespace = dwebNamespace(contentUri) ?: return false
+        val encodedSeparators = namespace != "bzz"
+        val rest = contentUri.substringAfter("://")
+        if (!DwebPath.isContainedTarget("/$namespace/${idOf(rest)}", encodedSeparators)) return true
+        return !VirtualOrigin.isVirtualUrl(toLoadable(contentUri)) &&
+            !DwebPath.isContainedTarget("/$namespace/$rest", encodedSeparators)
+    }
+
+    private fun dwebNamespace(contentUri: String): String? = when {
+        contentUri.startsWith("bzz://") -> "bzz"
+        contentUri.startsWith("ipfs://") -> "ipfs"
+        contentUri.startsWith("ipns://") -> "ipns"
+        else -> null
+    }
+
+    private fun idOf(rest: String): String {
+        val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
+        return if (end >= 0) rest.substring(0, end) else rest
+    }
+
+    /**
+     * The URL the submit flow's readiness probe ([GatewayProbe]) HEADs for
+     * [contentUri] (`bzz://` / `ipfs://` / `ipns://`): the gateway's
+     * `/<namespace>/<id>` root, where `<id>` is the URL's whole first
+     * segment (up to `/`, `?` or `#`), not just the part a gateway-base
+     * pattern recognizes. `null` when that root leaves
+     * `/<namespace>/<id>/` ([DwebPath.isContainedTarget], #534):
+     * `bzz://%2e%2e/stamps`, `ipns://..`, a `.tez` record's
+     * `ipns://%2e%2e`, `bzz://<64 hex>%2f..%2f..%2fstamps`. The HEAD is
+     * native, so nothing else would check it before a gateway that
+     * decodes before it resolves saw `/stamps`.
+     *
+     * When [contentUri] maps to a virtual origin, the request's own path
+     * past a sound root is never sent: the probe asks for the root only,
+     * and the interceptor judges the path on load. When it doesn't (an id
+     * that can't be label-encoded falls back to the gateway URL itself,
+     * [toLoadable]), that load reaches the gateway with neither the
+     * interceptor's path check nor the node-API guard in front of it, so
+     * the whole path must stay beneath the root too, or there is nothing
+     * to probe and nothing to load.
+     */
+    fun probeUrlFor(contentUri: String): String? {
+        val namespace = dwebNamespace(contentUri) ?: return null
+        if (pathRefused(contentUri)) return null
+        val rest = contentUri.substringAfter("://")
+        val id = idOf(rest)
+        val root = "$namespace://$id"
+        val resolved = toGatewayUrl(root)
+        val base = GatewayUrls.extractBase(resolved)
+        return if (base != null && base.protocol == namespace && base.hashOrCid == id) base.prefix else resolved
+    }
+
+    /**
      * Inverse of [toLoadable]: map a loaded URL (virtual-origin https
      * or raw gateway http) back to the user-facing display form.
      * Returns the input unchanged if it's neither.
@@ -501,6 +563,14 @@ object Gateways {
      * document that was just checked), then the requesting tab's [pins]
      * for the page on screen, then the session registry — a [private]
      * tab's own (#464).
+     *
+     * Also `null`, after calling [onEscape], when the path the target is
+     * built from — the request's and a name record's base path together —
+     * would leave `/<namespace>/<ref>/` ([DwebPath.isContainedTarget],
+     * #534); under `bzz:`, any encoded separator does. [onEscape] is told
+     * whether the request's path alone does (a name served from `bzz:`
+     * asked for `/a%2Fb`), or only with the record's base path or
+     * because the root a name's record names escapes by itself.
      */
     fun gatewayUrlFor(
         root: ContentRoot,
@@ -508,18 +578,37 @@ object Gateways {
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
         private: Boolean = false,
+        onEscape: (byRequest: Boolean) -> Unit = {},
     ): String? {
         val (served, basePath) = servedContentFor(root, pins, page, private) ?: return null
         // A `.tez` website record may publish a base path
         // (`ipfs://<cid>/site`); ENS contenthashes never carry one.
         val path = if (basePath.isEmpty()) pathAndQuery else basePath.trimEnd('/') + pathAndQuery
+        val rooted = when (served) {
+            is ContentRoot.Bzz -> "/bzz/${served.ref}"
+            is ContentRoot.Ipfs -> "/ipfs/${served.cid}"
+            is ContentRoot.IpnsKey -> "/ipns/${served.key}"
+            is ContentRoot.IpnsName -> "/ipns/${served.name}"
+            is ContentRoot.Ens -> null
+        }
+        if (rooted != null) {
+            val encodedSeparators = served !is ContentRoot.Bzz
+            fun contained(p: String) = (p.isEmpty() || p.startsWith("/") || p.startsWith("?")) &&
+                DwebPath.isContainedTarget(rooted + p, encodedSeparators)
+            if (!contained(path)) {
+                // A name's answer whose root itself escapes (a `.tez` record
+                // `ipns://%2e%2e`) is the record's fault whatever was asked.
+                onEscape((root !is ContentRoot.Ens || contained("/")) && !contained(pathAndQuery))
+                return null
+            }
+        }
         return when (served) {
             is ContentRoot.Bzz -> "$swarmBase/bzz/${served.ref}$path"
             is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${served.cid}$path" }
             is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.key}$path" }
             is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.name}$path" }
             // Only from an ENS [root] whose answer is itself a name.
-            is ContentRoot.Ens -> gatewayUrlFor(served, path, private = private)
+            is ContentRoot.Ens -> gatewayUrlFor(served, path, private = private, onEscape = onEscape)
         }
     }
 

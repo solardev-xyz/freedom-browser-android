@@ -112,6 +112,10 @@
     <string name="errorpage_page_swarm_node_stopped">The Swarm node is not running. Open the Nodes panel %1$s from the menu to start it.</string>
     <!-- HTML. -->
     <string name="errorpage_page_swarm_gateway_unreachable">Couldn\'t reach the Swarm gateway. Check that the node is running and try again.</string>
+    <!-- A dweb address whose path leaves its content root (#534); always refused, so no Try Again. -->
+    <string name="errorpage_page_dweb_path_refused_title">Address leaves the site\'s content</string>
+    <!-- HTML. -->
+    <string name="errorpage_page_dweb_path_refused">Freedom didn\'t open this address: its path leaves the site\'s content (a &lt;code>..&lt;/code> segment, an encoded slash or a backslash). Check the address.</string>
     <!-- The details box when there is nothing else to show. -->
     <string name="errorpage_page_unknown_error">Unknown error</string>
 

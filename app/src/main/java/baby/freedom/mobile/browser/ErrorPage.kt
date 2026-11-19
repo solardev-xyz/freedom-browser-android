@@ -56,6 +56,15 @@ import java.net.URLEncoder
 object ErrorPage {
     const val URL: String = "file:///android_asset/error/error.html"
 
+    /**
+     * A dweb address whose path leaves its content root (#534,
+     * [DwebPath]) and that no interceptor refusal can answer in place:
+     * the submit flow's probe found nothing it may HEAD for a load that
+     * doesn't map to a virtual origin ([Gateways.pathRefused]). Refused
+     * for good, so the page offers no Try Again.
+     */
+    const val DWEB_PATH_REFUSED: String = "dweb_path_refused"
+
     fun url(
         errorCode: String,
         displayUrl: String,
@@ -143,6 +152,8 @@ object ErrorPage {
         "page_swarm_not_found_detail" to R.string.errorpage_page_swarm_not_found_detail,
         "page_swarm_node_stopped" to R.string.errorpage_page_swarm_node_stopped,
         "page_swarm_gateway_unreachable" to R.string.errorpage_page_swarm_gateway_unreachable,
+        "page_dweb_path_refused_title" to R.string.errorpage_page_dweb_path_refused_title,
+        "page_dweb_path_refused" to R.string.errorpage_page_dweb_path_refused,
         "page_unknown_error" to R.string.errorpage_page_unknown_error,
     )
 

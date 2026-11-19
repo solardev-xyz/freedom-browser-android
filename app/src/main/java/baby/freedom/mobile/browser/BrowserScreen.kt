@@ -1152,6 +1152,31 @@ fun BrowserScreen(
             )
         }
 
+        // An address whose path leaves its content root (#534) has
+        // nothing to probe ([Gateways.pathRefused]) — a fact about the
+        // address alone, so it's settled before any node is waited for or
+        // started: a refused address must not first read "node not
+        // running", sit through a booting node, or lazily start the IPFS
+        // node only to be refused. A virtual origin's load reaches the
+        // interceptor, which refuses it in place with its reason;
+        // anything else would load the gateway URL itself, so it doesn't
+        // load at all, and the page says why: the path leaves the content
+        // root, which no retry changes — not the "not ready yet, try
+        // again" page.
+        if (Gateways.pathRefused(contentUri)) {
+            if (VirtualOrigin.isVirtualUrl(Gateways.toLoadable(loadUri))) {
+                target.loadUrl(
+                    loadUri,
+                    displayPrefix = displayPrefix,
+                    namedByUser = namedByUser,
+                    bypassCache = bypassCache,
+                )
+            } else {
+                showError(ErrorPage.DWEB_PATH_REFUSED)
+            }
+            return
+        }
+
         // Wait for the right node to finish booting before firing the
         // probe. Entering an address while the node is still in
         // `Starting` should keep the tab spinner running, not bail
@@ -1193,9 +1218,20 @@ fun BrowserScreen(
         // external endpoint) — the WebView gets the virtual-origin URL,
         // but readiness is a question for the node itself. Resolved
         // after the node flips to Running, in case ipfsBase was still
-        // empty before.
-        val resolved = Gateways.toGatewayUrl(contentUri)
-        val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
+        // empty before. Only ever the root — the id's whole first
+        // segment — and never one that leaves `/<namespace>/<id>/`
+        // (#534): this HEAD is native, so neither the interceptor's path
+        // check nor the node-API guard sees it. Nor do they see a load
+        // that falls back to the gateway URL itself (an id that isn't
+        // label-encodable), so for that one the whole path must stay
+        // beneath the root as well ([Gateways.probeUrlFor]).
+        val headUrl = Gateways.probeUrlFor(contentUri)
+        if (headUrl == null) {
+            // Only a refused path has no probe, and that was answered
+            // above, before the wait; kept so a probe URL is never guessed.
+            showError(ErrorPage.DWEB_PATH_REFUSED)
+            return
+        }
 
         // Open gateway work of this load while the probe's HEADs run —
         // a later submit's IPFS phase line reads it to tell this load is
