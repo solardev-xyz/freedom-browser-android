@@ -39,13 +39,14 @@ import kotlin.concurrent.withLock
  * screen stays live until then, and a navigation may never commit.
  *
  * Each request that started a generation stays pending, with its URL,
- * until a commit claims it: a commit on the same URL claims that one
- * (and any older), else a commit with requests pending claims the oldest
- * (a redirect commits on another URL than was requested). A commit
- * drops only the generations before the one it claimed, never a later
- * request's: two navigations requested before either commits each find
- * their own at their commit. Only a commit with nothing pending starts a
- * generation of its own.
+ * until a commit on that URL claims it (and retires any older). A commit
+ * on no pending URL — a redirect's, or a history entry's or service
+ * worker's that landed after the next request — guesses the oldest
+ * request not guessed yet and keeps it pending, so that request's own
+ * commit still finds it. A commit drops only the generations before the
+ * one it claimed, never a later request's: navigations requested before
+ * any of them commits each find their own at their commit. Only a commit
+ * with nothing left to claim starts a generation of its own.
  *
  * Known gap: a request the page on screen makes between the next
  * navigation's request and its commit counts as the incoming document's,
@@ -111,7 +112,10 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
      */
     private val requested = HashMap<Long, ArrayDeque<Pending>>()
 
-    private class Pending(val generation: Long, val url: String?)
+    private class Pending(val generation: Long, val url: String?) {
+        /** A commit on another URL took this for its own; its own may still come. */
+        var guessed = false
+    }
 
     /** [tab]'s document now, for a request it makes. */
     fun requester(tab: Long?): Requester =
@@ -151,21 +155,33 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
         gone: Boolean = false,
         blank: Boolean = false,
     ) = lock.withLock {
-        val pending = requested[tab]
+        val pending = requested[tab] ?: ArrayDeque()
+        val key = url?.let(::withoutFragment)
+        val matched = if (gone || blank || key == null) null else pending.firstOrNull { it.url == key }
+        val guess = pending.firstOrNull { !it.guessed }
         when {
             gone -> {
                 requested.remove(tab)
                 advance(tab)
             }
-            pending.isNullOrEmpty() -> advance(tab)
-            blank -> cancel(tab, pending.first().generation)
-            else -> {
-                val key = url?.let(::withoutFragment)
-                val claimed = pending.firstOrNull { key != null && it.url == key } ?: pending.first()
-                while (pending.first() !== claimed) pending.removeFirst()
+            matched != null -> {
+                while (pending.first() !== matched) pending.removeFirst()
                 pending.removeFirst()
                 if (pending.isEmpty()) requested.remove(tab)
-                cancel(tab, claimed.generation)
+                cancel(tab, matched.generation)
+            }
+            guess == null -> {
+                // Nothing left to claim: what's still pending was guessed
+                // by a commit before and is older than this document.
+                requested.remove(tab)
+                advance(tab)
+            }
+            // A blank page claims nothing (see above).
+            blank -> cancel(tab, guess.generation)
+            else -> {
+                while (pending.first() !== guess) pending.removeFirst()
+                guess.guessed = true
+                cancel(tab, guess.generation)
             }
         }
     }

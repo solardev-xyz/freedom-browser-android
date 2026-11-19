@@ -279,10 +279,30 @@ class RadicleAdmissionTest {
         adm.documentStarted(tabA, "https://back.example/")
         assertTrue(page.cancelled)
         assertFalse(c.cancelled)
+        // C's own commit, after that, still finds its request.
+        adm.documentStarted(tabA, "https://c.example/")
+        assertFalse(c.cancelled)
+        // And the next one with nothing requested is a document of its own.
         adm.documentStarted(tabA, "https://other.example/")
         assertTrue(c.cancelled)
         page.release()
         c.release()
+    }
+
+    @Test
+    fun `a redirected commit's reads drop at the next commit`() {
+        val adm = RadicleAdmission()
+        adm.navigationRequested(tabA, "http://b.example/")
+        adm.documentStarted(tabA, "https://b.example/")
+        val b = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        // Back to a history entry: no request seen.
+        adm.documentStarted(tabA, "https://a.example/")
+        assertTrue(b.cancelled)
+        b.release()
+        val a = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.documentStarted(tabA, blank = true)
+        assertTrue(a.cancelled)
+        a.release()
     }
 
     @Test
