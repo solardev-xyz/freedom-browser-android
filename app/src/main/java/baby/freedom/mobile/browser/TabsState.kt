@@ -202,8 +202,9 @@ class TabsState(
     }
 
     /**
-     * [group] is still on the reopen stack: not reopened (by its notice
-     * or Reopen) or forgotten ([forgetClosedTabs]) yet. Observable.
+     * [group] is still on the reopen stack: not reopened (by its notice,
+     * Reopen or the *Recently closed* list) or forgotten
+     * ([forgetClosedTabs]) yet. Observable.
      */
     fun isOnReopenStack(group: ClosedGroup): Boolean = closedTabs.any { it === group }
 

@@ -127,7 +127,8 @@ import kotlinx.coroutines.launch
  * Closing a card is handed to [onTabsClosed] with its Undo (#418), as a
  * bulk close is. The header's "Reopen" brings back the most recently
  * closed tab ([TabsState.reopenClosedTab]) while there is one, and its ⋮
- * menu closes every tab of the pane on screen.
+ * menu closes every tab of the pane on screen and, on the normal pane,
+ * lists the recently closed ones to reopen any of them (#546).
  */
 @Composable
 fun TabSwitcherScreen(
