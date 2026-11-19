@@ -159,6 +159,16 @@ class SwarmProvider(
     fun interface Http {
         fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int): Answer
 
+        /**
+         * [request], reading at most [maxBytes] of the answer's body: past
+         * it the call fails with [AnswerTooLarge] and the rest is never read.
+         */
+        fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int, maxBytes: Int): Answer =
+            request(method, path, headers, body, timeoutMs).also { if (it.body.size > maxBytes) throw AnswerTooLarge() }
+
+        /** The answer's body ran past the call's limit; the rest of it was never read. */
+        class AnswerTooLarge : IOException("the node's answer is too large")
+
         class Answer(val status: Int, headers: Map<String, String>, val body: ByteArray) {
             /** Header names lower-cased. */
             val headers: Map<String, String> = headers.mapKeys { it.key.lowercase() }
@@ -1103,6 +1113,16 @@ class SwarmProvider(
         )
     }
 
+    /**
+     * desktop's `handleReadFeedEntry`: no grant, one request against the
+     * read budget, and the entry's bytes paid for before they're held
+     * (#532, desktop #1051). The SOC is charged once read; an entry larger
+     * than one chunk is sized from its wrapped chunk's span, refused with
+     * `data_too_large` past the window's whole byte budget, and otherwise
+     * reserved before the node is asked to join it, the join held to that
+     * size. A reservation that doesn't fit what is left of the window is
+     * `rate_limited`, so parallel reads can't together pass the budget.
+     */
     private suspend fun readFeedEntry(origin: String, params: JSONObject): Reply {
         fun given(key: String) = params.opt(key).let { it != null && it != JSONObject.NULL }
         val hasTopic = given("topic")
@@ -1137,16 +1157,45 @@ class SwarmProvider(
         } else {
             invalid("Feed is empty — no entries to read", "feed_empty")
         }
+        // The SOC came off the network: it's paid for whatever happens next.
+        val socRefusal = chargeBudget(origin, bytes = raw.size.toLong())
         val soc = SwarmChunks.parseSoc(address, raw)
             ?: return Reply.Err(INTERNAL, "Feed entry at index $at does not validate as its owner's chunk")
+        // The entry's size from the wrapped chunk's span, redundancy level cleared (desktop's `dataSizeFromSpan`).
+        val size = dataSize(soc.cac.spanValue)
         val payload = if (soc.cac.spanValue <= SwarmChunks.MAX_PAYLOAD.toULong()) {
-            soc.cac.payload
+            socRefusal?.let { return it }
+            // Held to the span: bytes past it aren't the entry, and a span past the payload is an entry the chunk doesn't hold.
+            val inline = soc.cac.payload
+            if (inline.size.toULong() < size) {
+                return Reply.Err(INTERNAL, "Node returned ${inline.size} bytes for a $size-byte feed entry")
+            }
+            inline.copyOf(size.toInt())
         } else {
-            val answer = call("GET", "/bytes/${soc.cac.address.swarmHex()}", emptyMap(), null, READ_TIMEOUT_MS)
+            // Larger than one chunk: refused, or paid for, before the node is asked to join it (desktop #1051).
+            val maxBytes = readMaxBytes(origin)
+            if (size > maxBytes.toULong()) {
+                return invalid(
+                    "Feed entry exceeds the maximum read size of $maxBytes bytes", "data_too_large",
+                    JSONObject().put("limit", maxBytes).put("actual", spanJson(size)),
+                )
+            }
+            socRefusal?.let { return it }
+            val expected = size.toInt()
+            if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
+            val answer = try {
+                withContext(io) {
+                    node.request("GET", "/bytes/${soc.cac.address.swarmHex()}", emptyMap(), null, READ_TIMEOUT_MS, maxBytes = expected)
+                }
+            } catch (e: Http.AnswerTooLarge) {
+                return Reply.Err(INTERNAL, "Node returned more than $expected bytes for a $expected-byte feed entry")
+            }
             if (!answer.ok) return Reply.Err(INTERNAL, "Feed entry content can't be read: ${answer.message()}")
+            if (answer.body.size != expected) {
+                return Reply.Err(INTERNAL, "Node returned ${answer.body.size} bytes for a $expected-byte feed entry")
+            }
             answer.body
         }
-        spendBudget(origin, bytes = payload.size.toLong())
         return Reply.Ok(
             JSONObject()
                 .put("data", Base64.getEncoder().encodeToString(payload))
@@ -1177,27 +1226,59 @@ class SwarmProvider(
 
     /** Desktop's permission-free read budget: per origin, a rolling window of requests and bytes. */
     private suspend fun spendBudget(origin: String, requests: Int = 0, bytes: Long = 0) {
-        val connected = grants.connected(origin)
-        val maxRequests = if (connected) 600 else 120
-        val maxBytes = if (connected) 5L * 1024 * 1024 else 512L * 1024
+        chargeBudget(origin, requests, bytes)?.let { throw Invalid(it) }
+    }
+
+    /**
+     * Charge [requests] and [bytes] to [origin]'s window whatever the
+     * outcome (they're already spent), and return the refusal if that
+     * takes it over, else null.
+     */
+    private suspend fun chargeBudget(origin: String, requests: Int = 0, bytes: Long = 0): Reply.Err? {
+        val limits = readLimits(origin)
         val over = synchronized(budgets) {
-            val now = clock()
-            // Drop every window that has run out, so origins that stopped reading don't stay forever.
-            budgets.values.removeAll { now - it.startedAt !in 0 until BUDGET_WINDOW_MS }
-            val existing = budgets[origin]
-            val bucket = if (existing != null && now - existing.startedAt in 0 until BUDGET_WINDOW_MS) existing else Budget(now, 0, 0)
+            val bucket = bucket(origin)
             bucket.requests += requests
             bucket.bytes += bytes
-            budgets[origin] = bucket
-            bucket.requests > maxRequests || bucket.bytes > maxBytes
+            bucket.requests > limits.first || bucket.bytes > limits.second
         }
-        if (over) {
-            fail(
-                "Permission-free read budget exceeded", "rate_limited",
-                JSONObject().put("windowMs", BUDGET_WINDOW_MS).put("maxRequests", maxRequests).put("maxBytes", maxBytes),
-            )
-        }
+        return if (over) budgetExceeded(limits) else null
     }
+
+    /**
+     * Reserve [bytes] of [origin]'s window before they're read, or refuse
+     * without reserving anything: the check and the charge are one step,
+     * so parallel reads can't all fit and then each download what only one
+     * of them may return (desktop's `reservePermissionFreeReadBytes`).
+     */
+    private suspend fun reserveBudget(origin: String, bytes: Long): Reply.Err? {
+        val limits = readLimits(origin)
+        val fits = synchronized(budgets) {
+            val bucket = bucket(origin)
+            (bucket.bytes + bytes <= limits.second).also { if (it) bucket.bytes += bytes }
+        }
+        return if (fits) null else budgetExceeded(limits)
+    }
+
+    /** The most bytes one window lets [origin] read. */
+    private suspend fun readMaxBytes(origin: String): Long = readLimits(origin).second
+
+    /** [origin]'s window's (requests, bytes): more for a connected site. */
+    private suspend fun readLimits(origin: String): Pair<Int, Long> =
+        if (grants.connected(origin)) 600 to 5L * 1024 * 1024 else 120 to 512L * 1024
+
+    /** [origin]'s current window, started afresh if it ran out. Hold [budgets]. */
+    private fun bucket(origin: String): Budget {
+        val now = clock()
+        // Drop every window that has run out, so origins that stopped reading don't stay forever.
+        budgets.values.removeAll { now - it.startedAt !in 0 until BUDGET_WINDOW_MS }
+        return budgets.getOrPut(origin) { Budget(now, 0, 0) }
+    }
+
+    private fun budgetExceeded(limits: Pair<Int, Long>) = invalid(
+        "Permission-free read budget exceeded", "rate_limited",
+        JSONObject().put("windowMs", BUDGET_WINDOW_MS).put("maxRequests", limits.first).put("maxBytes", limits.second),
+    )
 
     // ---------------------------------------------------------------
     // The node
@@ -1500,6 +1581,10 @@ class SwarmProvider(
         }
 
         private fun base64Length(n: Int): Long = ((n + 2) / 3) * 4L
+
+        /** A span's data size with its redundancy level cleared: desktop's `dataSizeFromSpan`. */
+        internal fun dataSize(span: ULong): ULong =
+            if ((span shr 56) > 128u) span and 0x00FF_FFFF_FFFF_FFFFuL else span
 
         private fun spanJson(v: ULong): Any =
             if (v.toDouble() <= MAX_SAFE_INTEGER) v.toLong() else JSONObject().put(BIGINT, v.toString())

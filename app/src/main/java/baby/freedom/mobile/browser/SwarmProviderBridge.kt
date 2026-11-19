@@ -881,8 +881,6 @@ object SwarmProviders {
 internal object GatewayHttp : SwarmProvider.Http {
     private const val MAX_ANSWER_BYTES = 16 * 1024 * 1024
 
-    /** The answer's body ran past the call's limit; the rest of it was never read. */
-    class AnswerTooLarge : IOException("the node's answer is too large")
     private const val RUNNING = 0
     private const val EXPIRED = 1
     private const val DONE = 2
@@ -898,6 +896,15 @@ internal object GatewayHttp : SwarmProvider.Http {
         body: ByteArray?,
         timeoutMs: Int,
     ): SwarmProvider.Http.Answer = requestAt(SwarmNode.GATEWAY_URL, method, path, headers, body, timeoutMs)
+
+    override fun request(
+        method: String,
+        path: String,
+        headers: Map<String, String>,
+        body: ByteArray?,
+        timeoutMs: Int,
+        maxBytes: Int,
+    ): SwarmProvider.Http.Answer = requestAt(SwarmNode.GATEWAY_URL, method, path, headers, body, timeoutMs, maxBytes = maxBytes)
 
     /**
      * [request] against [base] (tests point it at a local server), which
@@ -917,7 +924,7 @@ internal object GatewayHttp : SwarmProvider.Http {
         timeoutMs: Int,
         /** Tests only: runs once the answer is complete, before it's returned. */
         afterAnswer: () -> Unit = {},
-        /** The most of the answer's body that is read: past it the call fails with [AnswerTooLarge]. */
+        /** The most of the answer's body that is read: past it the call fails with [SwarmProvider.Http.AnswerTooLarge]. */
         maxBytes: Int = MAX_ANSWER_BYTES,
     ): SwarmProvider.Http.Answer {
         val conn = TorRouting.openConnection(URL(base + path)) as? HttpURLConnection
@@ -956,7 +963,7 @@ internal object GatewayHttp : SwarmProvider.Http {
                     // Between reads too: a node trickling its answer never trips the read timeout.
                     if (expired()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
                     if (n < 0) break
-                    if (out.size() + n > maxBytes) throw AnswerTooLarge()
+                    if (out.size() + n > maxBytes) throw SwarmProvider.Http.AnswerTooLarge()
                     out.write(buf, 0, n)
                 }
                 out.toByteArray()
@@ -1056,7 +1063,7 @@ internal fun fetchManifest(url: String, timeoutMs: Int = MANIFEST_TIMEOUT_MS): M
     if (left <= 0) return ManifestDiscovery.Unresolved("timed out")
     val answer = try {
         GatewayHttp.requestAt(url, "GET", "", emptyMap(), null, left, maxBytes = SwarmManifestFormat.MAX_BYTES)
-    } catch (e: GatewayHttp.AnswerTooLarge) {
+    } catch (e: SwarmProvider.Http.AnswerTooLarge) {
         return ManifestDiscovery.Invalid("manifest exceeds 8 KiB")
     } catch (e: IOException) {
         // A body that started and died is the transport's failure, not an invalid manifest.
