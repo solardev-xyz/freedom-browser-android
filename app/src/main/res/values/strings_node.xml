@@ -301,4 +301,31 @@
     <!-- Toast after picking a smaller cache size. %1$s is the new size ("256 MB"). -->
     <string name="node_cache_size_shrunk">Swarm cache set to %1$s: freeing space now</string>
     <string name="node_cache_size_keywords">Swarm cache, storage, disk space, chunks, clear cache</string>
+    <!-- Myotis fork watch (#542): enough peer networks announce a network upgrade this build doesn't know. %1$s is the chain ("Ethereum", "Gnosis"), %2$s when (node_upgrade_when_*), %3$s what to do (node_upgrade_update_*). -->
+    <string name="node_upgrade_scheduled">%1$s has a network upgrade %2$s that this version of Freedom doesn\'t know about. %3$s</string>
+    <string name="node_upgrade_when_soon">coming soon</string>
+    <!-- %1$s is the date ("3 Dec 2026"). -->
+    <string name="node_upgrade_when_due">due now (%1$s)</string>
+    <string name="node_upgrade_when_within_day">coming in less than a day (%1$s)</string>
+    <plurals name="node_upgrade_when_days">
+        <item quantity="one">coming in %1$d day (%2$s)</item>
+        <item quantity="other">coming in %1$d days (%2$s)</item>
+    </plurals>
+    <string name="node_upgrade_update_soon">Update Freedom soon to keep verified reads.</string>
+    <string name="node_upgrade_update_now">Update Freedom now to keep verified reads.</string>
+    <string name="node_upgrade_update_before">Update Freedom before then to keep verified reads.</string>
+    <!-- %1$s is the chain, %2$s node_upgrade_active_ready or node_upgrade_active_not_ready. -->
+    <string name="node_upgrade_active">%1$s has upgraded and this version of Freedom can\'t follow it. %2$s</string>
+    <string name="node_upgrade_active_ready">Verified reads may stop until you update Freedom.</string>
+    <!-- %1$s is the chain. -->
+    <string name="node_upgrade_active_not_ready">The light client can\'t verify %1$s until you update Freedom; Freedom uses your other %1$s sources meanwhile.</string>
+    <!-- Where updates come from, on the node page after the notice. -->
+    <string name="node_upgrade_where">Settings › About checks for a newer version, or your app store updates it.</string>
+    <plurals name="node_upgrade_reported_by">
+        <item quantity="one">Reported by %1$d peer network, not verified. It doesn\'t change how Freedom checks answers.</item>
+        <item quantity="other">Reported by %1$d peer networks, not verified. It doesn\'t change how Freedom checks answers.</item>
+    </plurals>
+    <string name="node_upgrade_label">Network upgrade</string>
+    <!-- Overview row, per chain: "Ethereum: Synced; update Freedom". %1$s is the chain's state. -->
+    <string name="nodes_overview_chain_update">%1$s; update Freedom</string>
 </resources>

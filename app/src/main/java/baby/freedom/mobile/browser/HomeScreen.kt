@@ -133,6 +133,8 @@ internal fun HomeScreen(
     update: LatestRelease? = null,
     /** Closes [update]'s notice; a later release shows again. */
     onDismissUpdate: (LatestRelease) -> Unit = {},
+    /** The light client's network-upgrade notices (#542), named on [update]'s notice. */
+    upgrades: List<String> = emptyList(),
 ) {
     val bookmarks by remember { repo.bookmarks }.collectAsState(initial = emptyList())
     val recent by remember { repo.recentDistinct(RECENT_LIMIT) }
@@ -198,6 +200,7 @@ internal fun HomeScreen(
                 Spacer(Modifier.height(24.dp))
                 UpdateNotice(
                     release = update,
+                    upgrades = upgrades,
                     onOpen = { onOpen(update.url) },
                     onDismiss = { onDismissUpdate(update) },
                     modifier = Modifier.padding(horizontal = 16.dp),
@@ -458,11 +461,13 @@ internal fun updateNoticeTitle(release: LatestRelease): String =
 
 /**
  * The home screen's notice of a newer release (#272): its version, a
- * link to its release page, and × to close it. Every string wraps.
+ * link to its release page, and × to close it — plus any network upgrade
+ * the light client says this version can't follow (#542). Every string wraps.
  */
 @Composable
 private fun UpdateNotice(
     release: LatestRelease,
+    upgrades: List<String>,
     onOpen: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
@@ -494,6 +499,14 @@ private fun UpdateNotice(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            for (upgrade in upgrades) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    upgrade,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
             TextButton(onClick = onOpen, contentPadding = PaddingValues(horizontal = 0.dp)) {
                 Text(stringResource(R.string.browser_update_view_release))
             }
