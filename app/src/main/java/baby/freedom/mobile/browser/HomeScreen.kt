@@ -107,7 +107,8 @@ import baby.freedom.mobile.ui.isLight
  *    A long-press on a tile or a recent page (or its TalkBack actions)
  *    opens it in a new or a private tab behind this one instead
  *    ([onOpenInNewTab], with whether the tab is private; #321).
- *  - Explore: the curated dweb sites ([EXPLORE_CURATED], iOS's list),
+ *  - Explore: the curated dweb sites ([EXPLORE_CURATED], desktop's default
+ *    bookmarks, kept in step with freedom-browser's list rather than iOS's),
  *    always shown, so a first launch has something to tap.
  *
  * Empty bookmarks / empty history each simply hide their section.
