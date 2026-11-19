@@ -435,17 +435,21 @@ object Gateways {
     }
 
     /**
-     * Can a refused address's [loadUri] still be handed to the WebView so
-     * the interceptor refuses it in place (#571)? Only when the virtual
-     * origin [toLoadable] gives it decodes back to the very root the
-     * address names. A name load (`ens://<name>…`) does, and its
-     * interceptor sees the record that escapes; `ipns://..` doesn't: its
-     * `..` is escaped as `--`, which reads back as the name `-`, so the
-     * interceptor would see a contained root and never refuse.
+     * Can a refused [contentUri] be handed to the WebView as [loadUri] so
+     * the interceptor refuses it in place (#571)? A name load
+     * (`ens://<name>…`, [loadUri] != [contentUri]) can whenever it maps
+     * to a virtual origin: that origin is the name's, and its interceptor
+     * sees the record that escapes. An address loaded as itself only when
+     * its virtual origin decodes back to the very root it names —
+     * `ipns://..` doesn't: its `..` is escaped as `--`, which reads back
+     * as the name `-`, so the interceptor would see a contained root and
+     * never refuse.
      */
-    fun refusedInPlace(loadUri: String): Boolean {
+    fun refusedInPlace(contentUri: String, loadUri: String = contentUri): Boolean {
+        val loadable = toLoadable(loadUri)
+        if (loadUri != contentUri) return VirtualOrigin.isVirtualUrl(loadable)
         val root = VirtualOrigin.parseContentUrl(loadUri)?.first ?: return false
-        return VirtualOrigin.parseHostOfUrl(toLoadable(loadUri)) == root
+        return VirtualOrigin.parseHostOfUrl(loadable) == root
     }
 
     private fun dwebNamespace(contentUri: String): String? = when {

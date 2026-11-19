@@ -380,15 +380,27 @@ class GatewaysTest {
         // a contained root and serve "Content Unavailable" (#571). Such
         // an address gets the refusal page instead.
         Gateways.setIpfsBase("http://127.0.0.1:58312")
+        // What the submit flow used to ask: "is it a virtual origin?" — yes.
+        assertTrue(VirtualOrigin.isVirtualUrl(Gateways.toLoadable("ipns://..")))
+        assertEquals(ContentRoot.IpnsName("-"), VirtualOrigin.parseHostOfUrl(Gateways.toLoadable("ipns://..")))
         listOf("ipns://..", "ipns://../api/v0/id", "ipns://..?x", "bzz://%2e%2e/stamps").forEach {
             assertTrue(it, Gateways.pathRefused(it))
             assertFalse(it, Gateways.refusedInPlace(it))
         }
         // A name load's origin is the name's own, whatever its record names,
-        // so the interceptor sees the record that escapes and refuses it.
-        listOf("ens://docs.eth/", "ens://foo-bar.eth/x", "ipns://docs.eth/x", "bzz://$ref64").forEach {
-            assertTrue(it, Gateways.refusedInPlace(it))
-        }
+        // so the interceptor sees the record that escapes and refuses it —
+        // any name, including one whose label escaping doesn't read back
+        // as itself (`a.-b.eth`).
+        val record = "ipns://%2e%2e/x"
+        assertTrue(Gateways.pathRefused(record))
+        listOf(
+            "ens://docs.eth/", "ens://foo-bar.eth/x", "ens://a.-b.eth/", "ens://a-.b.eth/",
+            "ens://\u00fcber.eth/", "ens://%C3%BCber.eth/", "ens://\uD83E\uDD8A.eth/",
+            "ens://site.tez/", "ens://Docs.ETH/",
+        ).forEach { assertTrue(it, Gateways.refusedInPlace(record, loadUri = it)) }
+        // An address loaded as itself whose origin names its own root.
+        listOf("ipns://docs.eth/x", "ipns://12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA/", "bzz://$ref64")
+            .forEach { assertTrue(it, Gateways.refusedInPlace(it)) }
     }
 
     private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"

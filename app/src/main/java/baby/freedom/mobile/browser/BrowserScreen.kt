@@ -1169,7 +1169,7 @@ fun BrowserScreen(
         // leaves the content root, which no retry changes — not the "not
         // ready yet, try again" page.
         if (Gateways.pathRefused(contentUri)) {
-            if (Gateways.refusedInPlace(loadUri)) {
+            if (Gateways.refusedInPlace(contentUri, loadUri)) {
                 target.loadUrl(
                     loadUri,
                     displayPrefix = displayPrefix,
