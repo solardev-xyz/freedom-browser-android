@@ -1193,9 +1193,13 @@ fun BrowserScreen(
         // external endpoint) — the WebView gets the virtual-origin URL,
         // but readiness is a question for the node itself. Resolved
         // after the node flips to Running, in case ipfsBase was still
-        // empty before. Only ever the root, and never one that leaves
-        // `/<namespace>/<ref>/` (#534): this HEAD is native, so neither
-        // the interceptor's path check nor the node-API guard sees it.
+        // empty before. Only ever the root — the id's whole first
+        // segment — and never one that leaves `/<namespace>/<id>/`
+        // (#534): this HEAD is native, so neither the interceptor's path
+        // check nor the node-API guard sees it. Nor do they see a load
+        // that falls back to the gateway URL itself (an id that isn't
+        // label-encodable), so for that one the whole path must stay
+        // beneath the root as well ([Gateways.probeUrlFor]).
         val headUrl = Gateways.probeUrlFor(contentUri)
         if (headUrl == null) {
             // Nothing to probe. A virtual origin's load reaches the

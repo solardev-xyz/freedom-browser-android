@@ -447,14 +447,23 @@ object Gateways {
     /**
      * The URL the submit flow's readiness probe ([GatewayProbe]) HEADs for
      * [contentUri] (`bzz://` / `ipfs://` / `ipns://`): the gateway's
-     * `/<namespace>/<ref>` root, or the whole [toGatewayUrl] answer when
-     * that has no recognizable root. `null` when the root it would ask
-     * for leaves `/<namespace>/<ref>/` ([DwebPath.isContainedTarget],
-     * #534): `bzz://%2e%2e/stamps`, `ipns://..`, a `.tez` record's
-     * `ipns://%2e%2e`. The HEAD is native, so nothing else would check it
-     * before a gateway that decodes before it resolves saw `/stamps`. The
-     * request's own path past a sound root is never sent: the probe asks
-     * for the root only, and the interceptor judges the path on load.
+     * `/<namespace>/<id>` root, where `<id>` is the URL's whole first
+     * segment (up to `/`, `?` or `#`), not just the part a gateway-base
+     * pattern recognizes. `null` when that root leaves
+     * `/<namespace>/<id>/` ([DwebPath.isContainedTarget], #534):
+     * `bzz://%2e%2e/stamps`, `ipns://..`, a `.tez` record's
+     * `ipns://%2e%2e`, `bzz://<64 hex>%2f..%2f..%2fstamps`. The HEAD is
+     * native, so nothing else would check it before a gateway that
+     * decodes before it resolves saw `/stamps`.
+     *
+     * When [contentUri] maps to a virtual origin, the request's own path
+     * past a sound root is never sent: the probe asks for the root only,
+     * and the interceptor judges the path on load. When it doesn't (an id
+     * that can't be label-encoded falls back to the gateway URL itself,
+     * [toLoadable]), that load reaches the gateway with neither the
+     * interceptor's path check nor the node-API guard in front of it, so
+     * the whole path must stay beneath the root too, or there is nothing
+     * to probe and nothing to load.
      */
     fun probeUrlFor(contentUri: String): String? {
         val namespace = when {
@@ -463,12 +472,18 @@ object Gateways {
             contentUri.startsWith("ipns://") -> "ipns"
             else -> return null
         }
-        val resolved = toGatewayUrl(contentUri)
+        val encodedSeparators = namespace != "bzz"
+        val rest = contentUri.substringAfter("://")
+        val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
+        val id = if (end >= 0) rest.substring(0, end) else rest
+        if (!DwebPath.isContainedTarget("/$namespace/$id", encodedSeparators)) return null
+        if (!VirtualOrigin.isVirtualUrl(toLoadable(contentUri)) &&
+            !DwebPath.isContainedTarget("/$namespace/$rest", encodedSeparators)
+        ) return null
+        val root = "$namespace://$id"
+        val resolved = toGatewayUrl(root)
         val base = GatewayUrls.extractBase(resolved)
-        val rooted = if (base != null) "/${base.protocol}/${base.hashOrCid}"
-        else "/$namespace/" + contentUri.substringAfter("://")
-        if (!DwebPath.isContainedTarget(rooted, encodedSeparators = namespace != "bzz")) return null
-        return base?.prefix ?: resolved
+        return if (base != null && base.protocol == namespace && base.hashOrCid == id) base.prefix else resolved
     }
 
     /**

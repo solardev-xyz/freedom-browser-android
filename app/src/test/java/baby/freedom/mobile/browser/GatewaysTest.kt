@@ -290,6 +290,21 @@ class GatewaysTest {
             "ipns://..",
             "ipns://../api/v0/id",
             "ipns://.",
+            // The whole first segment is the root, not the part the gateway
+            // base pattern recognizes: these ids can't be label-encoded, so
+            // the tab would load the gateway URL itself with no interceptor
+            // in front of it.
+            "bzz://$ref64%2f..%2f..%2fstamps",
+            "bzz://$ref64%2F%2E%2E%2Fstamps",
+            "bzz://$ref64%2fdocs",
+            "ipns://a%2f..%2f..%2fapi",
+            "ipfs://a\\..\\api",
+            "ipfs://bafy%2f..%2f..%2fapi/v0/id",
+            // A sound but non-label-encodable root loads the gateway URL
+            // itself, so its path must stay beneath the root as well.
+            "bzz://zz/%2e%2e/%2e%2e/stamps",
+            "bzz://zz/../../stamps",
+            "bzz://zz/a%2Fb",
         ).forEach { assertNull(it, Gateways.probeUrlFor(it)) }
         // A sound root is probed alone, whatever path the request carries:
         // the interceptor refuses that path once the tab loads it.
@@ -297,10 +312,10 @@ class GatewaysTest {
         assertEquals("http://127.0.0.1:1633/bzz/$ref64", Gateways.probeUrlFor("bzz://$ref64/a%2Fb"))
         assertEquals("http://127.0.0.1:58312/ipfs/bafy", Gateways.probeUrlFor("ipfs://bafy/..%2f..%2fapi/v0/id"))
         assertEquals("http://127.0.0.1:58312/ipns/docs.eth", Gateways.probeUrlFor("ipns://docs.eth/x"))
-        assertEquals("http://127.0.0.1:58312/ipns/a", Gateways.probeUrlFor("ipns://a%2f..%2f..%2fapi"))
-        assertEquals("http://127.0.0.1:58312/ipfs/a", Gateways.probeUrlFor("ipfs://a\\..\\api"))
-        // A ref the base pattern doesn't know still gets the whole (contained) URL.
+        // A ref the base pattern doesn't know gets its root, slash-ended,
+        // once its whole (gateway-loaded) path stays beneath it.
         assertEquals("http://127.0.0.1:1633/bzz/zz/", Gateways.probeUrlFor("bzz://zz"))
+        assertEquals("http://127.0.0.1:1633/bzz/zz/", Gateways.probeUrlFor("bzz://zz/docs/index.html"))
         assertNull(Gateways.probeUrlFor("https://example.com/"))
         // Every answer stays beneath its root as sent.
         listOf("bzz://$ref64", "ipfs://bafy/x", "ipns://docs.eth", "bzz://zz").forEach { uri ->
