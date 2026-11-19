@@ -434,6 +434,20 @@ object Gateways {
             !DwebPath.isContainedTarget("/$namespace/$rest", encodedSeparators)
     }
 
+    /**
+     * Can a refused address's [loadUri] still be handed to the WebView so
+     * the interceptor refuses it in place (#571)? Only when the virtual
+     * origin [toLoadable] gives it decodes back to the very root the
+     * address names. A name load (`ens://<name>…`) does, and its
+     * interceptor sees the record that escapes; `ipns://..` doesn't: its
+     * `..` is escaped as `--`, which reads back as the name `-`, so the
+     * interceptor would see a contained root and never refuse.
+     */
+    fun refusedInPlace(loadUri: String): Boolean {
+        val root = VirtualOrigin.parseContentUrl(loadUri)?.first ?: return false
+        return VirtualOrigin.parseHostOfUrl(toLoadable(loadUri)) == root
+    }
+
     private fun dwebNamespace(contentUri: String): String? = when {
         contentUri.startsWith("bzz://") -> "bzz"
         contentUri.startsWith("ipfs://") -> "ipfs"

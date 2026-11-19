@@ -373,6 +373,24 @@ class GatewaysTest {
         sound.filter { !it.startsWith("https:") }.forEach { assertNotNull(it, Gateways.probeUrlFor(it)) }
     }
 
+    @Test
+    fun `a refused address is refused in place only on a virtual origin naming its own root`() {
+        // `ipns://..` maps to a virtual origin, but `..` is escaped as
+        // `--`, which decodes to the name `-`: the interceptor would see
+        // a contained root and serve "Content Unavailable" (#571). Such
+        // an address gets the refusal page instead.
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        listOf("ipns://..", "ipns://../api/v0/id", "ipns://..?x", "bzz://%2e%2e/stamps").forEach {
+            assertTrue(it, Gateways.pathRefused(it))
+            assertFalse(it, Gateways.refusedInPlace(it))
+        }
+        // A name load's origin is the name's own, whatever its record names,
+        // so the interceptor sees the record that escapes and refuses it.
+        listOf("ens://docs.eth/", "ens://foo-bar.eth/x", "ipns://docs.eth/x", "bzz://$ref64").forEach {
+            assertTrue(it, Gateways.refusedInPlace(it))
+        }
+    }
+
     private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"
 
     private fun withLookup(answer: (String) -> EnsResult, block: () -> Unit) {
