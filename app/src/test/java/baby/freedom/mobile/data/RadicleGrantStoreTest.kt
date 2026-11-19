@@ -151,11 +151,29 @@ class RadicleGrantStoreTest {
         // A day after the first, one slot is back.
         assertTrue(again.countAutoWrite(a, t0 + day))
         assertFalse(again.countAutoWrite(a, t0 + day))
-        // The clock set back: the times ahead of it still count.
+        // The clock set back: the times ahead of it still count…
         assertFalse(again.countAutoWrite(a, t0 - 5 * day))
+        // …as made then, so a day later they're gone, not five days later.
+        assertFalse(again.countAutoWrite(a, t0 - 4 * day - 1))
+        assertTrue(again.countAutoWrite(a, t0 - 4 * day))
         // Disconnecting forgets the count.
         assertTrue(again.revoke(a))
         assertTrue(again.countAutoWrite(a, t0 + day))
+    }
+
+    @Test
+    fun `writes counted while the clock ran a year ahead hold the rule off for a day, not a year (#544)`() = runBlocking {
+        val a = "https://a.example"
+        val day = RadicleGrantStore.DAY_MS
+        val now = 1_700_000_000_000L
+        val ahead = now + 365 * day
+        repeat(RadicleGrantStore.MAX_AUTO_WRITES_PER_DAY) { assertTrue(store.countAutoWrite(a, ahead + it)) }
+        // The clock corrected: the count still holds (fails closed)…
+        val again = RadicleGrantStore(prefs)
+        assertFalse(again.countAutoWrite(a, now))
+        assertFalse(again.countAutoWrite(a, now + day - 1))
+        // …but only for a day from the first write after the correction.
+        assertTrue(again.countAutoWrite(a, now + day))
     }
 
 }

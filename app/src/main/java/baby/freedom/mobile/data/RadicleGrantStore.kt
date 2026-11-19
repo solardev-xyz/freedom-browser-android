@@ -169,14 +169,15 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
      * Count one write [origin]'s rule answers at [now] (wall clock, ms), if
      * fewer than [MAX_AUTO_WRITES_PER_DAY] were counted in the 24 hours
      * before; `false` (the write needs a prompt) otherwise, or if the count
-     * couldn't be saved. A time that isn't provably more than a day old —
-     * one ahead of [now], after the clock was set back — still counts.
+     * couldn't be saved. A time ahead of [now] (written while the clock was
+     * ahead, then set back) still counts, but as made at [now]: the site
+     * waits at most a day for it, not however far ahead the clock was.
      */
     suspend fun countAutoWrite(origin: String, now: Long): Boolean {
         var counted = false
         val written = write {
             val key = autoWritesKey(origin)
-            val recent = autoWriteTimes(it[key]).filterNot { t -> now - t >= DAY_MS }
+            val recent = autoWriteTimes(it[key]).map { t -> minOf(t, now) }.filterNot { t -> now - t >= DAY_MS }
             counted = recent.size < MAX_AUTO_WRITES_PER_DAY
             val kept = if (counted) recent + now else recent
             if (kept.isEmpty()) it.remove(key) else it[key] = kept.joinToString(",")
