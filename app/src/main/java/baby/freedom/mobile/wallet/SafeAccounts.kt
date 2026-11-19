@@ -70,6 +70,13 @@ data class SafeAccount(
      * never moves back to owners or a threshold the Safe had before.
      */
     val checkedBlock: Long? = null,
+    /**
+     * When (wall clock) its activation was last seen mined, while no
+     * verified read has marked it yet (#535): on disk, so the
+     * [SafeAccounts.ACTIVATION_SETTLE_MS] window during which a "no code"
+     * read is [SafeDeployment.SETTLING] outlives the process.
+     */
+    val activationMinedAt: Long? = null,
 ) {
     /** Who owns the Safe now, as far as this phone knows: the chain's last word, or the init params. */
     val ownersNow: List<String> get() = currentOwners ?: owners
@@ -236,6 +243,7 @@ class SafeStore internal constructor(private val file: File) {
                 currentOwners = s.optJSONArray("currentOwners")?.let { a -> (0 until a.length()).map { SafeProtocol.eip55(a.getString(it)) } },
                 currentThreshold = if (s.has("currentThreshold") && !s.isNull("currentThreshold")) s.getInt("currentThreshold") else null,
                 checkedBlock = if (s.has("checkedBlock") && !s.isNull("checkedBlock")) s.getLong("checkedBlock") else null,
+                activationMinedAt = if (s.has("activationMinedAt") && !s.isNull("activationMinedAt")) s.getLong("activationMinedAt") else null,
             ).also {
                 // Frozen params that no longer give the stored address mean the record was changed: never trust it.
                 require(SafeProtocol.predictAddress(it.owners, it.threshold, it.saltNonce) == it.address)
@@ -298,7 +306,8 @@ class SafeStore internal constructor(private val file: File) {
                                 .put("deployed", s.deployed).put("deployedVerified", s.deployed).put("createdAt", s.createdAt)
                                 .put("currentOwners", s.currentOwners?.let { JSONArray(it) } ?: JSONObject.NULL)
                                 .put("currentThreshold", s.currentThreshold ?: JSONObject.NULL)
-                                .put("checkedBlock", s.checkedBlock ?: JSONObject.NULL),
+                                .put("checkedBlock", s.checkedBlock ?: JSONObject.NULL)
+                                .put("activationMinedAt", s.activationMinedAt ?: JSONObject.NULL),
                         )
                     }
                 },
@@ -550,10 +559,20 @@ class SafeAccounts internal constructor(
         }
         // Its activation was just seen mined: a "no code" read is an RPC still behind that block, not
         // proof it isn't active, so it mustn't bring Activate back. Bounded, as the receipt is one RPC's word too.
+        if (found != SafeDeployment.NOT_ACTIVE) return found
         val minedAt = activationsMined[key]
-        if (found == SafeDeployment.NOT_ACTIVE && minedAt != null) {
+        if (minedAt != null) {
             if (monotonicMs() - minedAt in 0 until ACTIVATION_SETTLE_MS) return SafeDeployment.SETTLING
             activationsMined.remove(key, minedAt)
+            clearActivationMined(safe.address)
+            return found
+        }
+        // Seen mined in an earlier run of the process: only the on-disk wall-clock time survived. Bounded both
+        // ways, so a clock set back or forward since can end the window early but never hold it open.
+        val persisted = _state.value?.safe(safe.address)?.activationMinedAt ?: safe.activationMinedAt
+        if (persisted != null) {
+            if (clock() - persisted in 0 until ACTIVATION_SETTLE_MS) return SafeDeployment.SETTLING
+            clearActivationMined(safe.address)
         }
         return found
     }
@@ -561,7 +580,28 @@ class SafeAccounts internal constructor(
     /** Records that [address] is deployed on its chain: only on a verified read ([checkDeployed]). */
     @VisibleForTesting
     internal suspend fun markDeployed(address: String) = update { s ->
-        s.copy(safes = s.safes.map { if (it.address.equals(address, ignoreCase = true)) it.copy(deployed = true) else it }) to Unit
+        s.copy(safes = s.safes.map { if (it.address.equals(address, ignoreCase = true)) it.copy(deployed = true, activationMinedAt = null) else it }) to Unit
+    }
+
+    /** Puts [at] on disk as when [address]'s activation was seen mined, unless one inside the window is there already. */
+    private suspend fun noteActivationMined(address: String, at: Long) = update { s ->
+        s.copy(
+            safes = s.safes.map {
+                val held = it.activationMinedAt?.let { t -> at - t in 0 until ACTIVATION_SETTLE_MS } == true
+                if (it.address.equals(address, ignoreCase = true) && !it.deployed && !held) it.copy(activationMinedAt = at) else it
+            },
+        ) to Unit
+    }
+
+    /** Takes [address]'s settle window off disk, once it's over. */
+    private suspend fun clearActivationMined(address: String) {
+        if (_state.value?.safe(address)?.activationMinedAt == null) return
+        // Tidying only: a failed write leaves a time the bounded check already reads as over.
+        runCatching {
+            update { s ->
+                s.copy(safes = s.safes.map { if (it.address.equals(address, ignoreCase = true)) it.copy(activationMinedAt = null) else it }) to Unit
+            }
+        }.onFailure { if (it is CancellationException) throw it }
     }
 
     /**
@@ -817,7 +857,12 @@ class SafeAccounts internal constructor(
         val safe = state.safe(label.address) ?: return
         if (label.activates) {
             if (status.stage is SendStatus.Stage.Confirmed && !safe.deployed) {
-                activationsMined.putIfAbsent(safe.address.lowercase(), monotonicMs())
+                // A status replayed after a restart keeps the window the first sighting opened, not a fresh one.
+                val now = clock()
+                val since = safe.activationMinedAt?.let { now - it }?.takeIf { it in 0 until ACTIVATION_SETTLE_MS } ?: 0L
+                activationsMined.putIfAbsent(safe.address.lowercase(), monotonicMs() - since)
+                // On disk too, so a restart inside the window doesn't offer Activate again on a lagging read.
+                runCatching { noteActivationMined(safe.address, now) }.onFailure { if (it is CancellationException) throw it }
                 confirmActivation(safe)
             }
             return

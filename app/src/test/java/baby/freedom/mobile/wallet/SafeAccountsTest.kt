@@ -67,8 +67,9 @@ class SafeAccountsTest {
         readDeployment: suspend (Long, String) -> SafeDeployment = { _, _ -> SafeDeployment.UNVERIFIED },
         activationRetryMs: Long = 5_000,
         monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
+        clock: () -> Long = { 42L },
     ) = SafeAccounts(
-        vault, SafeStore(file), scope, Dispatchers.Unconfined, clock = { 42L },
+        vault, SafeStore(file), scope, Dispatchers.Unconfined, clock = clock,
         readDeployment = readDeployment, activationRetryMs = activationRetryMs, monotonicMs = monotonicMs,
     )
 
@@ -982,6 +983,60 @@ class SafeAccountsTest {
         found = SafeDeployment.ACTIVE
         assertEquals(SafeDeployment.ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
         assertTrue(s.state.value!!.safes.single().deployed)
+    }
+
+    @Test
+    fun `the settle window after a mined activation outlives a process restart, and stays bounded`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        val confirmed = execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e4".repeat(32))
+        var wall = 1_000_000L
+        var reads = 0
+        val first = safes({ _, _ -> reads++; SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, clock = { wall }).also { it.reconcile(vault.state.value) }
+        first.noteSend(confirmed)
+        withTimeout(5_000) { while (reads < 4) delay(5) }
+        assertEquals(1_000_000L, first.state.value!!.safes.single().activationMinedAt)
+        assertTrue(JSONObject(file.readText()).getJSONArray("safes").getJSONObject(0).getLong("activationMinedAt") == 1_000_000L)
+
+        // The process restarts: a fresh instance, a monotonic clock that knows nothing, the time on disk.
+        wall += 60_000
+        val again = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, monotonicMs = { 5L }, clock = { wall })
+            .also { it.reconcile(vault.state.value) }
+        assertEquals(SafeDeployment.SETTLING, again.checkDeployed(again.state.value!!.safes.single()))
+        wall = 1_000_000L + SafeAccounts.ACTIVATION_SETTLE_MS - 1
+        assertEquals(SafeDeployment.SETTLING, again.checkDeployed(again.state.value!!.safes.single()))
+        // Past the window it's not active again, and the time comes off disk.
+        wall += 1
+        assertEquals(SafeDeployment.NOT_ACTIVE, again.checkDeployed(again.state.value!!.safes.single()))
+        assertEquals(null, again.state.value!!.safes.single().activationMinedAt)
+        assertTrue(JSONObject(file.readText()).getJSONArray("safes").getJSONObject(0).isNull("activationMinedAt"))
+
+        // A wall clock set back since doesn't hold the window open either.
+        val third = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, clock = { wall }).also { it.reconcile(vault.state.value) }
+        third.noteSend(confirmed)
+        val fourth = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, clock = { wall - 5 }).also { it.reconcile(vault.state.value) }
+        assertEquals(SafeDeployment.NOT_ACTIVE, fourth.checkDeployed(fourth.state.value!!.safes.single()))
+
+        // A status replayed after a restart keeps the first sighting's window rather than opening a new one.
+        wall = 2_000_000L
+        var mono = 10_000L
+        val fifth = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, monotonicMs = { mono }, clock = { wall }).also { it.reconcile(vault.state.value) }
+        fifth.noteSend(confirmed)
+        wall += 5 * 60_000
+        mono += 5 * 60_000
+        val sixth = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, monotonicMs = { mono }, clock = { wall }).also { it.reconcile(vault.state.value) }
+        sixth.noteSend(confirmed)
+        assertEquals(2_000_000L, sixth.state.value!!.safes.single().activationMinedAt)
+        mono += 5 * 60_000
+        wall += 5 * 60_000
+        assertEquals(SafeDeployment.NOT_ACTIVE, sixth.checkDeployed(sixth.state.value!!.safes.single()))
+
+        // A verified read marks it and drops the time.
+        sixth.noteSend(confirmed)
+        val seventh = safes({ _, _ -> SafeDeployment.ACTIVE }, clock = { wall }).also { it.reconcile(vault.state.value) }
+        assertEquals(SafeDeployment.ACTIVE, seventh.checkDeployed(seventh.state.value!!.safes.single()))
+        assertTrue(seventh.state.value!!.safes.single().deployed)
+        assertEquals(null, seventh.state.value!!.safes.single().activationMinedAt)
     }
 
     @Test
