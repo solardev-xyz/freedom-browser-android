@@ -4,10 +4,10 @@
 # upstream squash-merges and deletes the branch (see
 # scripts/check-ffi-ref.sh).
 #
-# This is a status check, not a merge gate: main has no branch
-# protection, so a red run here does not stop a merge unless `ffi-ref`
-# is made a required check. What actually enforces the pin is the same
-# script as the first step of release.yml, which refuses to build.
+# `ffi-ref` is meant to be a required check of main's merge queue, so it
+# also runs on `merge_group`: the queue waits for the required checks on
+# the combined commit and never merges without them. release.yml runs the
+# same script as its first step, so a release refuses to build either way.
 #
 # The `licences` job (#325) checks that app/licences/ lists every crate
 # linked at FFI_REF and what Colibri links at COLIBRI_REF; release.yml
@@ -17,6 +17,7 @@ name: ffi-ref
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
