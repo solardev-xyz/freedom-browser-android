@@ -497,6 +497,9 @@ internal fun SafePage(
     var refreshTick by remember { mutableStateOf(0) }
     var activation by remember { mutableStateOf<SafeChain.Activation?>(null) }
     var checkError by remember { mutableStateOf<String?>(null) }
+    // Why activation isn't offered though no code was confirmed (UNVERIFIED/SETTLING). Kept apart from checkError, a failed read:
+    // the header shows that one in the balance slot, and a balance read failing after this must not wipe the explanation.
+    var activationNote by remember { mutableStateOf<String?>(null) }
     var checking by remember { mutableStateOf(false) }
     var holdings by remember { mutableStateOf<List<Pair<Token, BigInteger>>?>(null) }
 
@@ -505,6 +508,7 @@ internal fun SafePage(
         val c = chain ?: return@LaunchedEffect
         checking = true
         checkError = null
+        activationNote = null
         // Until this check has priced it again, an earlier price must not stand: the Safe may be active by now.
         var settled = false
         try {
@@ -515,12 +519,12 @@ internal fun SafePage(
                     // Code no verified read confirms: it may well be active, so activation isn't offered. Pending, to check again.
                     SafeDeployment.UNVERIFIED -> {
                         activation = null
-                        checkError = Strings.get(R.string.safe_activation_unverified, c.name)
+                        activationNote = Strings.get(R.string.safe_activation_unverified, c.name)
                     }
                     // Its activation was just mined, and the RPCs don't have that block yet: not offered again either.
                     SafeDeployment.SETTLING -> {
                         activation = null
-                        checkError = Strings.get(R.string.safe_activation_settling, c.name)
+                        activationNote = Strings.get(R.string.safe_activation_settling, c.name)
                     }
                 }
             }
@@ -652,6 +656,7 @@ internal fun SafePage(
                         activation = activation,
                         checking = checking,
                         checkError = checkError,
+                        activationNote = activationNote,
                         error = error,
                         busy = busy,
                         onRefresh = { refreshTick++ },
@@ -893,6 +898,7 @@ private fun SafeActivationSection(
     activation: SafeChain.Activation?,
     checking: Boolean,
     checkError: String?,
+    activationNote: String?,
     error: String?,
     busy: Boolean,
     onRefresh: () -> Unit,
@@ -904,8 +910,9 @@ private fun SafeActivationSection(
         when {
             chain == null -> Text(stringResource(R.string.safe_activation_no_chain), style = MaterialTheme.typography.bodyMedium)
             executor == null -> Text(stringResource(R.string.safe_activation_no_executor), style = MaterialTheme.typography.bodyMedium)
-            activation == null && checkError != null -> {
-                FieldText(checkError, error = true)
+            activation == null && (activationNote != null || checkError != null) -> {
+                activationNote?.let { FieldText(it, error = true) }
+                checkError?.let { FieldText(it, error = true) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onRefresh, enabled = !checking, modifier = Modifier.heightIn(min = 48.dp)) {
                         Text(stringResource(if (checking) R.string.safe_checking else R.string.safe_check_again))
