@@ -590,11 +590,12 @@ internal class DisconnectOnCloseInputStream(
  * Up to [max] bytes of [input] (fewer only at its end), read within
  * [limitMs] in all: past that — or once [abandon] fires — [conn] is
  * disconnected off this thread, which fails the blocked read, and this
- * throws [SocketTimeoutException] (or the read's own failure, if the page
- * gave up). The connection's read timeout alone bounds each read, not the
+ * throws [SocketTimeoutException] (the caller tells a page that gave up
+ * apart by [AbandonSignal.abandoned]). The connection's read timeout alone bounds each read, not the
  * whole: a gateway trickling a byte at a time under it would otherwise
  * hold the interceptor thread for up to [max] such waits, and a main-frame
- * fetch has no [AbandonSignal] to cut it short (PR #557 R3-M2).
+ * fetch has no [AbandonSignal] (nor header deadline) to cut it short, so
+ * this limit is all that bounds it there (PR #557 R3-M2).
  */
 internal fun readAheadWithin(
     input: InputStream,
@@ -619,9 +620,12 @@ internal fun readAheadWithin(
             if (r < 0) break
             n += r
         }
-        // Read to the end, or the cut landed just as the last read returned:
-        // the connection may be gone, so what's left of the body with it.
-        if (cut.get() && n == max) throw SocketTimeoutException("body not read ahead in time")
+        // Disarm the cut before the body goes on to WebView: a watchdog
+        // firing past this point finds it taken and disconnects nothing.
+        // Should it have landed just as the last read returned, the
+        // connection may be gone, and what's left of the body with it.
+        val wasCut = !cut.compareAndSet(false, true)
+        if (wasCut && n == max) throw SocketTimeoutException("body not read ahead in time")
         return buf.copyOf(n)
     } finally {
         task.cancel(false)
