@@ -290,19 +290,77 @@ class RadicleAdmissionTest {
     }
 
     @Test
-    fun `a redirected commit's reads drop at the next commit`() {
+    fun `a redirected commit's reads outlive one request-less commit and drop at the next`() {
         val adm = RadicleAdmission()
         adm.navigationRequested(tabA, "http://b.example/")
         adm.documentStarted(tabA, "https://b.example/")
         val b = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
-        // Back to a history entry: no request seen.
+        // Back to a history entry: no request seen. It can't be told from
+        // the redirect's own commit after a request-less one (see below),
+        // so it takes the guessed request and leaves B's read running.
         adm.documentStarted(tabA, "https://a.example/")
+        assertFalse(b.cancelled)
+        // The next one has nothing pending: a document of its own.
+        adm.documentStarted(tabA, "https://c.example/")
         assertTrue(b.cancelled)
         b.release()
-        val a = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        val c = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
         adm.documentStarted(tabA, blank = true)
-        assertTrue(a.cancelled)
-        a.release()
+        assertTrue(c.cancelled)
+        c.release()
+    }
+
+    @Test
+    fun `a redirect committing after a late request-less commit keeps its page's reads`() {
+        val adm = RadicleAdmission()
+        val old = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.navigationRequested(tabA, "https://r.example/redir")
+        // The redirect target's page reads early, under its request.
+        val target = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        // A service worker's answer commits late and takes the guess.
+        adm.documentStarted(tabA, "https://sw.example/")
+        assertTrue(old.cancelled)
+        old.release()
+        assertFalse(target.cancelled)
+        // The redirect commits on its target: it claims the guessed request.
+        adm.documentStarted(tabA, "https://t.example/")
+        assertFalse(target.cancelled)
+        val fromTarget = adm.requester(tabA)
+        granted(adm.admit(fromTarget, write = false, waitMs = 1_000)).release()
+        // The next request-less commit is a document of its own.
+        adm.documentStarted(tabA, "https://next.example/")
+        assertTrue(target.cancelled)
+        assertSame(Admit.Cancelled, adm.admit(fromTarget, write = false, waitMs = 1_000))
+        target.release()
+    }
+
+    @Test
+    fun `chained redirects each drop the previous page's reads at their commit`() {
+        val adm = RadicleAdmission()
+        adm.navigationRequested(tabA, "https://r1.example/")
+        adm.documentStarted(tabA, "https://t1.example/")
+        val t1 = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.navigationRequested(tabA, "https://r2.example/")
+        val t2 = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.documentStarted(tabA, "https://t2.example/")
+        assertTrue(t1.cancelled)
+        assertFalse(t2.cancelled)
+        t1.release()
+        t2.release()
+    }
+
+    @Test
+    fun `known gap - a late request-less commit then a second request lets the redirect take the second`() {
+        // Pins the documented gap: no URL or order tells this sequence from
+        // a redirect after the second request's own redirect.
+        val adm = RadicleAdmission()
+        adm.navigationRequested(tabA, "https://r1.example/")
+        val t1 = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.documentStarted(tabA, "https://sw.example/")
+        adm.navigationRequested(tabA, "https://r2.example/")
+        adm.documentStarted(tabA, "https://t1.example/")
+        assertTrue(t1.cancelled)
+        t1.release()
     }
 
     @Test

@@ -43,17 +43,29 @@ import kotlin.concurrent.withLock
  * on no pending URL — a redirect's, or a history entry's or service
  * worker's that landed after the next request — guesses the oldest
  * request not guessed yet and keeps it pending, so that request's own
- * commit still finds it. A commit drops only the generations before the
- * one it claimed, never a later request's: navigations requested before
- * any of them commits each find their own at their commit. Only a commit
- * with nothing left to claim starts a generation of its own.
+ * commit still finds it. A commit on no pending URL that finds only a
+ * guessed request left claims it too: it may be that request's own, on a
+ * redirect's target, after a request-less commit took the guess. A commit
+ * drops only the generations before the one it claimed, never a later
+ * request's: navigations requested before any of them commits each find
+ * their own at their commit. Only a commit with nothing pending starts a
+ * generation of its own.
  *
- * Known gap: a request the page on screen makes between the next
- * navigation's request and its commit counts as the incoming document's,
- * and so does one made after a navigation that never committed, until
- * the tab's next commit that claims a later request. Such a call only
- * ends at its own deadline. The gap only ever leaves a call running, it
- * never drops one from the document on screen.
+ * Known gaps. Leaving a call running: a request the page on screen makes
+ * between the next navigation's request and its commit counts as the
+ * incoming document's, and so does one made after a navigation that never
+ * committed, until the tab's next commit that claims a later request; a
+ * redirected page's calls outlive one request-less commit that follows
+ * it, and drop at the one after. Such a call only ends at its own
+ * deadline. Dropping a call of the document on screen, which neither URL
+ * nor order can tell apart without the interceptor's per-document
+ * attribution: a document no request was seen for (a service worker's
+ * answer, an in-place refusal) gets its generation only at its commit, so
+ * a call it makes before its commit reaches the UI thread is filed under
+ * the previous document and dropped with it; and when such a commit lands
+ * late, after the next navigation's request, and a second navigation is
+ * requested before the first commits on a redirect's target, that commit
+ * takes the second's request and drops the calls made under the first.
  */
 internal class RadicleAdmission(private val limits: Limits = Limits()) {
     data class Limits(
@@ -170,14 +182,24 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
                 if (pending.isEmpty()) requested.remove(tab)
                 cancel(tab, matched.generation)
             }
-            guess == null -> {
-                // Nothing left to claim: what's still pending was guessed
-                // by a commit before and is older than this document.
+            // A blank page claims nothing (see above).
+            blank -> if (guess != null) {
+                cancel(tab, guess.generation)
+            } else {
                 requested.remove(tab)
                 advance(tab)
             }
-            // A blank page claims nothing (see above).
-            blank -> cancel(tab, guess.generation)
+            guess == null && pending.isNotEmpty() -> {
+                // Only the request an earlier commit guessed is left (a
+                // guess retires everything older). This commit may be that
+                // request's own, on a redirect's target, and the earlier
+                // one a request-less document's: claim it rather than
+                // drop the reads made under it.
+                requested.remove(tab)
+                cancel(tab, pending.last().generation)
+            }
+            // Nothing left to claim: a document of its own.
+            guess == null -> advance(tab)
             else -> {
                 while (pending.first() !== guess) pending.removeFirst()
                 guess.guessed = true
