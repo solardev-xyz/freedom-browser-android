@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
@@ -92,7 +92,11 @@ internal fun radiclePromptCopy(ask: RadicleAsk): RadiclePromptCopy = when (ask) 
         val detail = Strings.get(R.string.radicle_prompt_write_detail)
         RadiclePromptCopy(
             Strings.get(request),
-            if (ask.limited) Strings.get(R.string.radicle_prompt_write_limited) + " " + detail else detail,
+            when {
+                ask.limited -> Strings.get(R.string.radicle_prompt_write_limited) + " " + detail
+                ask.ruleOn -> Strings.get(R.string.radicle_prompt_write_unsaved) + " " + detail
+                else -> detail
+            },
             Strings.get(allow),
         )
     }
@@ -284,7 +288,7 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
     val identity = radiclePromptIdentity(ask)
     val write = ask as? RadicleAsk.Write
     // A write's "always allow" switch starts where the site's rule is.
-    var always by remember(request) { mutableStateOf(write?.limited == true) }
+    var always by remember(request) { mutableStateOf(write?.ruleOn == true) }
     // Cancel, Back and a tap outside are one answer, the switch included.
     fun answer(allowed: Boolean) = request.respond(allowed, if (write != null) always else null)
     AlertDialog(
@@ -298,86 +302,91 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
             )
         },
         text = {
-            // Scrolls as a whole, so at a large font size nothing (what's
-            // published least of all) is squeezed out of view.
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(copy.request)
-                if (rid != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(rid, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            // A write's content box scrolls on its own; the prompt also
+            // scrolls as a whole, so at a large font size or in landscape
+            // nothing (what's published least of all) is squeezed out of
+            // view. Either can hide some of what's published, the warning
+            // or the switch below the fold, so either puts up the note.
+            val scroll = remember(request) { ScrollState(0) }
+            val list = remember(request) { LazyListState() }
+            val more by remember(request) { derivedStateOf { write != null && radicleWriteHasMore(list, scroll) } }
+            Column {
+                // Pinned above what scrolls, so the first view always has it,
+                // however little of the prompt fits.
+                if (more) {
+                    Text(
+                        stringResource(R.string.radicle_prompt_write_scroll),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(bottom = 8.dp).testTag("radicle-write-more"),
+                    )
                 }
-                if (identity != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(identity.first, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                    Text(identity.second, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                }
-                if (write != null) {
-                    // What's published scrolls in a box of its own (a comment
-                    // can be 64 KB), laid out lazily (it can be 65,000 lines),
-                    // so the warning and the switch stay close by. Whether
-                    // there's more than the box shows is said above it, where
-                    // the first view always has it, not below it.
-                    val content = remember(write) { radicleWriteLines(write) }
-                    val list = remember(request) { LazyListState() }
-                    val more by remember(list) { derivedStateOf { list.canScrollForward || list.canScrollBackward } }
-                    if (more) {
+                Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)) {
+                    Text(copy.request)
+                    if (rid != null) {
                         Spacer(Modifier.height(8.dp))
-                        Text(
-                            stringResource(R.string.radicle_prompt_write_scroll),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.testTag("radicle-write-more"),
-                        )
+                        Text(rid, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                     }
-                    Spacer(Modifier.height(8.dp))
-                    LazyColumn(
-                        state = list,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = WRITE_CONTENT_MAX_HEIGHT)
-                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                            .testTag("radicle-write-content"),
-                    ) {
-                        content.forEach { line ->
-                            item {
-                                Text(
-                                    line.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.padding(top = 4.dp),
-                                )
+                    if (identity != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(identity.first, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                        Text(identity.second, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (write != null) {
+                        // What's published scrolls in a box of its own (a comment
+                        // can be 64 KB), laid out lazily (it can be 65,000 lines),
+                        // so the warning and the switch stay close by.
+                        val content = remember(write) { radicleWriteLines(write) }
+                        Spacer(Modifier.height(8.dp))
+                        LazyColumn(
+                            state = list,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = WRITE_CONTENT_MAX_HEIGHT)
+                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("radicle-write-content"),
+                        ) {
+                            content.forEach { line ->
+                                item {
+                                    Text(
+                                        line.label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                }
+                                items(line.rows) { row -> WriteRow(row, line) }
                             }
-                            items(line.rows) { row -> WriteRow(row, line) }
                         }
                     }
-                }
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    copy.detail,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (write != null) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .padding(top = 8.dp)
-                            .protectedToggle(tap, value = always, role = Role.Switch) { always = it }
-                            .testTag("radicle-always-allow"),
-                    ) {
-                        Text(
-                            stringResource(R.string.radicle_prompt_write_always),
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Switch(checked = always, onCheckedChange = null, enabled = armed)
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        copy.detail,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (write != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .padding(top = 8.dp)
+                                .protectedToggle(tap, value = always, role = Role.Switch) { always = it }
+                                .testTag("radicle-always-allow"),
+                        ) {
+                            Text(
+                                stringResource(R.string.radicle_prompt_write_always),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Switch(checked = always, onCheckedChange = null, enabled = armed)
+                        }
                     }
+                    ObscuredTapNotice(tap)
                 }
-                ObscuredTapNotice(tap)
             }
         },
         confirmButton = {
@@ -396,6 +405,15 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
         },
     )
 }
+
+/**
+ * Whether a write prompt shows less than all of itself: its content box
+ * ([list]) scrolls, or the prompt as a whole ([scroll]) does. A
+ * [ScrollState] not laid out yet reads [Int.MAX_VALUE] as its
+ * [ScrollState.maxValue]; that isn't "more".
+ */
+internal fun radicleWriteHasMore(list: LazyListState, scroll: ScrollState): Boolean =
+    list.canScrollForward || list.canScrollBackward || scroll.maxValue in 1 until Int.MAX_VALUE
 
 /** One [RadicleWriteRow] of a write prompt: a marker (not text a page can write) set apart in italics and colour. */
 @Composable

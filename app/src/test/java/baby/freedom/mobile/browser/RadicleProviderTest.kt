@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.data.AutoWriteCount
 import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleSeed
@@ -63,12 +64,13 @@ class RadicleProviderTest {
             rules.remove(origin)
             return true
         }
-        override suspend fun countAutoWrite(origin: String, now: Long): Boolean {
+        override suspend fun countAutoWrite(origin: String, now: Long): AutoWriteCount {
             val times = counted.getOrPut(origin) { mutableListOf() }
             times.removeAll { now - it >= 24 * 3600_000L }
-            if (!saves || times.size >= 50) return false
+            if (!saves) return AutoWriteCount.NOT_SAVED
+            if (times.size >= 50) return AutoWriteCount.USED_UP
             times += now
-            return true
+            return AutoWriteCount.COUNTED
         }
     }
 
@@ -132,7 +134,7 @@ class RadicleProviderTest {
             asked += a
             when {
                 withdrawn -> RadicleAnswer.REFUSED
-                a is RadicleAsk.Write -> RadicleAnswer(answer, always ?: a.limited)
+                a is RadicleAsk.Write -> RadicleAnswer(answer, always ?: a.ruleOn)
                 else -> RadicleAnswer(answer)
             }
         }
@@ -565,6 +567,30 @@ class RadicleProviderTest {
         now += 24 * 3600_000L
         ok(req("radicle_commentIssue", comment()))
         assertEquals(2, asked.size)
+    }
+
+    @Test
+    fun `a count that can't be saved asks without saying the site used up its writes (#544 R3-M1)`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        grants.saves = false
+        ok(req("radicle_commentIssue", comment()))
+        val ask = asked.single() as RadicleAsk.Write
+        assertFalse("nothing was used up", ask.limited)
+        assertTrue("the switch starts where the rule is", ask.ruleOn)
+        val detail = radiclePromptCopy(ask).detail
+        assertFalse(detail.contains("used up"))
+        assertTrue(detail.startsWith("The count of this site's writes without asking couldn't be saved"))
+        // Approved with the switch as it started, the rule stays on.
+        assertEquals(ME, grants.rules[site])
+        assertTrue(grants.counted[site]!!.isEmpty())
+        // The burst token went back: once saving works, five go out in a row again.
+        grants.saves = true
+        asked.clear()
+        repeat(AutoWriteBurst.BURST) { ok(req("radicle_commentIssue", comment())) }
+        assertTrue(asked.isEmpty())
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue((asked.single() as RadicleAsk.Write).limited)
     }
 
     @Test

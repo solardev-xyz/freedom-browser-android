@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.data.AutoWriteCount
 import baby.freedom.swarm.RadicleInfo
 import baby.freedom.swarm.RadicleNode
 import baby.freedom.swarm.RadicleSeed
@@ -91,8 +92,8 @@ class RadicleProvider(
         /** Turn the rule off; false if not saved. */
         suspend fun stopAutoWrites(origin: String): Boolean = false
 
-        /** Count one rule-answered write at wall-clock [now] within the daily cap; false: it needs a prompt. */
-        suspend fun countAutoWrite(origin: String, now: Long): Boolean = false
+        /** Count one rule-answered write at wall-clock [now] within the daily cap; anything but COUNTED needs a prompt. */
+        suspend fun countAutoWrite(origin: String, now: Long): AutoWriteCount = AutoWriteCount.NOT_SAVED
     }
 
     /** The node: [RadicleClient] in the app. [call] blocks. */
@@ -637,8 +638,9 @@ class RadicleProvider(
         // past them asks, and one the user approves isn't counted.
         val ruleOn = grants.autoWrites(origin, did)
         var turnOn = false
-        if (!(ruleOn && takeAutoWrite(origin))) {
-            val answer = ask(writeAsk(origin, method, params, write, limited = ruleOn))
+        val taken = if (ruleOn) takeAutoWrite(origin) else null
+        if (taken != AutoWriteCount.COUNTED) {
+            val answer = ask(writeAsk(origin, method, params, write, ruleOn = ruleOn, limited = taken == AutoWriteCount.USED_UP))
             // Only the user's own switch changes the rule — never a prompt
             // taken down (a navigation, the tab closing, its time running
             // out), which carries no switch. Off is saved at once, approve
@@ -670,14 +672,17 @@ class RadicleProvider(
 
     /**
      * Charge one write to [origin]'s rule: a token from [burst], then a
-     * slot in the store's daily count; false (it needs a prompt) if either
-     * is used up, with the token given back if only the day is.
+     * slot in the store's daily count. [AutoWriteCount.COUNTED] if both
+     * were there; [AutoWriteCount.USED_UP] (it needs a prompt saying the
+     * site used up its writes) if either is;
+     * [AutoWriteCount.NOT_SAVED] (a prompt, but nothing used up) if the
+     * count couldn't be saved. The token is given back unless counted.
      */
-    private suspend fun takeAutoWrite(origin: String): Boolean {
-        if (!burst.take(origin)) return false
-        if (grants.countAutoWrite(origin, clock())) return true
-        burst.giveBack(origin)
-        return false
+    private suspend fun takeAutoWrite(origin: String): AutoWriteCount {
+        if (!burst.take(origin)) return AutoWriteCount.USED_UP
+        val counted = grants.countAutoWrite(origin, clock())
+        if (counted != AutoWriteCount.COUNTED) burst.giveBack(origin)
+        return counted
     }
 
     /** The per-write prompt for [write]: what's signed, as the node will get it. */
@@ -686,6 +691,7 @@ class RadicleProvider(
         method: String,
         params: JSONObject,
         write: Validated.Ok,
+        ruleOn: Boolean,
         limited: Boolean,
     ): RadicleAsk.Write {
         val a = write.args
@@ -705,6 +711,7 @@ class RadicleProvider(
             labels = labels?.let { l -> (0 until l.length()).map { l.getString(it) } }.orEmpty(),
             state = a.optString("state"),
             replyTo = a.optString("replyTo"),
+            ruleOn = ruleOn,
             limited = limited,
         )
     }
@@ -971,9 +978,10 @@ sealed interface RadicleAsk {
      * patch revision a comment goes to ([claimedPatch]: the patch the page
      * says that revision belongs to, when it named another); the issue's
      * [title], [labels], the description or comment [body], the comment
-     * it replies to ([replyTo]), the new issue [state]. [limited]: the
-     * site's "always allow writes" rule is on, but its limit stopped this
-     * one, so its switch starts on.
+     * it replies to ([replyTo]), the new issue [state]. [ruleOn]: the
+     * site's "always allow writes" rule is on (it asks anyway because its
+     * limit stopped this one, or the count couldn't be saved), so its
+     * switch starts on. [limited]: it was the limit, which the prompt says.
      */
     data class Write(
         override val origin: String,
@@ -986,6 +994,7 @@ sealed interface RadicleAsk {
         val labels: List<String> = emptyList(),
         val state: String = "",
         val replyTo: String = "",
+        val ruleOn: Boolean = false,
         val limited: Boolean = false,
     ) : RadicleAsk
 }

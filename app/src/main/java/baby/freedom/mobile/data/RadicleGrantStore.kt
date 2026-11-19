@@ -168,12 +168,15 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
     /**
      * Count one write [origin]'s rule answers at [now] (wall clock, ms), if
      * fewer than [MAX_AUTO_WRITES_PER_DAY] were counted in the 24 hours
-     * before; `false` (the write needs a prompt) otherwise, or if the count
-     * couldn't be saved. A time ahead of [now] (written while the clock was
-     * ahead, then set back) still counts, but as made at [now]: the site
-     * waits at most a day for it, not however far ahead the clock was.
+     * before: [AutoWriteCount.COUNTED]. Otherwise the write needs a prompt,
+     * [AutoWriteCount.USED_UP] if the day's writes are used up,
+     * [AutoWriteCount.NOT_SAVED] if the count couldn't be saved (its
+     * prompt mustn't say the site used up writes it may not have). A time
+     * ahead of [now] (written while the clock was ahead, then set back)
+     * still counts, but as made at [now]: the site waits at most a day
+     * for it, not however far ahead the clock was.
      */
-    suspend fun countAutoWrite(origin: String, now: Long): Boolean {
+    suspend fun countAutoWrite(origin: String, now: Long): AutoWriteCount {
         var counted = false
         val written = write {
             val key = autoWritesKey(origin)
@@ -182,7 +185,11 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
             val kept = if (counted) recent + now else recent
             if (kept.isEmpty()) it.remove(key) else it[key] = kept.joinToString(",")
         }
-        return written && counted
+        return when {
+            !written -> AutoWriteCount.NOT_SAVED
+            counted -> AutoWriteCount.COUNTED
+            else -> AutoWriteCount.USED_UP
+        }
     }
 
     /**
@@ -264,4 +271,16 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
                     .also { instance = it }
             }
     }
+}
+
+/** What [RadicleGrantStore.countAutoWrite] made of one write a site's rule would answer (#544). */
+enum class AutoWriteCount {
+    /** Counted: it goes out without a prompt. */
+    COUNTED,
+
+    /** The site has used up its writes (the day's, or for now): it asks, saying so. */
+    USED_UP,
+
+    /** The count couldn't be saved: it asks, but nothing was used up. */
+    NOT_SAVED,
 }

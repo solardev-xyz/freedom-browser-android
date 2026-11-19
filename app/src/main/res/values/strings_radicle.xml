@@ -88,6 +88,7 @@
     <string name="radicle_prompt_write_state_allow">Change state</string>
     <string name="radicle_prompt_write_detail">It\'s signed with your Radicle identity and published to the network under your name. It\'s public and permanent: it can\'t be edited away or taken back.</string>
     <string name="radicle_prompt_write_limited">This site has used up its writes without asking for now (5 in a row, then one every 30 seconds, at most 50 a day), so this one needs your OK.</string>
+    <string name="radicle_prompt_write_unsaved">The count of this site\'s writes without asking couldn\'t be saved, so this one needs your OK.</string>
     <string name="radicle_prompt_write_always">Always allow this site to write as you without asking (at most 50 writes a day)</string>
     <string name="radicle_prompt_write_issue">Issue</string>
     <string name="radicle_prompt_write_revision">Patch revision</string>
@@ -107,7 +108,7 @@
         <item quantity="one">%d space</item>
         <item quantity="other">%d spaces</item>
     </plurals>
-    <string name="radicle_prompt_write_scroll">There\'s more than this box shows: scroll it to read everything that\'s published.</string>
+    <string name="radicle_prompt_write_scroll">There\'s more than fits: scroll to read everything that\'s published before you allow it.</string>
     <string name="radicle_prompt_write_comment">Comment</string>
     <string name="radicle_prompt_write_reply_to">In reply to comment</string>
     <string name="radicle_prompt_write_state">New state</string>
