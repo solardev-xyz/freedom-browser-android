@@ -320,7 +320,7 @@
     <string name="send_disconnect_explainer">The site\'s open pages lose the account at once, and its auto-approve rules are removed. It can ask to connect again; nothing is shared until you approve.</string>
     <string name="send_disconnect_failed">Couldn\'t disconnect: the change couldn\'t be saved. Try again.</string>
     <string name="send_ask_each_time_failed">Couldn\'t switch to asking each time: the change couldn\'t be saved. Try again.</string>
-    <string name="send_swarm_publishes">publishes</string>
+    <string name="send_swarm_publishes">publishes (except chunks it signed itself)</string>
     <string name="send_swarm_manages_feeds">manages feeds</string>
     <string name="send_swarm_signs">signs</string>
     <string name="send_swarm_sends_messages">sends messages</string>

@@ -81,7 +81,9 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
     is SwarmAsk.Publish -> SwarmPromptCopy(
         Strings.get(R.string.swarm_publish_title),
         Strings.get(R.string.swarm_publish_request),
-        Strings.get(R.string.swarm_publish_warning),
+        // A SOC signed by the user's own identity is refused once allowed (SwarmProvider.ownerCheck):
+        // say so, since that answer is what tells the site the identity is theirs.
+        if (ask.ownIdentity) Strings.get(R.string.swarm_publish_own_identity_warning) else Strings.get(R.string.swarm_publish_warning),
         Strings.get(R.string.swarm_publish_approve),
         // A page-signed SOC asks every time (SwarmProvider.publishSignedSoc): no switch.
         if (ask.kind == SwarmAsk.Publish.Kind.SignedSoc) null else Strings.get(R.string.swarm_publish_always),

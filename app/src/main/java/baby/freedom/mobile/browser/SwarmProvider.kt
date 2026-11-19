@@ -42,10 +42,12 @@ import org.json.JSONObject
  *    `swarm_getUploadStatus`, and the publish methods below.
  *  - publish (a sheet per upload, unless the user ticked "always allow"
  *    for the site): `swarm_publishData`, `swarm_publishFiles`,
- *    `swarm_publishChunk`, and `swarm_publishSingleOwnerChunk` (a SOC the
- *    page signed with its own key, desktop #647: no Freedom key signs,
- *    and one owned by the node or a wallet account is refused). Uploads
- *    spend the node's postage stamps.
+ *    `swarm_publishChunk`. Also `swarm_publishSingleOwnerChunk` (a SOC
+ *    the page signed with its own key, desktop #647: no Freedom key
+ *    signs), which is the exception: a sheet on every call, "always
+ *    allow" or not, and one owned by the node or a wallet account is
+ *    refused only after the user allowed it. Uploads spend the node's
+ *    postage stamps.
  *  - feeds / signing (a sheet the first time, which grants the site
  *    feed access; then one per call unless "always allow" was ticked for
  *    that kind): `swarm_createFeed`, `swarm_updateFeed`,
@@ -528,9 +530,10 @@ class SwarmProvider(
      * signed, stamped by the node. Publish tier, like
      * `swarm_publishChunk`: no Freedom key signs, so no feed access or
      * signing grant is needed. The signature must recover to `owner` for
-     * this identifier and chunk, and `owner` must not be one of this
-     * device's own identities ([ownerCheck]), before anyone is asked; the
-     * bytes that verified are the ones uploaded.
+     * this identifier and chunk before anyone is asked, and the bytes
+     * that verified are the ones uploaded. Whether `owner` is one of this
+     * device's own identities is refused ([ownerCheck]) only after the
+     * user allowed the sheet, never before — see below.
      *
      * The owner need not be the site's own key: any validly signed SOC
      * may be published, one read back with `swarm_readSingleOwnerChunk`
@@ -548,9 +551,13 @@ class SwarmProvider(
      * site's publish "always allow" (or a manifest's Allow all) doesn't
      * cover this method, as a stranger's SOC answering at upload speed
      * while one of the user's waits on a sheet would tell it the same —,
-     * and only after Allow is the owner compared ([ownerCheck]): before
-     * the sheet, [ownersKnown] checks only that the comparison can be
-     * made, the same for every owner.
+     * and only after Allow is the owner refused ([ownerCheck]): before
+     * the sheet, [ownIdentities] is read for every owner alike, so a
+     * request it can't answer fails the same whoever signed the chunk.
+     * That read does tell the *sheet* when the owner is the user's own
+     * ([SwarmAsk.Publish.ownIdentity]), so it can warn that Allow
+     * publishes nothing and only tells the site the identity is theirs;
+     * the page never sees the sheet, only the same wait on it.
      */
     private suspend fun publishSignedSoc(origin: String, params: JSONObject, calls: Calls): Reply {
         emptyOptions(params)
@@ -563,12 +570,14 @@ class SwarmProvider(
         val soc = SwarmChunks.verifySigned(identifier, signature, owner, SwarmChunks.cac(payload, span))
             ?: fail("The signature does not recover to owner for this identifier and chunk", "invalid_signature")
         preflightOrFail()
-        ownersKnown()
+        // Read for every owner, so a failure here can't depend on whose the chunk is.
+        val own = soc.owner.swarmHex() in ownIdentities()
         // Always asked: see above. No "always allow" is read or written.
         val answer = calls.ask(
             SwarmAsk.Publish(
                 origin, SwarmAsk.Publish.Kind.SignedSoc, payload.size.toLong(), null, null, emptyList(),
                 owner = SwarmChunks.checksum(soc.owner),
+                ownIdentity = own,
             ),
         )
         if (!answer.allowed) throw Invalid(rejected())
@@ -584,16 +593,6 @@ class SwarmProvider(
                 .put("owner", SwarmChunks.checksum(soc.owner))
                 .put("identifier", identifier.swarmHex()),
         )
-    }
-
-    /**
-     * Before a `swarm_publishSingleOwnerChunk` sheet: whether this
-     * device's own identities can all be told now, so a sheet isn't
-     * shown for a request [ownerCheck] would then fail. Never looks at
-     * the owner, so its answer is the same whoever signed the chunk.
-     */
-    private suspend fun ownersKnown() {
-        ownIdentities()
     }
 
     /**
@@ -2126,6 +2125,13 @@ sealed interface SwarmAsk {
          * after the sheet is allowed, so the sheet's showing tells a site nothing.
          */
         val owner: String? = null,
+        /**
+         * [owner] is one of this device's own identities (a wallet account,
+         * the Ant wallet key, the node): the sheet warns that Allow
+         * publishes nothing and tells the site the identity is the user's.
+         * Only the user sees it; the page waits on the sheet either way.
+         */
+        val ownIdentity: Boolean = false,
     ) : SwarmAsk {
         enum class Kind { Data, Files, Chunk, SignedSoc }
     }

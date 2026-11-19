@@ -594,13 +594,20 @@ class SwarmProviderTest {
             val e = err(call("swarm_publishSingleOwnerChunk", signedSoc(key)))
             assertEquals(label, 4100, e.code)
             assertEquals(label, "freedom_identity", e.reason)
-            // The sheet came first, naming the user's own address as the signer.
-            assertEquals(label, SwarmChunks.checksum(PublisherKeys.address(key).removePrefix("0x").hexToBytesOrNull()!!), (asked.single() as SwarmAsk.Publish).owner)
+            // The sheet came first, naming the user's own address as the signer and warning that it's theirs.
+            val ask = asked.single() as SwarmAsk.Publish
+            assertEquals(label, SwarmChunks.checksum(PublisherKeys.address(key).removePrefix("0x").hexToBytesOrNull()!!), ask.owner)
+            assertTrue(label, ask.ownIdentity)
+            assertEquals(label, "This chunk is signed by one of your own identities: a wallet account, your Ant wallet or your node. Freedom won't publish it. Allowing only tells the site that this identity is yours, so don't allow unless you mean to share that.", swarmPromptCopy(ask).warning)
         }
         assertTrue(node.uploads().isEmpty())
-        // The site's own key still goes through.
+        // The site's own key still goes through, its sheet with the usual warning.
+        asked.clear()
         ok(call("swarm_publishSingleOwnerChunk", signedSoc()))
         assertEquals(1, node.uploads().size)
+        val theirs = asked.single() as SwarmAsk.Publish
+        assertFalse(theirs.ownIdentity)
+        assertEquals(swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).warning, swarmPromptCopy(theirs).warning)
     }
 
     @Test
@@ -620,6 +627,8 @@ class SwarmProviderTest {
             assertEquals("always=$always", 4001, mine.code)
             assertEquals("always=$always", theirs.reason, mine.reason)
             assertEquals("always=$always", theirs.message, mine.message)
+            // Only the sheet, which the page never sees, tells the two apart.
+            assertEquals("always=$always", listOf(true, false), asked.map { (it as SwarmAsk.Publish).ownIdentity })
         }
         assertTrue(node.uploads().isEmpty())
         assertEquals(0, commits)
@@ -693,7 +702,10 @@ class SwarmProviderTest {
         assertTrue(asked.isEmpty())
         // Its sheet has no "always allow" switch; publishChunk's keeps one.
         assertEquals(null, swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.SignedSoc, 5, null, null, emptyList(), owner = pageOwner)).always)
-        assertTrue(swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).always != null)
+        assertEquals(
+            "Always allow this site to publish without asking (chunks the site signed itself still ask)",
+            swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).always,
+        )
         assertTrue(okJson(call("swarm_getCapabilities")).getJSONObject("extensions").getBoolean("pageSignedSingleOwnerChunks"))
     }
 
@@ -1789,8 +1801,8 @@ class SwarmProviderTest {
     fun `a Swarm site's line says what it may do without asking`() {
         fun grant(vararg auto: String) = baby.freedom.mobile.data.SwarmGrantStore.Grant(site, 1, auto.toSet())
         assertEquals("Asks before each upload and signature", swarmSiteSummary(grant()))
-        assertEquals("Publishes without asking", swarmSiteSummary(grant("publish")))
-        assertEquals("Publishes, manages feeds, signs without asking", swarmSiteSummary(grant("signing", "publish", "feeds")))
+        assertEquals("Publishes (except chunks it signed itself) without asking", swarmSiteSummary(grant("publish")))
+        assertEquals("Publishes (except chunks it signed itself), manages feeds, signs without asking", swarmSiteSummary(grant("signing", "publish", "feeds")))
         val messaging = baby.freedom.mobile.data.SwarmGrantStore.Grant(site, 1, setOf("messaging"), messaging = true)
         assertEquals("Sends messages without asking · Can send and receive messages", swarmSiteSummary(messaging))
         assertEquals("Asks before each upload and signature · Can send and receive messages", swarmSiteSummary(messaging.copy(autoApprove = emptySet())))
