@@ -1415,7 +1415,7 @@ class DownloadManager private constructor(context: Context) {
                 throw DownloadFailure(DownloadNote.of(R.string.library_download_node_not_running), retriable = true)
             } catch (e: IOException) {
                 currentCoroutineContext().ensureActive()
-                Log.i(LOG_TAG, "dweb download attempt failed: $gatewayUrl", e)
+                Log.i(LOG_TAG, "dweb download attempt failed: ${gatewayUrlForLog(gatewayUrl)} (${e.javaClass.simpleName})")
                 if (!dwebHeaderFailureRetries(e)) break
                 continue
             }
@@ -1424,7 +1424,7 @@ class DownloadManager private constructor(context: Context) {
             lastStatus = status
             conn.disconnect()
             if (status !in DWEB_TRANSIENT_STATUSES) break
-            Log.i(LOG_TAG, "dweb download: transient $status for $gatewayUrl")
+            Log.i(LOG_TAG, "dweb download: transient $status for ${gatewayUrlForLog(gatewayUrl)}")
         }
         throw DownloadFailure(
             when (lastStatus) {

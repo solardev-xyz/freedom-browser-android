@@ -208,6 +208,61 @@ class GatewaysTest {
         }
     }
 
+    @Test
+    fun `gatewayUrlFor refuses a path that leaves its content root`() {
+        // #534: as written, a gateway that decodes before it resolves dot
+        // segments would serve another root, or its own API, here.
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        listOf(
+            ContentRoot.Ipfs("bafy") to "/..%2f..%2fapi/v0/id",
+            ContentRoot.Ipfs("bafy") to "/%2e%2e%2f%2e%2e%2fipns/example.com",
+            ContentRoot.IpnsName("ipfs.tech") to "/a%5c..%5c..%5capi/v0/id",
+            ContentRoot.IpnsKey("k51key") to "/a/.%2E%2F.%2e/x",
+            ContentRoot.Bzz(ref64) to "/a/..\\..\\..\\stamps",
+            // Under bzz: any encoded separator, climbing or not.
+            ContentRoot.Bzz(ref64) to "/a%2Fb",
+        ).forEach { (root, path) ->
+            var escaped = false
+            assertNull("$root $path", Gateways.gatewayUrlFor(root, path, onEscape = { escaped = true }))
+            assertTrue("$root $path", escaped)
+        }
+        // Names that only look like dot segments, and a query, still pass.
+        assertEquals(
+            "http://127.0.0.1:58312/ipfs/bafy/..foo/%2e%2ebar/a%2Fb?q=..%2f",
+            Gateways.gatewayUrlFor(ContentRoot.Ipfs("bafy"), "/..foo/%2e%2ebar/a%2Fb?q=..%2f"),
+        )
+        assertEquals(
+            "http://127.0.0.1:1633/bzz/$ref64/.well-known/caf%C3%A9",
+            Gateways.gatewayUrlFor(ContentRoot.Bzz(ref64), "/.well-known/caf%C3%A9"),
+        )
+    }
+
+    @Test
+    fun `gatewayUrlFor refuses a name record whose base path leaves its content root`() {
+        // A `.tez` website URI is the domain owner's, and its path is
+        // appended to the request's (desktop #814).
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        KnownEnsNames.record("ipfs://bafy/..%2F..%2Fapi/v0", "docs.example.tez", EnsTrust.ASSUMED)
+        KnownEnsNames.record("bzz://$ref64/site%2Fsub", "bzz.example.tez", EnsTrust.ASSUMED)
+        KnownEnsNames.record("ipfs://bafy/site", "ok.example.tez", EnsTrust.ASSUMED)
+        try {
+            var escaped = false
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("docs.example.tez"), "/id", onEscape = { escaped = true }))
+            assertTrue(escaped)
+            escaped = false
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("bzz.example.tez"), "/x", onEscape = { escaped = true }))
+            assertTrue(escaped)
+            escaped = false
+            assertEquals(
+                "http://127.0.0.1:58312/ipfs/bafy/site/id",
+                Gateways.gatewayUrlFor(ContentRoot.Ens("ok.example.tez"), "/id", onEscape = { escaped = true }),
+            )
+            assertFalse(escaped)
+        } finally {
+            KnownEnsNames.clear()
+        }
+    }
+
     private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"
 
     private fun withLookup(answer: (String) -> EnsResult, block: () -> Unit) {

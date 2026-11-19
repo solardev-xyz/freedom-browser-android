@@ -529,6 +529,11 @@ object Gateways {
      * document that was just checked), then the requesting tab's [pins]
      * for the page on screen, then the session registry — a [private]
      * tab's own (#464).
+     *
+     * Also `null`, after calling [onEscape], when the path the target is
+     * built from — the request's and a name record's base path together —
+     * would leave `/<namespace>/<ref>/` ([DwebPath.isContainedTarget],
+     * #534); under `bzz:`, any encoded separator does.
      */
     fun gatewayUrlFor(
         root: ContentRoot,
@@ -536,18 +541,33 @@ object Gateways {
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
         private: Boolean = false,
+        onEscape: () -> Unit = {},
     ): String? {
         val (served, basePath) = servedContentFor(root, pins, page, private) ?: return null
         // A `.tez` website record may publish a base path
         // (`ipfs://<cid>/site`); ENS contenthashes never carry one.
         val path = if (basePath.isEmpty()) pathAndQuery else basePath.trimEnd('/') + pathAndQuery
+        val rooted = when (served) {
+            is ContentRoot.Bzz -> "/bzz/${served.ref}"
+            is ContentRoot.Ipfs -> "/ipfs/${served.cid}"
+            is ContentRoot.IpnsKey -> "/ipns/${served.key}"
+            is ContentRoot.IpnsName -> "/ipns/${served.name}"
+            is ContentRoot.Ens -> null
+        }
+        if (rooted != null &&
+            (!(path.isEmpty() || path.startsWith("/") || path.startsWith("?")) ||
+                !DwebPath.isContainedTarget(rooted + path, encodedSeparators = served !is ContentRoot.Bzz))
+        ) {
+            onEscape()
+            return null
+        }
         return when (served) {
             is ContentRoot.Bzz -> "$swarmBase/bzz/${served.ref}$path"
             is ContentRoot.Ipfs -> ipfsBase.ifEmpty { null }?.let { "$it/ipfs/${served.cid}$path" }
             is ContentRoot.IpnsKey -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.key}$path" }
             is ContentRoot.IpnsName -> ipfsBase.ifEmpty { null }?.let { "$it/ipns/${served.name}$path" }
             // Only from an ENS [root] whose answer is itself a name.
-            is ContentRoot.Ens -> gatewayUrlFor(served, path, private = private)
+            is ContentRoot.Ens -> gatewayUrlFor(served, path, private = private, onEscape = onEscape)
         }
     }
 
