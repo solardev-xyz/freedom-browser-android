@@ -374,7 +374,7 @@ class GatewaysTest {
     }
 
     @Test
-    fun `a refused address is refused in place only on a virtual origin naming its own root`() {
+    fun `a refused address is refused in place only as a name load`() {
         // `ipns://..` maps to a virtual origin, but `..` is escaped as
         // `--`, which decodes to the name `-`: the interceptor would see
         // a contained root and serve "Content Unavailable" (#571). Such
@@ -383,7 +383,19 @@ class GatewaysTest {
         // What the submit flow used to ask: "is it a virtual origin?" — yes.
         assertTrue(VirtualOrigin.isVirtualUrl(Gateways.toLoadable("ipns://..")))
         assertEquals(ContentRoot.IpnsName("-"), VirtualOrigin.parseHostOfUrl(Gateways.toLoadable("ipns://..")))
-        listOf("ipns://..", "ipns://../api/v0/id", "ipns://..?x", "bzz://%2e%2e/stamps").forEach {
+        // A percent-encoded dot id round-trips as a string (`%2e%2e` on
+        // both sides), but Chromium decodes the host to `...ipns.…`,
+        // which is no virtual origin: the load would go to system DNS
+        // and read "Site can't be found". Refused here too.
+        assertEquals(
+            VirtualOrigin.parseContentUrl("ipns://%2e%2e/api/v0/id")?.first,
+            VirtualOrigin.parseHostOfUrl(Gateways.toLoadable("ipns://%2e%2e/api/v0/id")),
+        )
+        listOf(
+            "ipns://..", "ipns://../api/v0/id", "ipns://..?x", "bzz://%2e%2e/stamps",
+            "ipns://%2e%2e/api/v0/id", "ipns://%2E%2E/x", "ipns://%2e", "ipns://.%2e/x",
+            "ipfs://%2e%2e/x", "ipns://.",
+        ).forEach {
             assertTrue(it, Gateways.pathRefused(it))
             assertFalse(it, Gateways.refusedInPlace(it))
         }
@@ -398,9 +410,6 @@ class GatewaysTest {
             "ens://\u00fcber.eth/", "ens://%C3%BCber.eth/", "ens://\uD83E\uDD8A.eth/",
             "ens://site.tez/", "ens://Docs.ETH/",
         ).forEach { assertTrue(it, Gateways.refusedInPlace(record, loadUri = it)) }
-        // An address loaded as itself whose origin names its own root.
-        listOf("ipns://docs.eth/x", "ipns://12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA/", "bzz://$ref64")
-            .forEach { assertTrue(it, Gateways.refusedInPlace(it)) }
     }
 
     private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"

@@ -1161,10 +1161,11 @@ fun BrowserScreen(
         // address alone, so it's settled before any node is waited for or
         // started: a refused address must not first read "node not
         // running", sit through a booting node, or lazily start the IPFS
-        // node only to be refused. A virtual origin's load reaches the
-        // interceptor, which refuses it in place with its reason;
-        // anything else — the gateway URL itself, or a virtual origin that
-        // names a different root (`ipns://..` reads back as `ipns://-`,
+        // node only to be refused. A name load's virtual origin reaches
+        // the interceptor, which refuses the record in place with its
+        // reason; an address loaded as itself — whose escaping id is its
+        // host, which the interceptor never judges (`ipns://..` reads back
+        // as `ipns://-`, `ipns://%2e%2e` as no virtual origin at all,
         // #571) — doesn't load at all, and the page says why: the path
         // leaves the content root, which no retry changes — not the "not
         // ready yet, try again" page.

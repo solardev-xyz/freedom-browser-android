@@ -436,21 +436,20 @@ object Gateways {
 
     /**
      * Can a refused [contentUri] be handed to the WebView as [loadUri] so
-     * the interceptor refuses it in place (#571)? A name load
-     * (`ens://<name>…`, [loadUri] != [contentUri]) can whenever it maps
-     * to a virtual origin: that origin is the name's, and its interceptor
-     * sees the record that escapes. An address loaded as itself only when
-     * its virtual origin decodes back to the very root it names —
-     * `ipns://..` doesn't: its `..` is escaped as `--`, which reads back
-     * as the name `-`, so the interceptor would see a contained root and
-     * never refuse.
+     * the interceptor refuses it in place (#571)? Only a name load
+     * (`ens://<name>…`, [loadUri] != [contentUri]) that maps to a virtual
+     * origin: that origin is the name's, and its interceptor sees the
+     * record that escapes. An address loaded as itself never: with a
+     * virtual origin it is only ever refused because its id — its host —
+     * escapes ([pathRefused]), and the interceptor judges the path, not
+     * the host. Label escaping reads `ipns://..` back as the name `-`,
+     * and Chromium decodes `ipns://%2e%2e` to a host (`...ipns.…`) that
+     * is no virtual origin at all, so the load would go to system DNS
+     * and fail as "Site can't be found"; either way nothing refuses it.
+     * Without a virtual origin, nothing intercepts it either.
      */
-    fun refusedInPlace(contentUri: String, loadUri: String = contentUri): Boolean {
-        val loadable = toLoadable(loadUri)
-        if (loadUri != contentUri) return VirtualOrigin.isVirtualUrl(loadable)
-        val root = VirtualOrigin.parseContentUrl(loadUri)?.first ?: return false
-        return VirtualOrigin.parseHostOfUrl(loadable) == root
-    }
+    fun refusedInPlace(contentUri: String, loadUri: String = contentUri): Boolean =
+        loadUri != contentUri && VirtualOrigin.isVirtualUrl(toLoadable(loadUri))
 
     private fun dwebNamespace(contentUri: String): String? = when {
         contentUri.startsWith("bzz://") -> "bzz"
