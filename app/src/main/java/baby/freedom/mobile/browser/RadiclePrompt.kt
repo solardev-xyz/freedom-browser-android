@@ -90,6 +90,9 @@ internal fun radiclePromptCopy(ask: RadicleAsk): RadiclePromptCopy = when (ask) 
     }
 }
 
+/** The tallest a write prompt's content box gets before it scrolls on its own. */
+private val WRITE_CONTENT_MAX_HEIGHT = 280.dp
+
 /** One labelled value a write prompt shows; [code] for an ID, set in monospace. */
 internal data class RadicleWriteLine(val label: String, val value: String, val code: Boolean = false)
 
@@ -179,7 +182,9 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
             )
         },
         text = {
-            Column {
+            // Scrolls as a whole, so at a large font size nothing (what's
+            // published least of all) is squeezed out of view.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(copy.request)
                 if (rid != null) {
                     Spacer(Modifier.height(8.dp))
@@ -191,11 +196,12 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
                     Text(identity.second, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
                 if (write != null) {
-                    // What's published scrolls on its own (a comment can be
-                    // 64 KB); the warning, the switch and the buttons stay put.
+                    // What's published also scrolls in a box of its own (a
+                    // comment can be 64 KB), so the warning and the switch
+                    // stay close by.
                     Column(
                         Modifier
-                            .weight(1f, fill = false)
+                            .heightIn(max = WRITE_CONTENT_MAX_HEIGHT)
                             .verticalScroll(rememberScrollState())
                             .testTag("radicle-write-content"),
                     ) {
