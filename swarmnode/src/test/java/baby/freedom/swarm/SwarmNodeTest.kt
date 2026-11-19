@@ -1064,6 +1064,40 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aSessionAfterTheNodeSleptCountsFromWhenTheAppComesBack() {
+        // #543: the phone slept 20 min (no reading, so the next is a baseline); the
+        // reading taken as the app comes back starts the count, and the one as it
+        // leaves ends it, with no 5-minute tick in between.
+        val ops = FakeOps()
+        ops.chequebookHex = chequebook
+        ops.settlementsBody = """{"settlements":[{"peer":"aa","received":"0","sent":"100"}]}"""
+        var wall = 1_790_856_000_000L
+        val node = lightNode(ops, wallClock = { wall })
+        fun reads() = ops.calls.count { it == "gateway:GET /settlements" }
+        fun awaitReads(n: Int) {
+            val until = System.currentTimeMillis() + 5_000
+            while (reads() < n && System.currentTimeMillis() < until) Thread.sleep(10)
+            assertEquals(n, reads())
+        }
+        awaitReads(1)
+        node.suspend()
+        awaitReads(2)
+        wall += 20 * 60_000L
+        ops.settlementsBody = """{"settlements":[{"peer":"aa","received":"0","sent":"500"}]}"""
+        node.resume()
+        awaitReads(3)
+        wall += 3 * 60_000L
+        ops.settlementsBody = """{"settlements":[{"peer":"aa","received":"0","sent":"560"}]}"""
+        node.suspend()
+        awaitReads(4)
+        val o = org.json.JSONObject(node.creditSpend())
+        // The 400 paid while nobody watched is left out; the session's 60 counts.
+        assertEquals("60", o.getString("dayPlur"))
+        assertEquals(4, reads())
+        node.dispose()
+    }
+
+    @Test
     fun noChequebookNoSpendFigures() {
         val ops = FakeOps()
         val node = lightNode(ops)

@@ -121,6 +121,11 @@ class ChequebookTest {
         assertTrue(depositNeedsFunding(state.copy(walletPlur = BigInteger.ZERO), null))
         assertFalse(depositNeedsFunding(state.copy(walletXdaiWei = BigInteger.TEN.pow(17)), DEPOSIT_PRESETS_PLUR[2]))
         assertFalse(depositNeedsFunding(state.copy(walletXdaiWei = null), DEPOSIT_PRESETS_PLUR[2]))
+        // Dust below the 6 decimals shown is no xDAI here either, as for the blocked reason.
+        val dust = state.copy(walletXdaiWei = BigInteger.TEN.pow(11))
+        assertTrue(depositNeedsFunding(dust, DEPOSIT_PRESETS_PLUR[2]))
+        assertTrue(depositBlockedReason(light, dust, DEPOSIT_PRESETS_PLUR[2])!!.contains("no xDAI"))
+        assertNull(depositReview(dust, DEPOSIT_PRESETS_PLUR[2]))
         assertEquals(
             BigInteger("4982657111776494000"),
             walletXdaiFrom("""{"bzzBalance":"34393882720917","nativeTokenBalance":"4982657111776494000","chainID":100}"""),

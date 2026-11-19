@@ -331,8 +331,16 @@ internal fun creditStatusText(status: CreditStatus): String = when (status) {
 internal fun depositNeedsFunding(state: ChequebookState, amountPlur: BigInteger?): Boolean {
     val wallet = state.walletPlur ?: return false
     val short = wallet.signum() == 0 || (amountPlur != null && amountPlur > wallet)
-    return short && state.walletXdaiWei?.signum() == 0
+    return short && swappableXdaiWei(state)?.signum() == 0
 }
+
+/**
+ * The xDAI a top-up may swap: the node's xDAI as the page shows it,
+ * rounded down to the 6 decimals shown ([shownXdaiWei]), so dust reads as
+ * none everywhere alike; null while it isn't known. The one figure the
+ * blocked reason, the funding hint and the review all go by.
+ */
+internal fun swappableXdaiWei(state: ChequebookState): BigInteger? = state.walletXdaiWei?.let(::shownXdaiWei)
 
 /**
  * What a deposit the user is about to confirm does, captured when the
@@ -360,7 +368,7 @@ internal fun depositReview(state: ChequebookState, amountPlur: BigInteger?): Dep
     val wallet = state.walletPlur ?: return null
     amountPlur ?: return null
     if (wallet >= amountPlur) return DepositReview(chequebook, amountPlur, wallet, null)
-    val xdai = state.walletXdaiWei?.let(::shownXdaiWei)?.takeIf { it.signum() > 0 } ?: return null
+    val xdai = swappableXdaiWei(state)?.takeIf { it.signum() > 0 } ?: return null
     return DepositReview(chequebook, amountPlur, wallet, xdai)
 }
 
@@ -403,8 +411,8 @@ internal fun depositBlockedReason(node: NodeInfo, state: ChequebookState, amount
         amountPlur == null -> Strings.get(R.string.stamps_chequebook_choose_amount)
         amountPlur <= state.walletPlur -> null
         // Short of xBZZ: the node swaps xDAI for the rest (#543), if it has any.
-        state.walletXdaiWei == null -> Strings.get(R.string.stamps_chequebook_checking_xbzz)
-        shownXdaiWei(state.walletXdaiWei).signum() == 0 ->
+        swappableXdaiWei(state) == null -> Strings.get(R.string.stamps_chequebook_checking_xbzz)
+        swappableXdaiWei(state)?.signum() == 0 ->
             if (state.walletPlur.signum() == 0) {
                 Strings.get(R.string.stamps_chequebook_no_xbzz)
             } else {

@@ -71,10 +71,13 @@ sealed interface SpendPlan {
      * /v0/settlement/deposit?amount=`, `fund_deposit_with_xdai`): swap the
      * xBZZ the node's account lacks ([maxSwapWei] of xDAI at most, what the
      * confirmation showed the node holds), then one xBZZ `transfer` to
-     * [chequebook] (40 lowercase hex) of at most [amountPlur]: ant tops the
-     * deposit up to what it read plus [amountPlur], so the transfer is
-     * less when the chequebook grew meanwhile, never more. No approval,
-     * no batch, no deploy. [amountPlur] is at most
+     * [chequebook] (40 lowercase hex) of at most [amountPlur]. ant tops the
+     * deposit up to what it read before the swap plus [amountPlur], and
+     * re-reads the chequebook before the transfer: grown meanwhile, it
+     * sends less, which passes; shrunk (a peer cashed a cheque in
+     * between), it would send more, which is refused, and the xBZZ the
+     * swap bought stays in the node's account for a plain deposit. No
+     * approval, no batch, no deploy. [amountPlur] is at most
      * [SpendPermit.MAX_TOP_UP_PLUR].
      */
     data class TopUpCredit(

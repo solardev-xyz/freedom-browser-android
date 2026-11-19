@@ -234,7 +234,9 @@ class SpendGuardTest {
         fun refused(raw: ByteArray) = assertFalse(SpendPermit(topUp).admits(raw))
         refused(TestTx.swap(maxSwap.add(BigInteger.ONE))) // more xDAI than the review showed
         refused(TestTx.swap(maxSwap, recipient = "22".repeat(20))) // xBZZ bought for someone else
-        refused(TestTx.transfer(chequebook, topUpAmount.add(BigInteger.ONE))) // more
+        // More: ant's re-read found the chequebook shrunk (a peer cashed meanwhile); the
+        // swapped xBZZ then stays in the node's account.
+        refused(TestTx.transfer(chequebook, topUpAmount.add(BigInteger.ONE)))
         refused(TestTx.transfer(chequebook, BigInteger.ZERO))
         refused(TestTx.transfer("cc".repeat(20), topUpAmount)) // another recipient
         refused(TestTx.approve(topUpAmount, spender = chequebook))

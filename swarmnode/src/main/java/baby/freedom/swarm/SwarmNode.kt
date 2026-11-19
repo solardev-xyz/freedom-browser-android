@@ -13,7 +13,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -1065,14 +1064,19 @@ class SwarmNode internal constructor(
      * Reads `/settlements` every [CreditSpend.SAMPLE_MS] while the node
      * runs in light mode (#543), so spend lands in its hour whether or not
      * the chequebook page is open: `:node` runs as long as the node does.
-     * Under [lock].
+     * Also at once whenever the app comes to the foreground or leaves it
+     * ([resume], [suspend]): after the phone slept, the first reading is
+     * a baseline, so taking it as the user comes back (rather than up to
+     * [CreditSpend.SAMPLE_MS] later) counts what the session then pays,
+     * and taking one as they leave counts the session's end. Under [lock].
      */
     private fun startCreditSampling() {
         creditSampler?.cancel()
         creditSampler = scope.launch {
             while (isActive) {
+                val wasBackgrounded = backgrounded.value
                 sampleCredit()
-                delay(CreditSpend.SAMPLE_MS)
+                withTimeoutOrNull(CreditSpend.SAMPLE_MS) { backgrounded.first { it != wasBackgrounded } }
             }
         }
     }
