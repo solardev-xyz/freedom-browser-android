@@ -48,48 +48,14 @@ class SwarmPathNotFoundFetchTest {
     }
 
     @Test
-    fun `a navigation a service worker forwarded is read ahead like the main frame's`() {
-        // WebView hands a SW's fetch(event.request) for a navigation over
-        // as not-main-frame (PR #557 R2-M1).
-        val url = "http://127.0.0.1:1633/bzz/$HASH/nope.html"
-        assertTrue(readsAheadForMissingPath(navigation(), 404, "GET", url))
-        assertTrue(readsAheadForMissingPath(swForwarded(), 404, "GET", url))
-        assertFalse(readsAheadForMissingPath(subresource(), 404, "GET", url))
-        assertFalse(readsAheadForMissingPath(swForwarded(), 404, "HEAD", url))
-        assertFalse(readsAheadForMissingPath(swForwarded(), 503, "GET", url))
-        assertFalse(readsAheadForMissingPath(swForwarded(), 404, "GET", "http://127.0.0.1:5001/ipfs/bafy/nope.html"))
-    }
-
-    @Test
-    fun `a cold path miss on a forwarded navigation waits for the next answer`() {
-        // Its subresource policy doesn't retry a 404, yet a cold miss
-        // still needs the next answer to agree before it's final.
-        serve(body = """{"message":"path address not found"}""", hangMs = GatewayProbe.WARM_404_MS + 200) { url, asked ->
-            fetchWithRetry(swForwarded(), url, url, false, gatewayFetchPolicy(mainFrame = false, media = false))
-            assertEquals(2, asked.get())
-        }
-    }
-
-    @Test
-    fun `a subresource's path miss is neither read ahead nor retried`() {
-        serve(body = """{"message":"path address not found"}""", hangMs = GatewayProbe.WARM_404_MS + 200) { url, asked ->
-            fetchWithRetry(subresource(), url, url, false, gatewayFetchPolicy(mainFrame = false, media = false))
-            assertEquals(1, asked.get())
-        }
-    }
-
-    @Test
     fun `a failed attempt between two cold path misses starts the confirmation over`() {
         // As GatewayProbe.probe clears a cold miss on an attempt that timed
         // out (PR #557 R2-M3): miss, read timeout, miss, miss.
-        val cold = GatewayProbe.WARM_404_MS + 200
-        val policy = GatewayFetchPolicy(cold.toInt() + 600, cold.toInt() + 600, setOf(404))
-        serveEach(
-            { cold },
-            { cold + 2_000 },
-            { cold },
-            { cold },
-        ) { url, asked ->
+        val cold = GatewayProbe.WARM_404_MS + 500
+        val policy = GatewayFetchPolicy(cold.toInt() + 1_500, cold.toInt() + 1_500, setOf(404))
+        val next = AtomicInteger(0)
+        val waits = longArrayOf(cold, cold + 4_000, cold, cold)
+        serve("""{"message":"path address not found"}""", { waits[minOf(next.getAndIncrement(), waits.size - 1)] }) { url, asked ->
             fetchWithRetry(navigation(), url, url, false, policy)
             assertEquals(4, asked.get())
         }
@@ -109,12 +75,7 @@ class SwarmPathNotFoundFetchTest {
     private fun serve(body: String, hangMs: Long = 0, check: (String, AtomicInteger) -> Unit) =
         serve(body, { hangMs }, check)
 
-    /** Each request in turn: a path miss after the given wait. */
-    private fun serveEach(vararg answers: () -> Long, check: (String, AtomicInteger) -> Unit) {
-        val next = AtomicInteger(0)
-        serve("""{"message":"path address not found"}""", { answers[minOf(next.getAndIncrement(), answers.size - 1)]() }, check)
-    }
-
+    /** [hang]: how long each request waits before its answer. */
     private fun serve(body: String, hang: () -> Long, check: (String, AtomicInteger) -> Unit) {
         ServerSocket(0, 50, InetAddress.getByName("127.0.0.1")).use { server ->
             val asked = AtomicInteger(0)
@@ -150,19 +111,6 @@ class SwarmPathNotFoundFetchTest {
         override fun hasGesture() = true
         override fun getMethod() = "GET"
         override fun getRequestHeaders(): Map<String, String> = emptyMap()
-    }
-
-    private fun swForwarded() = request(mapOf("Sec-Fetch-Dest" to "document", "Accept" to "text/html"))
-
-    private fun subresource() = request(mapOf("Sec-Fetch-Dest" to "empty", "Accept" to "*/*"))
-
-    private fun request(headers: Map<String, String>) = object : android.webkit.WebResourceRequest {
-        override fun getUrl(): android.net.Uri? = null
-        override fun isForMainFrame() = false
-        override fun isRedirect() = false
-        override fun hasGesture() = false
-        override fun getMethod() = "GET"
-        override fun getRequestHeaders(): Map<String, String> = headers
     }
 
     private companion object {
