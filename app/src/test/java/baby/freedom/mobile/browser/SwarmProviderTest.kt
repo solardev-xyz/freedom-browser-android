@@ -61,12 +61,21 @@ class SwarmProviderTest {
     /** One app-scoped identity per site, index = sites so far; keys are fixed test keys, never funded. */
     private class FakePublishers : SwarmProvider.Publishers {
         var wallet = true
-        var unlocked = true
+        @Volatile var unlocked = true
+        @Volatile var locks = 0L
+        @Volatile var lockCountReads = 0
         val sites = HashMap<String, SitePublisher>()
         var activity = 0
-        val keysHandedOut = mutableListOf<ByteArray>()
+        val keysHandedOut = java.util.Collections.synchronizedList(mutableListOf<ByteArray>())
         override fun walletExists() = wallet
         override fun unlocked() = unlocked
+        override fun lockCount() = locks.also { lockCountReads++ }
+
+        /** The wallet locks, as the auto-lock does. */
+        fun lock() {
+            unlocked = false
+            locks++
+        }
         override fun site(origin: String) = sites[origin]
         override fun ensureSite(origin: String) = sites.getOrPut(origin) {
             val identity = PublisherIdentity(PublisherIdentity.Mode.APP_SCOPED, sites.size, "App-scoped identity ${sites.size + 1}", 1)
@@ -99,8 +108,12 @@ class SwarmProviderTest {
         /** ant v0.5.69's `GET /feeds` while too few peers answered to call a miss an empty feed. */
         var feedsNotReady = false
 
+        /** Run as each request reaches the node, before it's answered. */
+        @Volatile var onRequest: (method: String, path: String) -> Unit = { _, _ -> }
+
         override fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int): SwarmProvider.Http.Answer {
             if (!up) throw java.io.IOException("connection refused")
+            onRequest(method, path)
             if (slowUploads && method == "POST") throw java.net.SocketTimeoutException("the node didn't answer in $timeoutMs ms")
             requests += Triple(method, path, headers)
             if (body != null) bodies["$method $path"] = body
@@ -660,6 +673,98 @@ class SwarmProviderTest {
         publishers.sites.clear()
         assertEquals("feed_owner_unavailable", err(call("swarm_updateFeed", JSONObject().put("feedId", "log").put("reference", "cd".repeat(32)))).reason)
         assertTrue(asked.isEmpty())
+    }
+
+    /**
+     * A feed write queued behind another on the same feed when the wallet
+     * locks is refused once its turn comes, and never reads a key (#531) —
+     * also when the wallet was unlocked again before then: the key it would
+     * sign with belongs to a later unlock than the write.
+     */
+    private fun queuedWriteRefusedAfterLock(method: String, params: JSONObject, unlockAgain: Boolean) {
+        connect()
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        feeds.grant(site)
+        ok(call("swarm_createFeed", JSONObject().put("name", "posts")))
+        val socsBefore = node.uploads().count { it.second.startsWith("/soc/") }
+
+        // The first write holds the feed's turn inside its SOC upload.
+        val uploading = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        node.onRequest = { m, path ->
+            if (m == "POST" && path.startsWith("/soc/") && uploading.count > 0) {
+                uploading.countDown()
+                release.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        val first = java.util.concurrent.CompletableFuture.supplyAsync {
+            call("swarm_writeFeedEntry", JSONObject().put("name", "posts").put("data", "first"))
+        }
+        assertTrue(uploading.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        val keysBefore = publishers.keysHandedOut.size
+
+        // The second is approved and waits for the feed.
+        val readsBefore = publishers.lockCountReads
+        val second = java.util.concurrent.CompletableFuture.supplyAsync { call(method, params) }
+        val deadline = System.currentTimeMillis() + 10_000
+        while (publishers.lockCountReads == readsBefore && System.currentTimeMillis() < deadline) Thread.sleep(5)
+        assertTrue("the second write started", publishers.lockCountReads > readsBefore)
+        assertFalse("it waits for the first", second.isDone)
+
+        publishers.lock()
+        if (unlockAgain) publishers.unlocked = true
+        release.countDown()
+
+        assertEquals(0, okJson(first.get(10, java.util.concurrent.TimeUnit.SECONDS)).getInt("index"))
+        val refused = err(second.get(10, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(SwarmProvider.VAULT_LOCKED, refused.message)
+        assertEquals("only the first write signed", socsBefore + 1, node.uploads().count { it.second.startsWith("/soc/") })
+        assertEquals("the second never got a key", keysBefore, publishers.keysHandedOut.size)
+        assertTrue("every key handed out was zeroed", publishers.keysHandedOut.all { k -> k.all { it == 0.toByte() } })
+    }
+
+    @Test
+    fun `a writeFeedEntry queued when the wallet locks is refused, and nothing is signed`() {
+        queuedWriteRefusedAfterLock("swarm_writeFeedEntry", JSONObject().put("name", "posts").put("data", "second"), unlockAgain = false)
+    }
+
+    @Test
+    fun `an updateFeed queued when the wallet locks is refused, even if it was unlocked again by its turn`() {
+        queuedWriteRefusedAfterLock("swarm_updateFeed", JSONObject().put("feedId", "posts").put("reference", "cd".repeat(32)), unlockAgain = true)
+    }
+
+    @Test
+    fun `a feed write or SOC running when the wallet locks is refused before it signs`() {
+        connect()
+        grants.auto += site to SwarmProvider.AutoApprove.Feeds
+        grants.auto += site to SwarmProvider.AutoApprove.Signing
+        feeds.grant(site)
+        ok(call("swarm_createFeed", JSONObject().put("name", "posts")))
+        val writes = listOf(
+            "swarm_updateFeed" to JSONObject().put("feedId", "posts").put("reference", "cd".repeat(32)),
+            "swarm_writeFeedEntry" to JSONObject().put("name", "posts").put("data", "hello"),
+            // Over one chunk: its /bytes upload waits for the check too.
+            "swarm_writeFeedEntry" to JSONObject().put("name", "posts").put("data", b64(ByteArray(5000) { 7 })),
+            "swarm_writeSingleOwnerChunk" to JSONObject().put("identifier", "ab".repeat(32)).put("data", "hello"),
+        )
+        for ((method, params) in writes) {
+            var locked = false
+            val started = commits
+            // Once approved, the wallet locks (and is unlocked again) while the write waits on the node for its stamp.
+            node.onRequest = { m, path ->
+                if (!locked && commits > started && m == "GET" && path.startsWith("/stamps")) {
+                    locked = true
+                    publishers.lock()
+                    publishers.unlocked = true
+                }
+            }
+            assertEquals(method, SwarmProvider.VAULT_LOCKED, err(call(method, params)).message)
+            assertTrue(method, locked)
+        }
+        node.onRequest = { _, _ -> }
+        assertTrue("nothing signed or uploaded", node.uploads().none { it.second.startsWith("/soc/") || it.second.startsWith("/bytes") })
+        assertTrue("every key handed out was zeroed", publishers.keysHandedOut.all { k -> k.all { it == 0.toByte() } })
+        assertEquals(0, okJson(call("swarm_writeFeedEntry", JSONObject().put("name", "posts").put("data", "hello"))).getInt("index"))
     }
 
     @Test

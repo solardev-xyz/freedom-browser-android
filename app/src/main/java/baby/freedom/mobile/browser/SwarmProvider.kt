@@ -138,6 +138,14 @@ class SwarmProvider(
         fun signingKey(identity: PublisherIdentity): ByteArray
 
         /**
+         * How many times the wallet has locked. A key read under one
+         * count never signs once it has moved on (#531): a write queued
+         * or running when the wallet locked is refused, even if the
+         * wallet was unlocked again by the time its turn came.
+         */
+        fun lockCount(): Long
+
+        /**
          * The user approved a sheet, or a write they allowed went out to
          * the node: keeps the wallet from idling into its lock (desktop's
          * `resetVaultAutoLockTimer`). Never for a read answered with no
@@ -486,8 +494,22 @@ class SwarmProvider(
         val work: suspend () -> Reply,
     )
 
-    /** The key a signing method signs with, and which identity it is. */
-    private class Resolved(val identity: PublisherIdentity, val key: ByteArray)
+    /**
+     * The key a signing method signs with, and which identity it is.
+     * [locks] is the wallet's lock count the write started under.
+     */
+    private class Resolved(val identity: PublisherIdentity, val key: ByteArray, val locks: Long)
+
+    /**
+     * Throws [VaultLockedException] if the wallet has locked since [r]'s
+     * write started: called right before signing (and before a large
+     * entry's upload), after the waits on the node (a stamp, the feed's
+     * next index), so a write running when the wallet locks doesn't go on
+     * to sign with the key it read (#531).
+     */
+    private fun stillOpen(r: Resolved) {
+        if (!publishers.unlocked() || publishers.lockCount() != r.locks) throw VaultLockedException()
+    }
 
     private suspend fun signing(origin: String, method: String, params: JSONObject, calls: Calls): Reply {
         val kind = if (method == "swarm_writeSingleOwnerChunk" || method == "swarm_getSigningIdentity") AutoApprove.Signing else AutoApprove.Feeds
@@ -643,8 +665,17 @@ class SwarmProvider(
      * active one for a new feed or a SOC), zeroing it after. A feed whose
      * identity is gone, or whose key no longer derives its owner, is
      * refused ([feedOwnerGone]) rather than signed with another key.
+     * [locks] is the wallet's lock count when the write started: a feed
+     * write reads it before waiting for its turn on the feed, and the key
+     * is only read once the turn has come; if the wallet locked in
+     * between, the write is refused ([VaultLockedException], #531).
      */
-    private suspend fun withKey(origin: String, feed: FeedRecord?, block: suspend (Resolved) -> Reply): Reply {
+    private suspend fun withKey(
+        origin: String,
+        feed: FeedRecord?,
+        locks: Long = publishers.lockCount(),
+        block: suspend (Resolved) -> Reply,
+    ): Reply {
         if (!feeds.granted(origin)) return notAuthorized("feed_not_granted")
         // An existing feed never gets the site a new identity: its own has to be there.
         val site = if (feed == null) {
@@ -653,13 +684,16 @@ class SwarmProvider(
             withContext(io) { publishers.site(origin) } ?: return feedOwnerGone(feed)
         }
         val identity = signerOf(site, feed) ?: return feedOwnerGone(feed!!)
+        // Locked since the write started: refused without reading a key at all.
+        if (publishers.lockCount() != locks) throw VaultLockedException()
         val key = withContext(io) { publishers.signingKey(identity) }
-        if (feed != null && !PublisherKeys.address(key).equals(feed.owner, ignoreCase = true)) {
-            key.fill(0)
-            return feedOwnerGone(feed)
-        }
         return try {
-            block(Resolved(identity, key))
+            val r = Resolved(identity, key, locks)
+            stillOpen(r)
+            if (feed != null && !PublisherKeys.address(key).equals(feed.owner, ignoreCase = true)) {
+                return feedOwnerGone(feed)
+            }
+            block(r)
         } finally {
             key.fill(0)
         }
@@ -667,6 +701,7 @@ class SwarmProvider(
 
     private suspend fun writeSoc(r: Resolved, identifier: ByteArray, payload: ByteArray, span: ULong?): Reply {
         val batch = batchFor(SwarmChunks.MAX_PAYLOAD.toLong())
+        stillOpen(r)
         val soc = SwarmChunks.sign(identifier, SwarmChunks.cac(payload, span), r.key)
         uploadSoc(soc, batch)
         return Reply.Ok(
@@ -723,24 +758,27 @@ class SwarmProvider(
         if (!feeds.granted(origin)) return notAuthorized("feed_not_granted")
         val feed = feeds.feed(origin, feedId)
             ?: return invalid("Feed not found: $feedId", "feed_not_found")
-        return withKey(origin, feed) { r ->
-            val index = locked(feed.topic) {
-                val next = nextIndex(ownerOf(r), feed.topic)
+        // The key is read once this write's turn on the feed has come,
+        // not before it queues: a wallet lock while it waits refuses it (#531).
+        val locks = publishers.lockCount()
+        return locked(feed.topic) {
+            withKey(origin, feed, locks) { r ->
+                val index = nextIndex(ownerOf(r), feed.topic)
                 val payload = SwarmChunks.referenceUpdate(reference.hexToBytesOrNull()!!, clock() / 1000)
                 val batch = batchFor(SwarmChunks.MAX_PAYLOAD.toLong())
-                uploadSoc(SwarmChunks.sign(SwarmChunks.feedIdentifier(feed.topic.hexToBytesOrNull()!!, next), SwarmChunks.cac(payload), r.key), batch)
-                next
+                stillOpen(r)
+                uploadSoc(SwarmChunks.sign(SwarmChunks.feedIdentifier(feed.topic.hexToBytesOrNull()!!, index), SwarmChunks.cac(payload), r.key), batch)
+                saving("the feed's record (the update was published)") {
+                    feeds.put(origin, feed.copy(lastUpdated = clock(), lastReference = reference))
+                }
+                Reply.Ok(
+                    JSONObject()
+                        .put("feedId", feedId)
+                        .put("reference", reference)
+                        .put("bzzUrl", "bzz://${feed.manifestReference}")
+                        .put("index", index),
+                )
             }
-            saving("the feed's record (the update was published)") {
-                feeds.put(origin, feed.copy(lastUpdated = clock(), lastReference = reference))
-            }
-            Reply.Ok(
-                JSONObject()
-                    .put("feedId", feedId)
-                    .put("reference", reference)
-                    .put("bzzUrl", "bzz://${feed.manifestReference}")
-                    .put("index", index),
-            )
         }
     }
 
@@ -748,10 +786,12 @@ class SwarmProvider(
         if (!feeds.granted(origin)) return notAuthorized("feed_not_granted")
         val feed = feeds.feed(origin, name)
             ?: return invalid("Feed not found: $name. Create it with createFeed first.", "feed_not_found")
-        return withKey(origin, feed) { r ->
-            val owner = ownerOf(r)
-            val topic = feed.topic.hexToBytesOrNull()!!
-            val written = locked(feed.topic) {
+        // As [updateFeed]: the key is read once this write's turn has come (#531).
+        val locks = publishers.lockCount()
+        return locked(feed.topic) {
+            withKey(origin, feed, locks) { r ->
+                val owner = ownerOf(r)
+                val topic = feed.topic.hexToBytesOrNull()!!
                 val at = if (index != null) {
                     val existing = chunk(SwarmChunks.socAddress(SwarmChunks.feedIdentifier(topic, index), owner.hexToBytesOrNull()!!))
                     if (existing != null) {
@@ -762,11 +802,13 @@ class SwarmProvider(
                     nextIndex(owner, feed.topic)
                 }
                 val batch = batchFor(maxOf(payload.size, SwarmChunks.MAX_PAYLOAD).toLong())
+                // Before a large payload's /bytes upload too: it spends postage.
+                stillOpen(r)
                 val cac = if (payload.size <= SwarmChunks.MAX_PAYLOAD) SwarmChunks.cac(payload) else wrapLarge(payload, batch)
+                stillOpen(r)
                 uploadSoc(SwarmChunks.sign(SwarmChunks.feedIdentifier(topic, at), cac, r.key), batch)
-                at
+                Reply.Ok(JSONObject().put("index", at))
             }
-            Reply.Ok(JSONObject().put("index", written))
         }
     }
 

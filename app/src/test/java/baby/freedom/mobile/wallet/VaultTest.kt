@@ -205,6 +205,21 @@ class VaultTest {
     }
 
     @Test
+    fun `lockCount moves on with every lock, an overdue auto-lock included, and not with an unlock`() = runBlocking {
+        val v = vault()
+        v.create(phrase, auth, imported = false)
+        val start = v.lockCount()
+        v.lock()
+        assertEquals(start + 1, v.lockCount())
+        v.unlock(auth)
+        assertEquals("unlocking again doesn't take a write back to its own count", start + 1, v.lockCount())
+        now += 15 * 60_000L
+        // The timer can run late: reading the count locks an overdue vault first.
+        assertEquals(start + 2, v.lockCount())
+        assertTrue(v.state.value is Vault.State.Locked)
+    }
+
+    @Test
     fun `idle for 15 minutes locks, wallet activity keeps it open`() = runBlocking {
         val v = vault()
         v.create(phrase, auth, imported = false)
