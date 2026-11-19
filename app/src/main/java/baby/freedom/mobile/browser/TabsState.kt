@@ -840,21 +840,17 @@ class TabsState(
      * put back, and the later closes done again — tabs a, b, c, d with
      * any of them closed one after another come back a, b, c, d
      * whichever is reopened first, and the rest by Reopen. The blank
-     * tab a later close left in place of the last tabs counts as
-     * [reopen] counts it: gone while that close is undone, back once
-     * it is done again.
+     * tab a close left in place of the last tabs counts as [reopen]
+     * counts it: a later close's is gone while that close is undone and
+     * back once it is done again; [group]'s own stays until [group] is
+     * put back, as it does when the later closes are reopened first.
      */
     private fun takeFromStack(group: ClosedGroup): Boolean {
         val at = closedTabs.indexOfFirst { it === group }
         if (at < 0) return false
         val later = closedTabs.subList(at + 1, closedTabs.size).toList()
         if (later.isNotEmpty()) {
-            // The open tabs as [reopen] will see them: without this
-            // entry's untouched placeholder, which it drops.
-            val placeholderId = group.placeholderId?.let { id ->
-                tabs.firstOrNull { it.id == id && it.isUntouched() }?.id
-            }
-            val list: MutableList<Any> = tabs.filter { it.id != placeholderId }.toMutableList()
+            val list: MutableList<Any> = tabs.toMutableList()
             // Undo the later closes, newest first, as reopening them
             // would — which drops each one's own untouched placeholder
             // before putting its tabs back. Where it stood (after which
@@ -871,7 +867,13 @@ class TabsState(
                 }
                 for (closed in entry.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
             }
-            // Put [group] back where it closed from.
+            // Put [group] back where it closed from, as [reopen] does:
+            // its own untouched placeholder goes first. Only now — the
+            // later closes were counted with it still open, as undoing
+            // them newest first leaves it until [group]'s turn.
+            group.placeholderId?.let { id ->
+                list.removeAll { it is BrowserState && it.id == id && it.isUntouched() }
+            }
             for (closed in group.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
             // Close the later ones again, oldest first. Each tab's place
             // is its place in the list as it stands at its own close:

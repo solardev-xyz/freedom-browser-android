@@ -179,6 +179,64 @@ class TabsRecentlyClosedTest {
     }
 
     @Test
+    fun `a close made while an older close's blank tab is open counts it`() {
+        // b, c, then Close all: one blank tab. c and b reopened from the
+        // list beside it, b closed again — next to that blank tab, which
+        // Reopen keeps until the Close all's own turn. Reopening the
+        // Close all from the list first ends the same.
+        for (fromList in listOf(false, true)) {
+            val tabs = fourTabs()
+            tabs.closeTab(1) // b
+            tabs.closeTab(1) // c
+            tabs.closeAllTabs()
+            assertEquals(1, tabs.tabs.size)
+            tabs.reopenClosedTab(tabs.recentlyClosed[1]) // c
+            tabs.reopenClosedTab(tabs.recentlyClosed[1]) // b
+            assertEquals(listOf("", "b", "c"), tabs.titles)
+            tabs.closeTab(1) // b
+            if (fromList) tabs.reopenClosedTab(tabs.recentlyClosed[1]) // the Close all
+            while (tabs.reopenClosedTab() != null) Unit
+            assertEquals("fromList=$fromList", listOf("a", "b", "c", "d"), tabs.titles)
+        }
+    }
+
+    @Test
+    fun `closes and reopens from the list interleaved end as Reopen alone would`() {
+        // Closes and reopens from the list in any mix, then one more
+        // entry reopened from the list before Reopen takes the rest: the
+        // tabs end as Reopen alone leaves them.
+        for (seed in 0 until 20_000) {
+            fun run(lastFromList: Boolean): List<String> {
+                val random = kotlin.random.Random(seed)
+                val tabs = TabsState(homepage = HOME_URL)
+                val count = 3 + random.nextInt(5)
+                tabs.tabs[0].visit("p0")
+                for (i in 1 until count) tabs.newTab(private = random.nextInt(4) == 0).visit("p$i")
+                repeat(2 + random.nextInt(2 * count)) {
+                    val listed = tabs.recentlyClosed
+                    when {
+                        listed.isNotEmpty() && random.nextInt(3) == 0 ->
+                            tabs.reopenClosedTab(listed[random.nextInt(listed.size)])
+                        tabs.tabs.size < 2 -> Unit
+                        else -> when (random.nextInt(6)) {
+                            0 -> tabs.closeOtherTabs(tabs.tabs[random.nextInt(tabs.tabs.size)])
+                            1 -> { tabs.switchTo(random.nextInt(tabs.tabs.size)); tabs.closeRegularTabs() }
+                            else -> tabs.closeTab(random.nextInt(tabs.tabs.size))
+                        }
+                    }
+                }
+                val pick = random.nextInt(1_000)
+                if (lastFromList && tabs.recentlyClosed.isNotEmpty()) {
+                    tabs.reopenClosedTab(tabs.recentlyClosed[pick % tabs.recentlyClosed.size])
+                }
+                while (tabs.reopenClosedTab() != null) Unit
+                return tabs.titles
+            }
+            assertEquals("seed=$seed", run(lastFromList = false), run(lastFromList = true))
+        }
+    }
+
+    @Test
     fun `an undo of an older close lands where it was too`() {
         val tabs = fourTabs()
         val b = tabs.closeTab(1, offerUndo = true).undo!!
