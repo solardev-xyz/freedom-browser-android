@@ -234,12 +234,15 @@ private fun torRow(tor: TorControls): NodeOverviewRow {
 private fun lightClientRow(info: MyotisInfo, running: Set<MyotisNetwork>): NodeOverviewRow {
     val shown = lightClientInfoFor(info, running)
     val triple = lightClientStatusTriple(shown)
-    // Per chain, as the page's chain rows read: "Ethereum: Synced · Gnosis: Off".
+    val upgrades = myotisUpgradeNotices(info, running, System.currentTimeMillis()).map { it.network }
+    // Per chain, as the page's chain rows read: "Ethereum: Synced · Gnosis: Off";
+    // a chain the fork watch says needs a newer Freedom adds so (#542, desktop's badge).
     val status = MyotisNetwork.entries.joinToString(" · ") { network ->
+        val label = myotisChainLabel(shown.status, shown.chain(network), network in running)
         Strings.get(
             R.string.nodes_overview_chain_state,
             network.displayName,
-            myotisChainLabel(shown.status, shown.chain(network), network in running),
+            if (network in upgrades) Strings.get(R.string.nodes_overview_chain_update, label) else label,
         )
     }
     return NodeOverviewRow(

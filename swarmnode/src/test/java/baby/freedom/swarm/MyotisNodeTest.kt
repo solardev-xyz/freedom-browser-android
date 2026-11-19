@@ -624,6 +624,45 @@ class MyotisNodeTest {
         """{"running":true,"beaconState":"SYNCED","snapServingPeers":1,"elReaderAvailable":true}"""
 
     @Test
+    fun `the fork watch's advisory reaches the published rows in front, behind and parked, and goes with its chain`() {
+        val advisory = """"upgradeAdvisory":{"phase":"ACTIVE","activationTime":0,"forkId":"0x00000000","observedPeers":3}"""
+        val expected = MyotisUpgradeAdvisory("ACTIVE", 0L, "0x00000000", 3)
+        val engine = FakeEngine()
+        engine.status[1L] = readyJson.dropLast(1) + ",$advisory}"
+        engine.status[2L] = """{"running":true,"beaconState":"STALE_ANCHOR","currentPeriod":3692,"targetPeriod":3701,"wsBoundPeriods":3,$advisory}"""
+        val node = node(engine)
+        node.start()
+        idle(node)
+        val eth = node.state.value.chain(MyotisNetwork.Mainnet)!!
+        assertEquals(expected, eth.upgradeAdvisory)
+        // Display only: the chain still serves.
+        assertTrue(eth.ready)
+        assertTrue(node.ethCall(MyotisNetwork.Mainnet, "0xaa", "0x01").contains("\"ok\""))
+        // Parked on its stale anchor, the row keeps what the engine said when it parked.
+        val gnosis = node.state.value.chain(MyotisNetwork.Gnosis)!!
+        assertTrue(gnosis.staleAnchor)
+        assertEquals(expected, gnosis.upgradeAdvisory)
+
+        // In the background the row is shown paused, advisory and all.
+        node.enterBackground()
+        node.pollNow()
+        idle(node)
+        val behind = node.state.value.chain(MyotisNetwork.Mainnet)!!
+        assertTrue(behind.paused)
+        assertEquals(expected, behind.upgradeAdvisory)
+        node.enterForeground()
+        idle(node)
+
+        // A chain switched off takes its advisory with it; a stop leaves none.
+        node.setNetworks(setOf(MyotisNetwork.Gnosis))
+        idle(node)
+        assertNull(node.state.value.chain(MyotisNetwork.Mainnet))
+        node.stop()
+        idle(node)
+        assertTrue(node.state.value.chains.isEmpty())
+    }
+
+    @Test
     fun `a verified read reaches the engine only on a chain the last poll found ready`() {
         val engine = FakeEngine()
         engine.status[1L] = """{"running":true,"beaconState":"CATCHING_UP","elReaderAvailable":true}"""

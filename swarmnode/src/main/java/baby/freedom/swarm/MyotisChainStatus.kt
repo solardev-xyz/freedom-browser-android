@@ -56,6 +56,13 @@ data class MyotisChainStatus(
      * [MyotisNode], never by [decode]. A chain in recovery is never [ready].
      */
     val recovery: MyotisRecovery? = null,
+    /**
+     * The engine's fork watch (Myotis v0.1.14+): enough distinct peer
+     * networks announce a network upgrade this build's schedule lacks.
+     * Peer-supplied and unverified, so display only: nothing gates or
+     * routes on it, [ready] included.
+     */
+    val upgradeAdvisory: MyotisUpgradeAdvisory? = null,
 ) : Parcelable {
 
     val synced: Boolean get() = beaconState == SYNCED
@@ -131,7 +138,57 @@ data class MyotisChainStatus(
                 wsBoundPeriods = o.optLong("wsBoundPeriods", 0L),
                 finalizedSlot = o.optLong("finalizedSlot", 0L),
                 finalizedRootHex = o.optString("finalizedRootHex", ""),
+                upgradeAdvisory = MyotisUpgradeAdvisory.decode(o.opt("upgradeAdvisory")),
             )
+        }
+    }
+}
+
+/**
+ * `myotis_status_json`'s `upgradeAdvisory`: a network upgrade (fork) that
+ * enough distinct peer networks announce and this build of the engine
+ * doesn't know about. Desktop's `upgradeAdvisory()` (#586) validates it the
+ * same way: every field must have upstream's documented shape or there is
+ * no advisory at all, since a partial one would say something nobody sent.
+ */
+@Parcelize
+data class MyotisUpgradeAdvisory(
+    /** [SCHEDULED] (coming) or [ACTIVE] (the network has moved past this build). */
+    val phase: String,
+    /** Unix seconds of the upgrade's activation; 0 = unknown. */
+    val activationTime: Long,
+    /** `0x` + 8 lowercase hex; `0x00000000` = unknown (a blob-parameter-only fork). */
+    val forkId: String,
+    /** Distinct peer networks (IPv4 /24, IPv6 /48) that reported it; upstream needs 3. */
+    val observedPeers: Int,
+) : Parcelable {
+    val active: Boolean get() = phase == ACTIVE
+
+    companion object {
+        const val SCHEDULED = "SCHEDULED"
+        const val ACTIVE = "ACTIVE"
+
+        /** Year 9999, as desktop: keeps it a valid date. */
+        private const val MAX_TIME = 253_402_300_799L
+        private const val MAX_PEERS = 100_000L
+        private val FORK_ID = Regex("^0x[0-9a-fA-F]{8}$")
+
+        /** [value] is the raw `upgradeAdvisory` (`null`/`JSONObject.NULL` = none). */
+        fun decode(value: Any?): MyotisUpgradeAdvisory? {
+            val o = value as? JSONObject ?: return null
+            val phase = o.opt("phase") as? String ?: return null
+            if (phase != SCHEDULED && phase != ACTIVE) return null
+            val time = integral(o.opt("activationTime"))?.takeIf { it in 0..MAX_TIME } ?: return null
+            val forkId = (o.opt("forkId") as? String)?.takeIf { FORK_ID.matches(it) } ?: return null
+            val peers = integral(o.opt("observedPeers"))?.takeIf { it in 1..MAX_PEERS } ?: return null
+            return MyotisUpgradeAdvisory(phase, time, forkId.lowercase(), peers.toInt())
+        }
+
+        /** A JSON integer: not a string, not a fraction (`optLong` would take both). */
+        private fun integral(v: Any?): Long? = when (v) {
+            is Int -> v.toLong()
+            is Long -> v
+            else -> null
         }
     }
 }

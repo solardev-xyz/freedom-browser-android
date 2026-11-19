@@ -685,6 +685,7 @@ private fun LightClientSection(
         }
         val err = shown.errorMessage
         if (!err.isNullOrBlank()) DetailRow(stringResource(R.string.node_error), err, singleLine = false)
+        val upgrades = myotisUpgradeNotices(info, on, System.currentTimeMillis())
         for (network in MyotisNetwork.entries) {
             ChainRows(
                 network = network,
@@ -695,6 +696,7 @@ private fun LightClientSection(
                 atLaunch = atLaunch?.let { network in it },
                 onAtLaunch = { onAtLaunch(network, it) },
                 onRecovery = onRecovery,
+                upgrade = upgrades.firstOrNull { it.network == network },
             )
         }
         LogsButton(onOpenLogs)
@@ -725,6 +727,8 @@ private fun ChainRows(
     atLaunch: Boolean?,
     onAtLaunch: (Boolean) -> Unit,
     onRecovery: (chainId: Long, repair: Boolean) -> Unit,
+    /** The fork watch's notice for this chain (#542), shown whatever else the chain is doing. */
+    upgrade: MyotisUpgradeNotice? = null,
 ) {
     Spacer(Modifier.height(8.dp))
     Row(
@@ -770,6 +774,7 @@ private fun ChainRows(
             style = MaterialTheme.typography.bodyMedium,
         )
     }
+    upgrade?.let { UpgradeNoticeRows(it) }
     if (!on || chain == null || nodeStatus != MyotisStatus.Running) return
     chain.error?.let {
         DetailRow(stringResource(R.string.node_error), it, singleLine = false)
@@ -794,6 +799,20 @@ private fun ChainRows(
     }
     val reason = chain.notServingReason
     if (reason.isNotEmpty()) DetailRow(stringResource(R.string.node_not_serving), reason, singleLine = false)
+}
+
+/** A chain's network-upgrade notice (#542): what's coming, where updates come from, who said so. */
+@Composable
+private fun UpgradeNoticeRows(notice: MyotisUpgradeNotice) {
+    DetailRow(stringResource(R.string.node_upgrade_label), notice.text, singleLine = false)
+    for (line in listOf(stringResource(R.string.node_upgrade_where), notice.detail)) {
+        Text(
+            line,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 2.dp),
+        )
+    }
 }
 
 /**

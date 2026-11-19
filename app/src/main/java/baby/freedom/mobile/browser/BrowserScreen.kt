@@ -2534,6 +2534,8 @@ fun BrowserScreen(
                         modifier = Modifier.fillMaxSize(),
                         update = appUpdate.notice,
                         onDismissUpdate = AppUpdates::dismiss,
+                        upgrades = myotisUpgradeNotices(myotisInfo, myotisRunning.orEmpty(), System.currentTimeMillis())
+                            .map { it.text },
                     )
                 }
             }
