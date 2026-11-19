@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 
@@ -48,7 +49,7 @@ class ActPublicKeyPollTest {
         var fetches = 0
         var shown: ActPublicKey.Read? = null
         val job = launch {
-            ActPublicKey.keepRead(lifecycle, source, { fetches++; answer }) { shown = it }
+            ActPublicKey.keepRead(lifecycle, source, { fetches++; answer?.let { ActPublicKey.Answer(it) } }) { shown = it }
         }
         runCurrent()
         assertEquals(1, fetches)
@@ -81,7 +82,7 @@ class ActPublicKeyPollTest {
         var fetches = 0
         var shown: ActPublicKey.Read? = null
         val job = launch {
-            ActPublicKey.keepRead(lifecycle, source, { fetches++; answer }) { shown = it }
+            ActPublicKey.keepRead(lifecycle, source, { fetches++; answer?.let { ActPublicKey.Answer(it) } }) { shown = it }
         }
         runCurrent()
         lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
@@ -100,6 +101,43 @@ class ActPublicKeyPollTest {
         assertEquals(newKey, shown?.key)
         advanceTimeBy(10 * ActPublicKey.RETRY_MAX_MS)
         assertEquals("stops once answered", 4, fetches)
+        job.cancel()
+    }
+
+    @Test
+    fun `a node that now answers with no key blanks the key read, and is asked again`() = runTest(main) {
+        val lifecycle = lifecycle()
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        // null: no answer; Answer(null): the node answered with no key.
+        var answer: ActPublicKey.Answer? = ActPublicKey.Answer(oldKey)
+        var fetches = 0
+        var shown: ActPublicKey.Read? = null
+        val job = launch {
+            ActPublicKey.keepRead(lifecycle, source, { fetches++; answer }) { shown = it }
+        }
+        runCurrent()
+        assertEquals(oldKey, ActPublicKey.shown(shown, source))
+
+        // In the background, the node behind the URL is replaced by one that answers without a key.
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        runCurrent()
+        answer = ActPublicKey.Answer(null)
+        lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        runCurrent()
+        assertEquals(2, fetches)
+        assertNull("the old node's key isn't kept", ActPublicKey.shown(shown, source))
+
+        // A passing outage now keeps Unknown, and asks again backing off.
+        answer = null
+        advanceTimeBy(ActPublicKey.RETRY_MS + 1)
+        assertEquals(3, fetches)
+        assertNull(ActPublicKey.shown(shown, source))
+        answer = ActPublicKey.Answer(newKey)
+        advanceTimeBy(2 * ActPublicKey.RETRY_MS + 1)
+        assertEquals(4, fetches)
+        assertEquals(newKey, ActPublicKey.shown(shown, source))
+        advanceTimeBy(10 * ActPublicKey.RETRY_MAX_MS)
+        assertEquals("stops once a key is read", 4, fetches)
         job.cancel()
     }
 }

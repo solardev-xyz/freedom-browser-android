@@ -108,6 +108,9 @@ class ActPublicKeyTest {
     }
 
     private fun served(status: String, body: String, external: Boolean = true, node: String = "x"): String? =
+        answered(status, body, external, node)?.key
+
+    private fun answered(status: String, body: String, external: Boolean = true, node: String = "x"): ActPublicKey.Answer? =
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
             val acceptor = Thread {
                 runCatching {
@@ -144,6 +147,26 @@ class ActPublicKeyTest {
         // Past the read's cap.
         assertNull(served("200 OK", """{"publicKey":"$compressed","pad":"${"x".repeat(100_000)}"}"""))
         // Nothing listening.
+        val port = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        assertNull(runBlocking { ActPublicKey.fetch(ActPublicKey.Source("http://127.0.0.1:$port", true, "x")) })
+    }
+
+    @Test
+    fun `a node that answers with no key is told apart from one that gives no answer`() {
+        val key = """{"publicKey":"$compressed"}"""
+        // Answered, with no key: the page shows Unknown rather than keeping a key read before.
+        assertEquals(ActPublicKey.Answer(null), answered("404 Not Found", key))
+        assertEquals(ActPublicKey.Answer(null), answered("403 Forbidden", key))
+        assertEquals(ActPublicKey.Answer(null), answered("200 OK", """{"overlay":"aa"}"""))
+        assertEquals(ActPublicKey.Answer(null), answered("200 OK", "{"))
+        val other = """{"overlay":"${"aa".repeat(32)}","publicKey":"$compressed"}"""
+        assertEquals(ActPublicKey.Answer(null), answered("200 OK", other, external = false, node = "bb".repeat(32)))
+        // No answer: a passing outage or load, which keeps a key read before.
+        assertNull(answered("502 Bad Gateway", key))
+        assertNull(answered("503 Service Unavailable", key))
+        assertNull(answered("429 Too Many Requests", key))
+        assertNull(answered("408 Request Timeout", key))
+        assertNull(answered("200 OK", """{"publicKey":"$compressed","pad":"${"x".repeat(100_000)}"}"""))
         val port = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
         assertNull(runBlocking { ActPublicKey.fetch(ActPublicKey.Source("http://127.0.0.1:$port", true, "x")) })
     }

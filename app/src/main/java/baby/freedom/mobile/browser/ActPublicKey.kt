@@ -102,8 +102,15 @@ internal object ActPublicKey {
     /** Where a key is read from: [base] is the gateway; [node] tells one node behind it from the next. */
     data class Source(val base: String, val external: Boolean, val node: String)
 
-    /** A key as read from [source]. */
-    data class Read(val source: Source, val key: String)
+    /** What [source] last answered: its key, or null when it answered with none. */
+    data class Read(val source: Source, val key: String?)
+
+    /**
+     * One read's answer: the node's [key], or null when the node answered
+     * and has none (a 4xx, or a body with no key, or another overlay's).
+     * [fetch] returns no [Answer] at all when the node gave no answer.
+     */
+    data class Answer(val key: String?)
 
     /**
      * The key the page shows for [current]: [read]'s, only if it was read
@@ -114,8 +121,14 @@ internal object ActPublicKey {
     fun shown(read: Read?, current: Source?): String? =
         read?.takeIf { current != null && it.source == current }?.key
 
-    /** One read of [source]'s `/addresses`: its key, or null when the node can't be asked or reports none. */
-    suspend fun fetch(source: Source): String? = withContext(Dispatchers.IO) {
+    /**
+     * One read of [source]'s `/addresses`: the node's [Answer] (its key, or
+     * none when it answers a 4xx or a body without one), or null when it
+     * gave no answer — it couldn't be reached or didn't answer in time,
+     * answered a 5xx, 408 or 429 (a passing outage or load), or answered
+     * more than [MAX_ANSWER_BYTES].
+     */
+    suspend fun fetch(source: Source): Answer? = withContext(Dispatchers.IO) {
         try {
             // An onion endpoint while an external Tor proxy is being
             // re-checked waits for that verdict, as the manifest lookup does.
@@ -127,7 +140,7 @@ internal object ActPublicKey {
                 source.base, "GET", "/addresses", emptyMap(), null, left, maxBytes = MAX_ANSWER_BYTES,
             )
             val overlay = if (source.external) null else source.node
-            if (answer.ok) from(String(answer.body, Charsets.UTF_8), overlay) else null
+            answerOf(answer.status, answer.body, overlay)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -135,6 +148,14 @@ internal object ActPublicKey {
         } catch (e: StackOverflowError) {
             null
         }
+    }
+
+    /** [fetch]'s verdict on an HTTP answer of [status] with [body]. */
+    internal fun answerOf(status: Int, body: ByteArray, overlay: String?): Answer? = when {
+        status in 200..299 -> Answer(from(String(body, Charsets.UTF_8), overlay))
+        status == 408 || status == 429 -> null
+        status in 400..499 -> Answer(null)
+        else -> null
     }
 
     /**
@@ -145,21 +166,24 @@ internal object ActPublicKey {
      * An external endpoint is known only by its URL, so the node behind
      * it can be replaced or re-keyed while the page stays open; that
      * read on return shows and copies the new node's key rather than
-     * the old one. A re-read that gets no answer keeps the key already
-     * read (a passing outage shouldn't blank it) and asks again, backing
-     * off, until the node answers. Never returns while the lifecycle
-     * lives: cancel the calling coroutine to end it.
+     * the old one. A node that answers with no key (a 4xx, or a body
+     * without one) blanks the key already read, as desktop shows Unknown
+     * when its read fails, and is asked again, backing off. A re-read
+     * that gets no answer at all keeps the key already read (a passing
+     * outage shouldn't blank it) and asks again, backing off, until the
+     * node answers. Never returns while the lifecycle lives: cancel the
+     * calling coroutine to end it.
      */
     suspend fun keepRead(
         lifecycle: Lifecycle,
         source: Source,
-        fetch: suspend (Source) -> String?,
+        fetch: suspend (Source) -> Answer?,
         publish: (Read) -> Unit,
     ) {
         lifecycle.pollWhileStartedBackingOff(RETRY_MS, RETRY_MAX_MS) {
-            val key = fetch(source) ?: return@pollWhileStartedBackingOff true
-            publish(Read(source, key))
-            false
+            val answer = fetch(source) ?: return@pollWhileStartedBackingOff true
+            publish(Read(source, answer.key))
+            answer.key == null
         }
     }
 
@@ -185,6 +209,7 @@ internal object ActPublicKey {
  * page: read while the page is on screen, asked again (5 s, then
  * backing off to a minute) until the node answers with one, then read
  * once more on each return to the foreground ([ActPublicKey.keepRead]).
+ * An answer with no key reads Unknown; no answer keeps the key read.
  * A node switched on is a new source, read at once. Null reads Unknown.
  */
 @Composable
