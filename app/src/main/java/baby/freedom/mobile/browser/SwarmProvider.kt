@@ -169,6 +169,14 @@ class SwarmProvider(
         /** The answer's body ran past the call's limit; the rest of it was never read. */
         class AnswerTooLarge : IOException("the node's answer is too large")
 
+        /**
+         * The node answered, then its body broke off short of its length:
+         * the node is up (it sent the status line), so this is a failed
+         * answer, not `node-stopped` (bee does it when a chunk of a join
+         * can't be found after the 200 went out).
+         */
+        class AnswerCutShort(cause: Throwable?) : IOException("the node's answer was cut short", cause)
+
         class Answer(val status: Int, headers: Map<String, String>, val body: ByteArray) {
             /** Header names lower-cased. */
             val headers: Map<String, String> = headers.mapKeys { it.key.lowercase() }
@@ -264,6 +272,9 @@ class SwarmProvider(
         throw e
     } catch (e: VaultLockedException) {
         Reply.Err(INTERNAL, VAULT_LOCKED)
+    } catch (e: Http.AnswerCutShort) {
+        // The node is up and answered; its body ended early.
+        Reply.Err(INTERNAL, "The Swarm node's answer was cut short")
     } catch (e: SocketTimeoutException) {
         // The node is up but slow (a big upload over the whole-call
         // deadline): not "stopped" — it may even have stored the data.
@@ -1087,13 +1098,16 @@ class SwarmProvider(
      * joined by the node (`GET /bytes`), which checks every chunk and
      * recovers erasure-coded content. No grant; one request against the
      * read budget whatever the size. The root chunk is read and checked
-     * first and charged as soon as it's read; the blob's size comes from
+     * first and charged once it validates (a root that isn't the requested
+     * chunk costs no bytes); the blob's size comes from
      * its span, redundancy level cleared. A blob past the window's whole
      * byte budget is `data_too_large` before the join; a blob that fits the
      * root chunk is its payload, with no join; a larger one has the rest of
      * its size reserved first (`rate_limited` if it doesn't fit what is left
      * of the window, so parallel reads can't together pass it), and the join
-     * is held to that size. A reservation stands if the join fails. Only
+     * is held to that size. A reservation stands if the join fails —
+     * also when bee has sent its 200 and then breaks the body off at a chunk
+     * it can't retrieve, which is -32603, not `node-stopped`. Only
      * 32-byte references: an encrypted one is `invalid_reference`. The
      * join has no deadline of its own on desktop beyond the page's 300 s;
      * here it gets what is left of [DATA_READ_DEADLINE_MS], so the page
@@ -1138,6 +1152,9 @@ class SwarmProvider(
                 }
             } catch (e: Http.AnswerTooLarge) {
                 return Reply.Err(INTERNAL, "Node returned more than $expected bytes for a $expected-byte blob")
+            } catch (e: Http.AnswerCutShort) {
+                // bee has sent its 200 and the length, then hit a chunk it can't retrieve.
+                return Reply.Err(INTERNAL, "Data can't be read: the node's answer broke off before the $expected-byte blob was complete")
             }
             // As [chunk]: bee says "read chunk failed" with a 500 for a chunk it can't find.
             if (answer.status == 404 || (answer.status == 500 && answer.message().trim().equals("read chunk failed", ignoreCase = true))) {

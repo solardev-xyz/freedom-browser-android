@@ -82,6 +82,37 @@ class GatewayHttpDeviceTest {
     }
 
     @Test
+    fun `an answer whose body breaks off after its status is cut short and not an unreachable node`() {
+        ServerSocket(0, 1, LOOPBACK).use { server ->
+            val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
+            val acceptor = Thread {
+                runCatching {
+                    server.accept().use { s ->
+                        accepted.set(true)
+                        s.getInputStream().read(ByteArray(4096))
+                        // bee's /bytes join: 200 and the whole length, then a chunk it can't find.
+                        s.getOutputStream().apply {
+                            write("HTTP/1.1 200 OK\r\nContent-Length: 204800\r\n\r\n".toByteArray())
+                            write(ByteArray(4096))
+                            flush()
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; start() }
+            val caught = try {
+                GatewayHttp.requestAt("http://127.0.0.1:${server.localPort}", "GET", "/bytes/x", emptyMap(), null, 5_000)
+                null
+            } catch (e: java.io.IOException) {
+                e
+            }
+            acceptor.join(5_000)
+            assertTrue("the server never accepted the request", accepted.get())
+            // Exactly this type: Android's stack throws a ProtocolException here, which must not read as node-stopped.
+            assertTrue("caught $caught (cause ${caught?.cause})", caught is SwarmProvider.Http.AnswerCutShort)
+        }
+    }
+
+    @Test
     fun `an answer read to its end in time is returned even if the deadline passes while it is handed back`() {
         ServerSocket(0, 1, LOOPBACK).use { server ->
             val acceptor = Thread {

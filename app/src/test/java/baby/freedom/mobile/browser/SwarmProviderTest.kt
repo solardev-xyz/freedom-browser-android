@@ -100,6 +100,8 @@ class SwarmProviderTest {
         val blobs = HashMap<String, ByteArray>()
         /** `GET /bytes` answers that stand in for the join failing, by root reference. */
         val blobFailures = HashMap<String, SwarmProvider.Http.Answer>()
+        /** `GET /bytes` joins whose body breaks off after the 200, as Android's stack throws it, by root reference. */
+        val blobsCutShort = HashSet<String>()
         /** Each capped request's path and cap. */
         val caps: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
 
@@ -166,6 +168,8 @@ class SwarmProviderTest {
                     chunks[address.swarmHex()] = wire
                     json(JSONObject().put("reference", address.swarmHex()), 201)
                 }
+                method == "GET" && bare.startsWith("/bytes/") && bare.removePrefix("/bytes/") in blobsCutShort ->
+                    throw SwarmProvider.Http.AnswerCutShort(java.net.ProtocolException("unexpected end of stream"))
                 method == "GET" && bare.startsWith("/bytes/") && blobFailures.containsKey(bare.removePrefix("/bytes/")) ->
                     blobFailures.getValue(bare.removePrefix("/bytes/"))
                 method == "GET" && bare.startsWith("/bytes/") -> blobs[bare.removePrefix("/bytes/")]
@@ -713,6 +717,19 @@ class SwarmProviderTest {
         node.blobs[ref] = ByteArray(7999)
         val short = err(call("swarm_readData", dataParams(ref)))
         assertTrue(short.message, short.message.contains("7999 bytes for a 8000-byte blob"))
+    }
+
+    @Test
+    fun `a join bee breaks off after its 200 is -32603, not a stopped node`() {
+        val ref = plantBlob(ByteArray(8000) { 3 })
+        node.blobsCutShort += ref
+        val e = err(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals(-32603, e.code)
+        assertTrue(e.message, e.message.contains("broke off"))
+        assertEquals(null, e.reason)
+        // The node is still there: the next read joins it whole.
+        node.blobsCutShort.clear()
+        ok(call("swarm_readData", dataParams(ref), origin = other))
     }
 
     @Test

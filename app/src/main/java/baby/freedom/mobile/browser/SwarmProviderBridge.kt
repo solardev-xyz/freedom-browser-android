@@ -955,19 +955,36 @@ internal object GatewayHttp : SwarmProvider.Http {
             }
             val status = conn.responseCode
             val stream = if (status >= 400) conn.errorStream else conn.inputStream
-            val bytes = stream?.use { input ->
-                val out = java.io.ByteArrayOutputStream()
-                val buf = ByteArray(64 * 1024)
-                while (true) {
-                    val n = input.read(buf)
-                    // Between reads too: a node trickling its answer never trips the read timeout.
-                    if (expired()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
-                    if (n < 0) break
-                    if (out.size() + n > maxBytes) throw SwarmProvider.Http.AnswerTooLarge()
-                    out.write(buf, 0, n)
-                }
-                out.toByteArray()
-            } ?: ByteArray(0)
+            val bytes = try {
+                stream?.use { input ->
+                    val out = java.io.ByteArrayOutputStream()
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        // Between reads too: a node trickling its answer never trips the read timeout.
+                        if (expired()) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
+                        if (n < 0) break
+                        if (out.size() + n > maxBytes) throw SwarmProvider.Http.AnswerTooLarge()
+                        out.write(buf, 0, n)
+                    }
+                    out.toByteArray()
+                } ?: ByteArray(0)
+            } catch (e: IOException) {
+                // The node answered, then its body broke off (Android's
+                // stack throws "unexpected end of stream"; bee does this
+                // when a joined chunk can't be found mid-stream): a cut
+                // answer, not a node that can't be reached.
+                if (e is SocketTimeoutException || e is SwarmProvider.Http.AnswerTooLarge || expired()) throw e
+                throw SwarmProvider.Http.AnswerCutShort(e)
+            }
+            // The JVM's stack ends a fixed-length body the connection
+            // dropped part-way without an error: short of its length, it's cut too.
+            val length = conn.getHeaderField("Content-Length")?.trim()?.toLongOrNull()
+            if (length != null && bytes.size < length && method != "HEAD" && status != 204 && status != 304 &&
+                conn.getHeaderField("Content-Encoding") == null
+            ) {
+                throw SwarmProvider.Http.AnswerCutShort(null)
+            }
             // Read to its end: done, unless the deadline got there first.
             if (!state.compareAndSet(RUNNING, DONE)) throw SocketTimeoutException("the node didn't answer in $timeoutMs ms")
             afterAnswer()
