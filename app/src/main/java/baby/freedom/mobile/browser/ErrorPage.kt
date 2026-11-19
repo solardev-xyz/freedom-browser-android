@@ -73,8 +73,10 @@ object ErrorPage {
      * A dweb address whose path leaves its content root (#534,
      * [DwebPath]) and that no interceptor refusal can answer in place:
      * the submit flow's probe found nothing it may HEAD for a load that
-     * doesn't map to a virtual origin ([Gateways.pathRefused]). Refused
-     * for good, so the page offers no Try Again.
+     * isn't a name load mapping to a virtual origin
+     * ([Gateways.pathRefused], [Gateways.refusedInPlace]; an address
+     * whose own id escapes, like `ipns://..` or `ipns://%2e%2e`, #571).
+     * Refused for good, so the page offers no Try Again.
      */
     const val DWEB_PATH_REFUSED: String = "dweb_path_refused"
 
