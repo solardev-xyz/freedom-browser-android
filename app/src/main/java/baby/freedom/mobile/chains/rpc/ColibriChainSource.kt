@@ -43,7 +43,7 @@ import org.json.JSONObject
  * behind the verifier's one lock. Never
  * broadcasts.
  *
- * Only while [enabled]: the *Colibri proofs* switch (Settings → Name
+ * Only while [enabled]: the *Proof check* (Colibri) switch (Settings → Name
  * resolution), which covers these reads too — off, nothing goes to the
  * prover and reads start at the quorum.
  *
@@ -97,7 +97,7 @@ internal class ColibriChainSource(
     private val colibri: EnsColibri,
     /** Whether the verifier may be usable here without loading it: [isAvailable] runs on the UI thread. */
     private val present: () -> Boolean,
-    /** The *Colibri proofs* switch ([ColibriReads]); read on every call. */
+    /** The *Proof check* (Colibri) switch ([ColibriReads]); read on every call. */
     private val enabled: () -> Boolean = { true },
     private val maxInFlight: Int = MAX_IN_FLIGHT,
     /** Of [maxInFlight], how many pages' reads may hold together (see the class kdoc). */

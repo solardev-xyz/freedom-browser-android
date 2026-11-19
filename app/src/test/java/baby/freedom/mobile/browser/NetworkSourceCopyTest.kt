@@ -87,5 +87,9 @@ class NetworkSourceCopyTest {
             assertEquals(steps.size, sources.size)
             steps.zip(sources).forEach { (step, source) -> assertTrue(step, step.startsWith(source.label + ":")) }
         }
+        // The two proof steps say how each proves, not the label again.
+        val all = readSteps(eth, policy) { true }
+        assertEquals("Local node: a proof checked on this device", all[0])
+        assertEquals("Proof check: a server answers, and this device checks its proof", all[1])
     }
 }

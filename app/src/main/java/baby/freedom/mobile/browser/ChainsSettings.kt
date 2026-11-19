@@ -372,7 +372,8 @@ internal fun readSteps(chain: Chain, policy: ChainAccessPolicy, wired: (ChainSou
     }
     return readStepSources(policy, wired).map { source ->
         when (source) {
-            ChainSource.MYOTIS, ChainSource.COLIBRI -> Strings.get(R.string.names_read_step_proof, source.label)
+            ChainSource.MYOTIS -> Strings.get(R.string.names_read_step_proof, source.label)
+            ChainSource.COLIBRI -> Strings.get(R.string.names_read_step_prover, source.label)
             ChainSource.QUORUM -> if (providers >= policy.quorumM) {
                 Strings.plural(quorumStep, members.size, source.label, policy.quorumM, members.size)
             } else {

@@ -1,7 +1,7 @@
 package baby.freedom.mobile.chains.rpc
 
 /**
- * The *Colibri proofs* switch (Settings → Name resolution) as this
+ * The *Proof check* (Colibri) switch (Settings → Name resolution) as this
  * process's chain-data router reads it ([ColibriChainSource]): it covers
  * the router's wallet, Swarm-node and site reads, so turning it off sends
  * nothing to the prover. Name lookups never go through Colibri (#529),

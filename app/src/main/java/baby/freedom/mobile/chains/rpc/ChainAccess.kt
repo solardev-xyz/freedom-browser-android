@@ -301,7 +301,7 @@ enum class ProofTierGap {
     /** Not in this build, or its native library didn't load. */
     NOT_IN_BUILD,
 
-    /** Switched off by the user (Colibri: *Colibri proofs*). */
+    /** Switched off by the user (Colibri: *Proof check*). */
     OFF,
 
     /** Backing off after its servers couldn't be reached. */
