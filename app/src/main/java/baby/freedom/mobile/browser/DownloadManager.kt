@@ -1355,8 +1355,12 @@ class DownloadManager private constructor(context: Context) {
             )
         }
         is DownloadTarget.Dweb -> {
-            val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery, private = private)
-                ?: throw DownloadFailure(
+            var escaped = false
+            val gatewayUrl = Gateways.gatewayUrlFor(target.root, target.pathAndQuery, private = private, onEscape = { escaped = true })
+                ?: throw if (escaped) {
+                    // Refused for leaving its content root (#534): no retry changes that.
+                    DownloadFailure(DownloadNote.of(R.string.library_download_path_refused))
+                } else DownloadFailure(
                     if (target.root is ContentRoot.Ens) DownloadNote.of(
                         R.string.library_download_ens_unresolved,
                         // As the row's address shows it (#490 R2-M1).

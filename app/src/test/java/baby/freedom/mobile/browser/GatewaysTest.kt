@@ -222,9 +222,9 @@ class GatewaysTest {
             // Under bzz: any encoded separator, climbing or not.
             ContentRoot.Bzz(ref64) to "/a%2Fb",
         ).forEach { (root, path) ->
-            var escaped = false
-            assertNull("$root $path", Gateways.gatewayUrlFor(root, path, onEscape = { escaped = true }))
-            assertTrue("$root $path", escaped)
+            var byRequest: Boolean? = null
+            assertNull("$root $path", Gateways.gatewayUrlFor(root, path, onEscape = { byRequest = it }))
+            assertEquals("$root $path", true, byRequest)
         }
         // Names that only look like dot segments, and a query, still pass.
         assertEquals(
@@ -245,19 +245,27 @@ class GatewaysTest {
         KnownEnsNames.record("ipfs://bafy/..%2F..%2Fapi/v0", "docs.example.tez", EnsTrust.ASSUMED)
         KnownEnsNames.record("bzz://$ref64/site%2Fsub", "bzz.example.tez", EnsTrust.ASSUMED)
         KnownEnsNames.record("ipfs://bafy/site", "ok.example.tez", EnsTrust.ASSUMED)
+        KnownEnsNames.record("bzz://$ref64", "swarm.eth", EnsTrust.ASSUMED)
         try {
-            var escaped = false
-            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("docs.example.tez"), "/id", onEscape = { escaped = true }))
-            assertTrue(escaped)
-            escaped = false
-            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("bzz.example.tez"), "/x", onEscape = { escaped = true }))
-            assertTrue(escaped)
-            escaped = false
+            // The record's fault, not the request's: the interceptor's 502.
+            var byRequest: Boolean? = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("docs.example.tez"), "/id", onEscape = { byRequest = it }))
+            assertEquals(false, byRequest)
+            byRequest = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("bzz.example.tez"), "/x", onEscape = { byRequest = it }))
+            assertEquals(false, byRequest)
+            // A name served from bzz: asked for an encoded separator: the
+            // request's fault (the interceptor's 400), though only known
+            // once the name resolved.
+            byRequest = null
+            assertNull(Gateways.gatewayUrlFor(ContentRoot.Ens("swarm.eth"), "/a%2Fb", onEscape = { byRequest = it }))
+            assertEquals(true, byRequest)
+            byRequest = null
             assertEquals(
                 "http://127.0.0.1:58312/ipfs/bafy/site/id",
-                Gateways.gatewayUrlFor(ContentRoot.Ens("ok.example.tez"), "/id", onEscape = { escaped = true }),
+                Gateways.gatewayUrlFor(ContentRoot.Ens("ok.example.tez"), "/id", onEscape = { byRequest = it }),
             )
-            assertFalse(escaped)
+            assertNull(byRequest)
         } finally {
             KnownEnsNames.clear()
         }

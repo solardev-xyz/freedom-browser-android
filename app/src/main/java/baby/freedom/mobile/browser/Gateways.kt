@@ -533,7 +533,9 @@ object Gateways {
      * Also `null`, after calling [onEscape], when the path the target is
      * built from — the request's and a name record's base path together —
      * would leave `/<namespace>/<ref>/` ([DwebPath.isContainedTarget],
-     * #534); under `bzz:`, any encoded separator does.
+     * #534); under `bzz:`, any encoded separator does. [onEscape] is told
+     * whether the request's path alone does (a name served from `bzz:`
+     * asked for `/a%2Fb`), or only with the record's base path.
      */
     fun gatewayUrlFor(
         root: ContentRoot,
@@ -541,7 +543,7 @@ object Gateways {
         pins: EnsDocumentPins? = null,
         page: EnsDocumentPins.Page? = null,
         private: Boolean = false,
-        onEscape: () -> Unit = {},
+        onEscape: (byRequest: Boolean) -> Unit = {},
     ): String? {
         val (served, basePath) = servedContentFor(root, pins, page, private) ?: return null
         // A `.tez` website record may publish a base path
@@ -554,12 +556,14 @@ object Gateways {
             is ContentRoot.IpnsName -> "/ipns/${served.name}"
             is ContentRoot.Ens -> null
         }
-        if (rooted != null &&
-            (!(path.isEmpty() || path.startsWith("/") || path.startsWith("?")) ||
-                !DwebPath.isContainedTarget(rooted + path, encodedSeparators = served !is ContentRoot.Bzz))
-        ) {
-            onEscape()
-            return null
+        if (rooted != null) {
+            val encodedSeparators = served !is ContentRoot.Bzz
+            fun contained(p: String) = (p.isEmpty() || p.startsWith("/") || p.startsWith("?")) &&
+                DwebPath.isContainedTarget(rooted + p, encodedSeparators)
+            if (!contained(path)) {
+                onEscape(!contained(pathAndQuery))
+                return null
+            }
         }
         return when (served) {
             is ContentRoot.Bzz -> "$swarmBase/bzz/${served.ref}$path"

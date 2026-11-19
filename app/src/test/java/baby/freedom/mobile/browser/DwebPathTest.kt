@@ -99,6 +99,15 @@ class DwebPathTest {
     }
 
     @Test
+    fun `the refusal mark is the app's own`() {
+        assertTrue(DwebPath.isRefusal(mapOf("x-dweb-path-refused" to "1")))
+        assertFalse(DwebPath.isRefusal(mapOf("Content-Type" to "text/plain")))
+        assertFalse(DwebPath.isRefusal(null))
+        // A gateway can't send it to keep a page on screen in its place.
+        assertTrue(DwebPath.REFUSAL_HEADER.lowercase() in HEADERS_TO_STRIP)
+    }
+
+    @Test
     fun `logs name the gateway or scheme, never the content`() {
         assertEquals(
             "http://127.0.0.1:1633/<redacted>",

@@ -32,6 +32,10 @@ internal object DwebPath {
      */
     const val REFUSAL_HEADER = "X-Dweb-Path-Refused"
 
+    /** Whether [headers] mark the interceptor's own refusal ([REFUSAL_HEADER]). */
+    fun isRefusal(headers: Map<String, String>?): Boolean =
+        headers?.keys?.any { it.equals(REFUSAL_HEADER, ignoreCase = true) } == true
+
     private val DOTS_AND_SEPARATORS = Regex("%(?:2[eEfF]|5[cC])")
     private val ENCODED_SEPARATOR = Regex("%(?:2[fF]|5[cC])")
     private val SEPARATORS = Regex("[/\\\\]")

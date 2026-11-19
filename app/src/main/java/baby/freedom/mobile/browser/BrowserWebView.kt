@@ -4399,7 +4399,7 @@ private fun buildRefreshableWebView(
                 }
                 // And a path refused for leaving its content root (#534):
                 // retrying it would only be refused again.
-                if (errorResponse?.responseHeaders?.keys?.any { it.equals(DwebPath.REFUSAL_HEADER, ignoreCase = true) } == true) {
+                if (DwebPath.isRefusal(errorResponse?.responseHeaders)) {
                     Log.i(LOG_TAG, "main-frame HTTP $status for ${dwebUrlForLog(failed)} → path refused in place")
                     return
                 }
@@ -6661,18 +6661,25 @@ private fun interceptVirtualRequestFor(
     // deliberate settings change, so more than one retry is a bound,
     // not a path.
     repeat(GATEWAY_SWITCH_RETRIES) {
-        var escaped = false
-        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page, private = private, onEscape = { escaped = true })
-            ?: return if (escaped) {
-                syntheticResponse(
+        var escaped: Boolean? = null
+        val target = Gateways.gatewayUrlFor(root, pathAndQuery, page = page, private = private, onEscape = { escaped = it })
+            ?: return when (escaped) {
+                // A name served from `bzz:`, asked for `/a%2Fb`: the path's fault.
+                true -> syntheticResponse(
+                    400, "Bad Request", Strings.english(R.string.dweb_path_refusal),
+                    mapOf(DwebPath.REFUSAL_HEADER to "1"),
+                )
+                // The name's record supplied the path that leaves.
+                false -> syntheticResponse(
                     502, "Bad Gateway", Strings.english(R.string.dweb_target_refusal),
                     mapOf(DwebPath.REFUSAL_HEADER to "1"),
                 )
-            } else syntheticResponse(
-                502, "Bad Gateway",
-                "No local gateway can serve this content root " +
-                    "(node not running, or name resolution failed).",
-            )
+                null -> syntheticResponse(
+                    502, "Bad Gateway",
+                    "No local gateway can serve this content root " +
+                        "(node not running, or name resolution failed).",
+                )
+            }
 
         // An unverified external IPFS gateway (#125) shares the root's
         // virtual origin with the verified embedded node: note the origin
