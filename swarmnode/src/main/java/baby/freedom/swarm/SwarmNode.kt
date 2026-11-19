@@ -853,10 +853,8 @@ class SwarmNode internal constructor(
             val before = chequebookBalance()
             checkNoDepositPending(want, before)
             val plan = SpendPlan.DepositChequebook(owner(), want, amountPlur)
-            sendDeposit(want, before, amountPlur) {
-                SpendGuard.during(plan) {
-                    ops.gateway("POST", "/chequebook/deposit?amount=$amountPlur", DEPOSIT_TIMEOUT_MS)
-                }
+            sendDeposit(want, before, amountPlur, plan) {
+                ops.gateway("POST", "/chequebook/deposit?amount=$amountPlur", DEPOSIT_TIMEOUT_MS)
             }
         }
     }
@@ -886,10 +884,8 @@ class SwarmNode internal constructor(
             val before = chequebookBalance()
             checkNoDepositPending(want, before)
             val plan = SpendPlan.TopUpCredit(owner(), want, amountPlur, maxSwapWei)
-            sendDeposit(want, before, amountPlur) {
-                SpendGuard.during(plan) {
-                    ops.gateway("POST", "/v0/settlement/deposit?amount=$amountPlur", TOP_UP_TIMEOUT_MS)
-                }
+            sendDeposit(want, before, amountPlur, plan) {
+                ops.gateway("POST", "/v0/settlement/deposit?amount=$amountPlur", TOP_UP_TIMEOUT_MS)
             }
         }
     }
@@ -918,14 +914,40 @@ class SwarmNode internal constructor(
 
     /**
      * Sends a deposit of [amountPlur] into [want] (which held [before]) with
-     * [send], and reads its answer: one that may have gone out takes the
-     * hold ([checkNoDepositPending]) and throws [DepositMaybeSentException];
-     * any other failure throws with ant's reason. The answer's body on success.
+     * [send], inside a permit for [plan], and reads its answer: one that
+     * may have gone out takes the hold ([checkNoDepositPending]) and throws
+     * [DepositMaybeSentException]; any other failure throws with ant's
+     * reason. The answer's body on success.
+     *
+     * Whether it may have gone out is first the permit's to say: if it let
+     * no transfer to the chequebook out ([SpendPermit.Slot.Deposit]), none
+     * left the phone, whatever ant answered. That's a guard refusal (the
+     * chequebook shrank between ant's read and its transfer, so it asked
+     * for more than was confirmed), which ant reports as a 502 like any
+     * RPC error, or a failure before the transfer (a top-up's swap): no
+     * hold, and the real reason.
      */
-    private fun sendDeposit(want: String, before: BigInteger?, amountPlur: BigInteger, send: () -> GatewayAnswer?): String {
-        val answer = send()
+    private fun sendDeposit(
+        want: String,
+        before: BigInteger?,
+        amountPlur: BigInteger,
+        plan: SpendPlan,
+        send: () -> GatewayAnswer?,
+    ): String {
+        val permit = SpendPermit(plan)
+        val answer = SpendGuard.during(permit, send)
         val message = answer?.let { a ->
             runCatching { JSONObject(a.body).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() }
+        }
+        val transferOut = permit.used(SpendPermit.Slot.Deposit)
+        if (!transferOut && answer?.code !in 200..299) {
+            throw RuntimeException(
+                when {
+                    permit.refusedAny() -> SwarmStrings.get(R.string.swarmnode_deposit_refused)
+                    answer == null -> SwarmStrings.get(R.string.swarmnode_deposit_not_sent, SwarmStrings.get(R.string.swarmnode_gateway_no_answer))
+                    else -> message ?: SwarmStrings.get(R.string.swarmnode_deposit_failed_http, answer.code)
+                },
+            )
         }
         if (depositMaybeSent(answer, message)) {
             synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock(), bootId())) }
@@ -1087,8 +1109,6 @@ class SwarmNode internal constructor(
     /** Guards the sampling state below; held across one sample's gateway reads. */
     private val creditLock = Any()
 
-    /** When this process last read `/settlements` for each chequebook: a ledger's own `sampled` lags while idle. */
-    private val creditLastSampled = HashMap<String, Long>()
     private var creditSampledAt: Long? = null
     private var creditChequebook: String? = null
 
@@ -1109,12 +1129,11 @@ class SwarmNode internal constructor(
                     ?.takeIf { it.code == 200 }?.let { CreditSpend.rowsFrom(it.body) } ?: return
                 val at = wallClock()
                 creditSampledAt = at
-                val previous = creditStore.get(key)
-                // A previous time later than now (the clock stepped back) dates nothing.
-                val lastAt = listOfNotNull(creditLastSampled[key], previous?.sampled).filter { it <= at }.maxOrNull()
-                val (ledger, changed) = CreditSpend.record(previous, rows, at, lastAt)
-                creditLastSampled[key] = at
-                if (changed) creditStore.set(key, ledger)
+                // The last reading, saved or not: its time and the peers it
+                // listed date this one's growth. A previous time later than
+                // now (the clock stepped back) dates nothing.
+                val (ledger, changed) = CreditSpend.record(creditStore.get(key), rows, at)
+                creditStore.set(key, ledger, save = changed)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "reading the settlements failed: ${t.javaClass.simpleName}")
@@ -1308,7 +1327,8 @@ class SwarmNode internal constructor(
          * ant answers 504 when the receipt wait runs out and 502 for an RPC
          * error, which can come after the send; only a revert (mined,
          * nothing moved) or a refusal before the chain (4xx, 501, 503) is
-         * sure it moved nothing.
+         * sure it moved nothing. Asked only once the spend's permit let a
+         * transfer out ([sendDeposit]): with none let out, nothing moved.
          */
         internal fun depositMaybeSent(answer: GatewayAnswer?, message: String?): Boolean = when {
             answer == null -> true

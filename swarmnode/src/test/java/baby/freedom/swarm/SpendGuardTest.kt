@@ -250,6 +250,36 @@ class SpendGuardTest {
     }
 
     @Test
+    fun aClosedPermitLetsNothingOutAndSaysWhatItLetOut() {
+        // #566 R1-F2: the deposit's hold is decided from what the permit let
+        // out, after the spend ends. A transport thread that picked the permit
+        // up before and asks only now must be refused, even for a retry of a
+        // transaction it admitted before, or that reading wouldn't be final.
+        val p = SpendPermit(topUp)
+        val swap = TestTx.swap(maxSwap)
+        val transfer = TestTx.transfer(chequebook, topUpAmount)
+        SpendGuard.during(p) {
+            assertTrue(SpendGuard.admit(TestTx.request(swap)))
+            assertFalse(SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, topUpAmount.add(BigInteger.ONE)))))
+        }
+        assertTrue(p.used(SpendPermit.Slot.Swap))
+        assertFalse(p.used(SpendPermit.Slot.Deposit))
+        assertTrue(p.refusedAny())
+        assertFalse(p.admits(transfer))
+        assertFalse(p.admits(swap))
+        assertFalse(p.used(SpendPermit.Slot.Deposit))
+
+        val q = SpendPermit(topUp)
+        SpendGuard.during(q) { assertTrue(SpendGuard.admit(TestTx.request(transfer))) }
+        assertTrue(q.used(SpendPermit.Slot.Deposit))
+        assertFalse(q.refusedAny())
+        // A permit closes however the spend ends.
+        val r = SpendPermit(topUp)
+        runCatching { SpendGuard.during(r) { throw IllegalStateException("x") } }
+        assertFalse(r.admits(transfer))
+    }
+
+    @Test
     fun aTopUpIsBoundedAndCostsTwoTransactionsOfGas() {
         assertEquals(setOf(SpendPermit.Slot.Swap, SpendPermit.Slot.Deposit), SpendPermit.TOP_UP_SLOTS)
         assertEquals(BigInteger("20000000000000000"), SpendPermit.TOP_UP_MAX_GAS_WEI) // 2 × 0.01 xDAI

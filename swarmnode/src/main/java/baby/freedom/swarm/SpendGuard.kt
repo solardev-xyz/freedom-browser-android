@@ -206,8 +206,16 @@ object SpendGuard {
      * open, and closes it however [block] ends. One at a time: a second
      * spend while one runs throws.
      */
-    fun <T> during(plan: SpendPlan, block: () -> T): T {
-        val p = SpendPermit(plan)
+    fun <T> during(plan: SpendPlan, block: () -> T): T = during(SpendPermit(plan), block)
+
+    /**
+     * [during] with a permit the caller made, so it can read afterwards
+     * what the permit let out ([SpendPermit.used]). The permit is closed
+     * when [block] ends: a transport thread that picked it up before and
+     * asks only now is refused, so what [SpendPermit.used] says once this
+     * returns is final.
+     */
+    fun <T> during(p: SpendPermit, block: () -> T): T {
         synchronized(this) {
             check(permit == null) { "another payment is already running" }
             permit = p
@@ -216,6 +224,7 @@ object SpendGuard {
             return block()
         } finally {
             synchronized(this) { if (permit === p) permit = null }
+            p.close()
         }
     }
 
@@ -252,10 +261,22 @@ class SpendPermit(val plan: SpendPlan) {
 
     private val used = HashSet<Slot>()
     private val admitted = HashSet<String>()
+    private var closed = false
+    private var refusedAny = false
 
-    /** Is [requestJson] a broadcast this permit lets through? Marks its slot used if so. */
+    /**
+     * Is [requestJson] a broadcast this permit lets through? Marks its slot
+     * used if so. Nothing gets through once [close]d, not even a retry of
+     * a transaction admitted before.
+     */
     @Synchronized
     fun admit(requestJson: String): Boolean {
+        val ok = !closed && lets(requestJson)
+        if (!ok) refusedAny = true
+        return ok
+    }
+
+    private fun lets(requestJson: String): Boolean {
         val raw = rawTransaction(requestJson) ?: return false
         if (raw in admitted) return true
         val tx = LegacyTx.decode(hexBytes(raw) ?: return false) ?: return false
@@ -264,6 +285,24 @@ class SpendPermit(val plan: SpendPlan) {
         admitted += raw
         return true
     }
+
+    /** Lets nothing more out ([SpendGuard.during] calls it as the spend ends). */
+    @Synchronized
+    fun close() {
+        closed = true
+    }
+
+    /**
+     * Whether a [slot] transaction was let out. A refused broadcast never
+     * leaves the phone (`ant_jni.c`), so false after [close] means none
+     * went out under this permit.
+     */
+    @Synchronized
+    fun used(slot: Slot): Boolean = slot in used
+
+    /** Whether this permit refused a broadcast ant asked for. */
+    @Synchronized
+    fun refusedAny(): Boolean = refusedAny
 
     /** Which of the plan's transactions [tx] is, or null if it's none of them. */
     internal fun slotFor(tx: LegacyTx): Slot? {

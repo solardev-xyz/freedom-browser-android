@@ -725,6 +725,11 @@ class SwarmNodeTest {
     private val chequebook = "37".repeat(20)
     private val milliBzz = java.math.BigInteger.TEN.pow(13)
 
+    /** ant's transfer of [amount] PLUR to [chequebook], let out by the open permit: it may be on the chain now. */
+    private fun transferOut(amount: String) {
+        assertTrue(SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, java.math.BigInteger(amount)))))
+    }
+
     @Test
     fun aDepositRunsInsideAPermitForExactlyTheConfirmedChequebookAndAmount() {
         val ops = FakeOps()
@@ -778,6 +783,7 @@ class SwarmNodeTest {
         ops.chequebookHex = chequebook
         ops.walletPlur = milliBzz.toString()
         ops.onDeposit = {
+            transferOut(it)
             SwarmNode.GatewayAnswer(502, """{"code":502,"message":"chain tx: deposit transfer: https://rpc.example/key123 refused"}""")
         }
         val e = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
@@ -901,7 +907,7 @@ class SwarmNodeTest {
         ops.walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
         ops.chequebookBalancePlur = milliBzz.toString()
         // The POST read times out (no answer): the transfer may be out already.
-        ops.onDeposit = { null }
+        ops.onDeposit = { transferOut(it); null }
         // Its own type, which `:node` flags to the app (#313 R1-M1): never told by the words.
         val first = assertThrows(DepositMaybeSentException::class.java) { node.depositChequebook(chequebook, milliBzz) }
         assertTrue(first.message!!, first.message!!.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT))
@@ -996,6 +1002,62 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aTopUpWhoseTransferTheGuardRefusedTakesNoHold() {
+        // #566 R1-F2: the chequebook shrank between ant's read and its transfer,
+        // so ant asks to send more than confirmed; the guard refuses, and ant
+        // answers 502 like any RPC error. Nothing reached the chequebook: no
+        // hold, the real reason, and a plain deposit may go at once.
+        val ops = FakeOps()
+        var now = 1_000_000L
+        val node = lightNode(ops, clock = { now })
+        ops.chequebookHex = chequebook
+        ops.walletPlur = tenthBzz.toString()
+        ops.chequebookBalancePlur = milliBzz.toString()
+        val seen = mutableListOf<Boolean>()
+        ops.onTopUp = {
+            seen += SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap)))
+            seen += SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, tenthBzz.add(java.math.BigInteger.ONE))))
+            SwarmNode.GatewayAnswer(
+                502,
+                """{"code":502,"message":"chain tx: deposit transfer: rpc error -32003: Freedom only lets the Swarm node send transactions you confirmed in the app"}""",
+            )
+        }
+        val e = assertThrows(RuntimeException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }
+        assertEquals(listOf(true, false), seen)
+        assertFalse(e is DepositMaybeSentException)
+        assertTrue(e.message!!, e.message!!.startsWith("the node asked to send more than you confirmed"))
+        // The swapped xBZZ is in the account; a plain deposit isn't held back.
+        assertTrue(node.depositChequebook(chequebook, milliBzz).contains("transactionHash"))
+        assertEquals(2, ops.calls.count { it.startsWith("gateway:POST") })
+        node.dispose()
+    }
+
+    @Test
+    fun anUnansweredDepositWhoseTransferNeverWentOutTakesNoHold() {
+        // The POST read timed out, but the permit let no transfer out, and it's
+        // closed now: nothing can reach the chequebook from this deposit.
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.chequebookHex = chequebook
+        ops.walletPlur = milliBzz.shiftLeft(2).toString()
+        ops.onDeposit = { null }
+        val e = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
+        assertFalse(e is DepositMaybeSentException)
+        assertEquals("the node's gateway didn't answer, and nothing was sent to the chequebook", e.message)
+        // A top-up whose swap went out but whose transfer ant never asked for (504 on the swap's receipt): no hold either.
+        ops.onTopUp = {
+            assertTrue(SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap))))
+            SwarmNode.GatewayAnswer(504, """{"code":504,"message":"chain transaction timed out"}""")
+        }
+        val t = assertThrows(RuntimeException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }
+        assertFalse(t is DepositMaybeSentException)
+        assertEquals("chain transaction timed out", t.message)
+        ops.onDeposit = { SwarmNode.GatewayAnswer(201, "{\"transactionHash\":\"0xabc\"}") }
+        assertEquals("{\"transactionHash\":\"0xabc\"}", node.depositChequebook(chequebook, milliBzz))
+        node.dispose()
+    }
+
+    @Test
     fun aTopUpAndADepositShareTheHoldAfterAnUnansweredOne() {
         val ops = FakeOps()
         var now = 1_000_000L
@@ -1004,7 +1066,7 @@ class SwarmNodeTest {
         ops.walletPlur = tenthBzz.toString()
         ops.chequebookBalancePlur = milliBzz.toString()
         // ant's 5-minute wait ran out: the swap or the transfer may be out.
-        ops.onTopUp = { SwarmNode.GatewayAnswer(504, """{"code":504,"message":"chain transaction timed out"}""") }
+        ops.onTopUp = { transferOut(it); SwarmNode.GatewayAnswer(504, """{"code":504,"message":"chain transaction timed out"}""") }
         val first = assertThrows(DepositMaybeSentException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }
         assertTrue(first.message!!, first.message!!.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT))
         fun posts() = ops.calls.count { it.startsWith("gateway:POST") }
@@ -1057,6 +1119,52 @@ class SwarmNodeTest {
             val third = org.json.JSONObject(again.creditSpend())
             assertEquals("0", third.getString("dayPlur"))
             assertEquals("60", third.getString("weekPlur"))
+            again.dispose()
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aPeerThatDisconnectedAndComesBackGrownCountsNothingAcrossARestartToo() {
+        // #566 R1-F1: /settlements lists only connected peers. bb drops out for
+        // days of 5-minute readings (none of which change the saved file) and is
+        // listed again with more paid: that growth has no date. aa, listed in
+        // every reading, still counts, and the same holds after `:node` restarts.
+        val dir = java.nio.file.Files.createTempDirectory("swarmnode-credit-gone").toFile()
+        try {
+            fun body(vararg peers: Pair<String, Int>) = peers.joinToString(",", """{"settlements":[""", "]}") { (p, sent) ->
+                """{"peer":"$p","received":"0","sent":"$sent"}"""
+            }
+            val ops = FakeOps()
+            ops.chequebookHex = chequebook
+            ops.settlementsBody = body("aa" to 100, "bb" to 100)
+            var wall = 1_790_856_000_000L
+            val node = lightNode(ops, dir.path, wallClock = { wall })
+            fun spend(n: SwarmNode) = org.json.JSONObject(n.creditSpend()).getString("dayPlur")
+            assertEquals("0", spend(node))
+            ops.settlementsBody = body("aa" to 100)
+            repeat(3 * 24 * 12) {
+                wall += CreditSpend.SAMPLE_MS
+                spend(node)
+            }
+            wall += CreditSpend.SAMPLE_MS
+            ops.settlementsBody = body("aa" to 120, "bb" to 150)
+            assertEquals("20", spend(node))
+
+            // Again across a restart: bb drops out in a reading that's saved (aa
+            // grew), the process goes, and bb is back grown five minutes later.
+            wall += CreditSpend.SAMPLE_MS
+            ops.settlementsBody = body("aa" to 130)
+            assertEquals("30", spend(node))
+            node.dispose()
+            val ops2 = FakeOps().apply {
+                chequebookHex = chequebook
+                settlementsBody = body("aa" to 135, "bb" to 400)
+            }
+            wall += CreditSpend.SAMPLE_MS
+            val again = lightNode(ops2, dir.path, wallClock = { wall })
+            assertEquals("35", spend(again))
             again.dispose()
         } finally {
             dir.deleteRecursively()
@@ -1123,7 +1231,7 @@ class SwarmNodeTest {
             }
             val ops = funded(FakeOps())
             val node = lightNode(ops, dir.path, clock = { now })
-            ops.onDeposit = { SwarmNode.GatewayAnswer(504, """{"code":504,"message":"timed out"}""") }
+            ops.onDeposit = { transferOut(it); SwarmNode.GatewayAnswer(504, """{"code":504,"message":"timed out"}""") }
             assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
             // Turning the node off kills the :node process: nothing in memory survives.
             node.dispose()
@@ -1158,7 +1266,7 @@ class SwarmNodeTest {
                 chequebookHex = chequebook
                 walletPlur = milliBzz.multiply(java.math.BigInteger.TEN).toString()
                 chequebookBalancePlur = milliBzz.toString()
-                onDeposit = { null }
+                onDeposit = { transferOut(it); null }
             }
             val node = lightNode(ops, dir.path, clock = { 1_000_000L })
             assertThrows(DepositMaybeSentException::class.java) { node.depositChequebook(chequebook, milliBzz) }
@@ -1182,7 +1290,7 @@ class SwarmNodeTest {
             // Unanswered at 2 h of uptime.
             val ops = funded(FakeOps())
             val node = lightNode(ops, dir.path, clock = { 2 * 3_600_000L })
-            ops.onDeposit = { null }
+            ops.onDeposit = { transferOut(it); null }
             assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
             node.dispose()
 
@@ -1218,7 +1326,7 @@ class SwarmNodeTest {
             // Unanswered at 2 h of uptime, boot "a".
             val ops = funded(FakeOps())
             val node = lightNode(ops, dir.path, clock = { 2 * 3_600_000L }, bootId = { "a" })
-            ops.onDeposit = { null }
+            ops.onDeposit = { transferOut(it); null }
             assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
             node.dispose()
 
@@ -1246,7 +1354,7 @@ class SwarmNodeTest {
             }
             val ops = funded(FakeOps())
             val node = lightNode(ops, dir.path, clock = { 2 * 3_600_000L }, bootId = { "a" })
-            ops.onDeposit = { null }
+            ops.onDeposit = { transferOut(it); null }
             assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
             node.dispose()
 
@@ -1320,7 +1428,7 @@ class SwarmNodeTest {
         val node = lightNode(ops)
         ops.chequebookHex = chequebook
         ops.walletPlur = milliBzz.shiftLeft(2).toString()
-        ops.onDeposit = { answer(504, "chain transaction timed out") }
+        ops.onDeposit = { transferOut(it); answer(504, "chain transaction timed out") }
         val e = assertThrows(RuntimeException::class.java) { node.depositChequebook(chequebook, milliBzz) }
         assertTrue(e.message!!.contains("chain transaction timed out"))
         assertThrows(IllegalStateException::class.java) { node.depositChequebook(chequebook, milliBzz) }
@@ -1332,7 +1440,7 @@ class SwarmNodeTest {
         val node2 = lightNode(ops2)
         ops2.chequebookHex = chequebook
         ops2.walletPlur = milliBzz.shiftLeft(2).toString()
-        ops2.onDeposit = { answer(502, "chain tx: deposit transfer: transaction reverted: 0x0") }
+        ops2.onDeposit = { transferOut(it); answer(502, "chain tx: deposit transfer: transaction reverted: 0x0") }
         repeat(2) {
             val r = assertThrows(RuntimeException::class.java) { node2.depositChequebook(chequebook, milliBzz) }
             assertTrue(r.message!!.startsWith("chain tx: deposit transfer: transaction reverted"))

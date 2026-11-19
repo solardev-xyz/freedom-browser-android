@@ -90,6 +90,10 @@
     -->
     <string name="swarmnode_deposit_maybe_sent_detail">%1$s (%2$s). Check the chequebook\'s balance before depositing again</string>
     <string name="swarmnode_gateway_no_answer">the node\'s gateway didn\'t answer</string>
+    <!-- %1$s: the node's reason (swarmnode_gateway_no_answer). -->
+    <string name="swarmnode_deposit_not_sent">%1$s, and nothing was sent to the chequebook</string>
+    <!-- A deposit or top-up whose transfer Freedom's spend guard stopped: nothing left the phone. -->
+    <string name="swarmnode_deposit_refused">the node asked to send more than you confirmed (the chequebook\'s balance may have changed meanwhile), so Freedom stopped it, and nothing was sent to the chequebook</string>
     <!-- %1$d: the HTTP status code -->
     <string name="swarmnode_deposit_failed_http">the deposit failed (HTTP %1$s)</string>
     <!-- Replaces the Gnosis RPC address (which can carry an API key) in an error -->

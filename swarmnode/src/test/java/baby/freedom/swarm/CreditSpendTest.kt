@@ -24,6 +24,10 @@ class CreditSpendTest {
     private fun row(peer: String, sent: Any) = SettlementRow(peer, BigInteger(sent.toString()))
     private fun big(n: Long) = BigInteger.valueOf(n)
 
+    /** [record], as if the previous reading (the one [ledger] holds) had been at [lastAt]. */
+    private fun recordAfter(ledger: SpendLedger, rows: List<SettlementRow>, at: Long, lastAt: Long) =
+        record(ledger.copy(sampled = lastAt), rows, at)
+
     @Test
     fun `the first reading is a baseline, not spend`() {
         val (ledger, changed) = record(null, listOf(SettlementRow("aa", xbzz("0.5"))), t0)
@@ -65,7 +69,7 @@ class CreditSpendTest {
         ledger = next
         assertEquals(setOf("aa"), ledger.peers.keys)
         // Sampled continuously: bb is a baseline because it was dropped, not because of a gap.
-        ledger = record(ledger, listOf(row("aa", 100), row("bb", 80)), t0 + 9 * DAY_MS, t0 + 9 * DAY_MS - SAMPLE_MS).first
+        ledger = recordAfter(ledger, listOf(row("aa", 100), row("bb", 80)), t0 + 9 * DAY_MS, t0 + 9 * DAY_MS - SAMPLE_MS).first
         assertEquals(BigInteger.ZERO, spendWithin(ledger, WEEK_MS, t0 + 9 * DAY_MS))
     }
 
@@ -91,6 +95,28 @@ class CreditSpendTest {
     }
 
     @Test
+    fun `a peer that drops out and comes back grown is a baseline, however recent the last reading`() {
+        // /settlements lists only connected peers: bb was paid, disconnected,
+        // and is listed again three days of five-minute readings later. When
+        // it was paid has no reading to place it; aa, listed throughout, still counts.
+        var ledger = record(null, listOf(row("aa", 100), row("bb", 100)), t0).first
+        var at = t0
+        while (at < t0 + 3 * DAY_MS) {
+            at += SAMPLE_MS
+            ledger = record(ledger, listOf(row("aa", 100)), at).first
+        }
+        assertEquals(setOf("aa"), ledger.listed)
+        at += SAMPLE_MS
+        ledger = record(ledger, listOf(row("aa", 130), row("bb", 150)), at).first
+        assertEquals(big(30), spendWithin(ledger, DAY_MS, at))
+        assertEquals(SpendPeer(big(150), at), ledger.peers["bb"])
+        // Listed in both readings from there on, its growth counts again.
+        at += SAMPLE_MS
+        ledger = record(ledger, listOf(row("aa", 130), row("bb", 155)), at).first
+        assertEquals(big(35), spendWithin(ledger, DAY_MS, at))
+    }
+
+    @Test
     fun `a lower figure never counts as negative spend`() {
         var ledger = record(null, listOf(row("aa", 100)), t0).first
         ledger = record(ledger, listOf(row("aa", 40)), t0 + 1000).first
@@ -103,12 +129,12 @@ class CreditSpendTest {
     fun `day and week windows, and old buckets are dropped`() {
         var ledger = record(null, listOf(row("aa", 0)), t0).first
         ledger = record(ledger, listOf(row("aa", 10)), t0).first
-        ledger = record(ledger, listOf(row("aa", 30)), t0 + 3 * DAY_MS, t0 + 3 * DAY_MS - SAMPLE_MS).first
+        ledger = recordAfter(ledger, listOf(row("aa", 30)), t0 + 3 * DAY_MS, t0 + 3 * DAY_MS - SAMPLE_MS).first
         val at = t0 + 3 * DAY_MS + 1000
         assertEquals(big(20), spendWithin(ledger, DAY_MS, at))
         assertEquals(big(30), spendWithin(ledger, WEEK_MS, at))
 
-        ledger = record(ledger, listOf(row("aa", 31)), t0 + 9 * DAY_MS, t0 + 9 * DAY_MS - SAMPLE_MS).first
+        ledger = recordAfter(ledger, listOf(row("aa", 31)), t0 + 9 * DAY_MS, t0 + 9 * DAY_MS - SAMPLE_MS).first
         // The day-0 bucket is past the kept 8 days; day 3's is inside the week.
         assertEquals(listOf(big(20), big(1)), ledger.buckets.map { it.plur })
         assertEquals(big(21), spendWithin(ledger, WEEK_MS, t0 + 9 * DAY_MS))
@@ -132,8 +158,9 @@ class CreditSpendTest {
         val edge = back + SAMPLE_MS + MAX_SAMPLE_GAP_MS
         assertEquals(big(19), spendWithin(record(ledger, listOf(SettlementRow("aa", xbzz("3") + big(19))), edge).first, DAY_MS, edge))
         assertEquals(big(9), spendWithin(record(ledger, listOf(SettlementRow("aa", xbzz("3") + big(19))), edge + 1).first, DAY_MS, edge + 1))
-        // With no previous time at all, nothing is dated either.
-        assertEquals(big(9), spendWithin(record(ledger, listOf(SettlementRow("aa", xbzz("4"))), back + 2 * SAMPLE_MS, null).first, DAY_MS, back + 2 * SAMPLE_MS))
+        // A previous reading that listed nobody (a file from before `listed` was kept) dates nothing either.
+        val unlisted = ledger.copy(listed = emptySet())
+        assertEquals(big(9), spendWithin(record(unlisted, listOf(SettlementRow("aa", xbzz("4"))), back + 2 * SAMPLE_MS).first, DAY_MS, back + 2 * SAMPLE_MS))
     }
 
     @Test
@@ -165,7 +192,7 @@ class CreditSpendTest {
         assertTrue(changed)
         assertEquals(at, ledger.sampled)
         // An explicit previous time later than now dates nothing either.
-        ledger = record(ledger, listOf(row("aa", 150)), at + SAMPLE_MS, at + 2 * SAMPLE_MS).first
+        ledger = recordAfter(ledger, listOf(row("aa", 150)), at + SAMPLE_MS, at + 2 * SAMPLE_MS).first
         assertEquals(BigInteger.ZERO, spendWithin(ledger, DAY_MS, at + SAMPLE_MS))
     }
 
@@ -189,6 +216,11 @@ class CreditSpendTest {
             var ledger = record(null, listOf(row("aa", 100)), t0).first
             ledger = record(ledger, listOf(row("aa", 160)), t0 + SAMPLE_MS).first
             CreditSpendStore(file).set("0xabc", ledger)
+            assertEquals(ledger, CreditSpendStore(file).get("0xabc"))
+            assertEquals(setOf("aa"), CreditSpendStore(file).get("0xabc")!!.listed)
+            // A reading kept but not saved is this process's last reading; the file keeps the saved one.
+            val unsaved = record(ledger, listOf(row("bb", 1)), t0 + 2 * SAMPLE_MS).first
+            CreditSpendStore(file).let { s -> s.set("0xabc", unsaved, save = false); assertEquals(unsaved, s.get("0xabc")) }
             assertEquals(ledger, CreditSpendStore(file).get("0xabc"))
             assertNull(CreditSpendStore(file).get("0xdef"))
             assertFalse(File(dir, "credit-spend.json.tmp").exists())

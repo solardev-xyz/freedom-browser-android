@@ -12,15 +12,22 @@ import org.json.JSONObject
  * browsing-credit-service.js (#488): what the node's chequebook paid peers
  * in the last 24 hours and 7 days.
  *
- * ant's `GET /settlements` reports each peer the node knows now with its
+ * ant's `GET /settlements` reports the peers the node is connected to now
+ * and has a record with (sent or received something), each with its
  * cumulative `sent`, not a ledger of payments, so the spend is built here:
  * each reading is folded into a per-chequebook high-water mark per peer,
  * and what a peer's figure grew by is recorded as spend in an hourly
- * bucket, kept in the node's data dir. A peer that drops out and comes back
- * with the same figure adds nothing; a peer seen for the first time is a
- * baseline (its lifetime total has no date); and so is every figure after
- * a gap in the sampling (the node off, `:node` not running): that growth
- * has no hour to go in, and is left out.
+ * bucket, kept in the node's data dir. Growth is dated only when the same
+ * peer was listed in the previous reading, and that reading is recent:
+ * - a peer seen for the first time is a baseline (its lifetime total has
+ *   no date), so its first cheque, which is what makes ant list it, isn't
+ *   counted;
+ * - a peer that drops out (disconnects) and comes back is a baseline
+ *   again: what it was paid before it dropped out, or while it was away,
+ *   has no hour to go in;
+ * - so is every figure after a gap in the sampling (the node off, `:node`
+ *   not running).
+ * What's left out is left out, never put in the wrong hour.
  */
 
 /** One peer's cumulative `sent` ([sent], PLUR) and when it was last listed ([seen], wall-clock ms). */
@@ -30,15 +37,18 @@ internal data class SpendPeer(val sent: BigInteger, val seen: Long)
 internal data class SpendBucket(val start: Long, val plur: BigInteger)
 
 /**
- * A chequebook's spend history: first read at [since], last at [sampled]
- * (saved only with some other change, so it can lag), the peers' marks,
- * and the hourly buckets, oldest first.
+ * A chequebook's spend history: first read at [since], last at [sampled],
+ * the peers that reading listed ([listed]), the peers' marks, and the
+ * hourly buckets, oldest first. On disk it's saved only with some other
+ * change, so it can lag; [sampled] and [listed] are always saved
+ * together, so they still describe one reading.
  */
 internal data class SpendLedger(
     val since: Long,
     val sampled: Long,
     val peers: Map<String, SpendPeer>,
     val buckets: List<SpendBucket>,
+    val listed: Set<String> = emptySet(),
 )
 
 /** One peer's row from a `/settlements` body: [peer] (lowercase) and its cumulative [sent]. */
@@ -77,29 +87,29 @@ internal object CreditSpend {
 
     /**
      * Fold one `/settlements` reading ([rows], at [at]) into [ledger] (null:
-     * none yet). Only a peer's growth between two readings at most
-     * [MAX_SAMPLE_GAP_MS] apart, and in order, is spend; [lastAt] is the
-     * previous reading's time. A figure seen for the first time, or any
-     * figure after a longer gap (or with no previous time), is a baseline.
+     * none yet), whose [SpendLedger.sampled] and [SpendLedger.listed] are
+     * the previous reading. Only a peer's growth between two readings at
+     * most [MAX_SAMPLE_GAP_MS] apart, in order, that both listed it is
+     * spend. A figure seen for the first time, a peer the previous reading
+     * didn't list, or any figure after a longer gap, is a baseline.
      * Peers unlisted for longer than [KEEP_MS] are dropped; one that comes
      * back is a fresh baseline, so dropping it never invents spend. Pure:
      * the new ledger, and whether it differs enough to be saved.
      */
-    fun record(ledger: SpendLedger?, rows: List<SettlementRow>, at: Long, lastAt: Long? = ledger?.sampled): Pair<SpendLedger, Boolean> {
+    fun record(ledger: SpendLedger?, rows: List<SettlementRow>, at: Long): Pair<SpendLedger, Boolean> {
         val current = LinkedHashMap<String, BigInteger>()
         for (row in rows) {
             val previous = current[row.peer]
             if (previous == null || row.sent > previous) current[row.peer] = row.sent
         }
         if (ledger == null) {
-            return SpendLedger(at, at, current.mapValues { SpendPeer(it.value, at) }, emptyList()) to true
+            return SpendLedger(at, at, current.mapValues { SpendPeer(it.value, at) }, emptyList(), current.keys) to true
         }
 
         val cutoff = at - KEEP_MS
         // A previous reading later than now (the clock was ahead, then
         // corrected) says nothing about how long the node went unwatched.
-        val gap = lastAt?.let { at - it }
-        val dated = gap != null && gap in 0..MAX_SAMPLE_GAP_MS
+        val dated = at - ledger.sampled in 0..MAX_SAMPLE_GAP_MS
         // A saved `sampled` in the future is rewritten to now, like a peer's.
         var changed = ledger.sampled > at
         val peers = LinkedHashMap<String, SpendPeer>()
@@ -122,7 +132,10 @@ internal object CreditSpend {
                     changed = true
                 }
                 sent > known.sent -> {
-                    if (dated) spent += sent - known.sent
+                    // Listed last time too: it grew since then. Otherwise
+                    // it was away (disconnected), and when it was paid has
+                    // no reading to place it.
+                    if (dated && peer in ledger.listed) spent += sent - known.sent
                     peers[peer] = SpendPeer(sent, at)
                     changed = true
                 }
@@ -144,7 +157,7 @@ internal object CreditSpend {
                 buckets + SpendBucket(start, spent)
             }
         }
-        return SpendLedger(ledger.since, at, peers, buckets) to changed
+        return SpendLedger(ledger.since, at, peers, buckets, current.keys) to changed
     }
 
     /**
@@ -161,10 +174,15 @@ internal object CreditSpend {
     fun toJson(ledger: SpendLedger): JSONObject = JSONObject()
         .put("since", ledger.since)
         .put("sampled", ledger.sampled)
+        .put("listed", JSONArray().apply { ledger.listed.forEach { put(it) } })
         .put("peers", JSONObject().apply { ledger.peers.forEach { (p, v) -> put(p, JSONArray().put(v.sent.toString()).put(v.seen)) } })
         .put("buckets", JSONArray().apply { ledger.buckets.forEach { put(JSONArray().put(it.start).put(it.plur.toString())) } })
 
-    /** A stored ledger; null when it isn't one. Unreadable peers and buckets are dropped, not the whole ledger. */
+    /**
+     * A stored ledger; null when it isn't one. Unreadable peers and buckets
+     * are dropped, not the whole ledger; with no readable `listed`, no peer
+     * counts as listed, so the next reading is a baseline.
+     */
     fun fromJson(o: JSONObject): SpendLedger? {
         val since = o.optLong("since", -1L).takeIf { it >= 0 } ?: return null
         val sampled = o.optLong("sampled", -1L).takeIf { it >= 0 } ?: return null
@@ -186,7 +204,11 @@ internal object CreditSpend {
                 buckets += SpendBucket(start, plur)
             }
         }
-        return SpendLedger(since, sampled, peers, buckets.sortedBy { it.start })
+        val listed = LinkedHashSet<String>()
+        o.optJSONArray("listed")?.let { l ->
+            for (i in 0 until l.length()) l.optString(i).takeIf { it.isNotEmpty() }?.let { listed += it }
+        }
+        return SpendLedger(since, sampled, peers, buckets.sortedBy { it.start }, listed)
     }
 
     private fun plur(v: Any?): BigInteger? = when (v) {
@@ -207,10 +229,16 @@ internal class CreditSpendStore(private val file: File) {
     @Synchronized
     fun get(chequebook: String): SpendLedger? = load()[chequebook]
 
+    /**
+     * Keeps [ledger] as [chequebook]'s, and writes the file when [save]
+     * (otherwise only this process sees it: the next reading's dating
+     * needs the last reading, saved or not).
+     */
     @Synchronized
-    fun set(chequebook: String, ledger: SpendLedger) {
+    fun set(chequebook: String, ledger: SpendLedger, save: Boolean = true) {
         val all = load()
         all[chequebook] = ledger
+        if (!save) return
         val tmp = File(file.parentFile, "${file.name}.tmp")
         try {
             val json = JSONObject().put("version", VERSION)

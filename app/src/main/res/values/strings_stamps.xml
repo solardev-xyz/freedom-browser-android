@@ -317,7 +317,7 @@
     <string name="stamps_credit_spent_week">Spent, last 7 days</string>
     <string name="stamps_credit_spent_none_yet">Not counted yet</string>
     <!-- %1$s: the date counting started. -->
-    <string name="stamps_credit_spent_note">What the node paid peers, counted while it runs, since %1$s. A peer\'s payments count from when the node first lists it, and what it paid while the node was off is left out.</string>
+    <string name="stamps_credit_spent_note">What the node paid peers, counted while it runs, since %1$s. A peer\'s first payment usually isn\'t counted (the node lists a peer only once the two have settled), nor anything paid while that peer was disconnected or the node was off.</string>
     <string name="stamps_credit_spent_note_none">The node counts what it pays peers while it runs; the first figures show within a few minutes.</string>
     <string name="stamps_deposit">Deposit</string>
     <string name="stamps_chequebook_other_payment">Another payment is running. Deposit once it has finished.</string>
