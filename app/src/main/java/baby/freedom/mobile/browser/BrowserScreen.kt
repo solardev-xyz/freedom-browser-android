@@ -1193,9 +1193,27 @@ fun BrowserScreen(
         // external endpoint) — the WebView gets the virtual-origin URL,
         // but readiness is a question for the node itself. Resolved
         // after the node flips to Running, in case ipfsBase was still
-        // empty before.
-        val resolved = Gateways.toGatewayUrl(contentUri)
-        val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
+        // empty before. Only ever the root, and never one that leaves
+        // `/<namespace>/<ref>/` (#534): this HEAD is native, so neither
+        // the interceptor's path check nor the node-API guard sees it.
+        val headUrl = Gateways.probeUrlFor(contentUri)
+        if (headUrl == null) {
+            // Nothing to probe. A virtual origin's load reaches the
+            // interceptor, which refuses it in place with its reason;
+            // anything else would load the gateway URL itself, so it
+            // doesn't load at all.
+            if (VirtualOrigin.isVirtualUrl(Gateways.toLoadable(loadUri))) {
+                target.loadUrl(
+                    loadUri,
+                    displayPrefix = displayPrefix,
+                    namedByUser = namedByUser,
+                    bypassCache = bypassCache,
+                )
+            } else {
+                showError("swarm_content_not_found")
+            }
+            return
+        }
 
         // Open gateway work of this load while the probe's HEADs run —
         // a later submit's IPFS phase line reads it to tell this load is

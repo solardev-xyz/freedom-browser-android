@@ -445,6 +445,33 @@ object Gateways {
     }
 
     /**
+     * The URL the submit flow's readiness probe ([GatewayProbe]) HEADs for
+     * [contentUri] (`bzz://` / `ipfs://` / `ipns://`): the gateway's
+     * `/<namespace>/<ref>` root, or the whole [toGatewayUrl] answer when
+     * that has no recognizable root. `null` when the root it would ask
+     * for leaves `/<namespace>/<ref>/` ([DwebPath.isContainedTarget],
+     * #534): `bzz://%2e%2e/stamps`, `ipns://..`, a `.tez` record's
+     * `ipns://%2e%2e`. The HEAD is native, so nothing else would check it
+     * before a gateway that decodes before it resolves saw `/stamps`. The
+     * request's own path past a sound root is never sent: the probe asks
+     * for the root only, and the interceptor judges the path on load.
+     */
+    fun probeUrlFor(contentUri: String): String? {
+        val namespace = when {
+            contentUri.startsWith("bzz://") -> "bzz"
+            contentUri.startsWith("ipfs://") -> "ipfs"
+            contentUri.startsWith("ipns://") -> "ipns"
+            else -> return null
+        }
+        val resolved = toGatewayUrl(contentUri)
+        val base = GatewayUrls.extractBase(resolved)
+        val rooted = if (base != null) "/${base.protocol}/${base.hashOrCid}"
+        else "/$namespace/" + contentUri.substringAfter("://")
+        if (!DwebPath.isContainedTarget(rooted, encodedSeparators = namespace != "bzz")) return null
+        return base?.prefix ?: resolved
+    }
+
+    /**
      * Inverse of [toLoadable]: map a loaded URL (virtual-origin https
      * or raw gateway http) back to the user-facing display form.
      * Returns the input unchanged if it's neither.

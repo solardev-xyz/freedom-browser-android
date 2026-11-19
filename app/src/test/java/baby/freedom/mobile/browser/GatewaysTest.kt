@@ -278,6 +278,38 @@ class GatewaysTest {
         }
     }
 
+    @Test
+    fun `the readiness probe asks only for a root that stays beneath its namespace`() {
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        // Roots that leave `/<namespace>/<ref>/`: no HEAD at all (#534).
+        listOf(
+            "bzz://%2e%2e/stamps",
+            "bzz://%2E%2e",
+            "ipfs://%2e%2e/api/v0/id",
+            "ipns://%2e%2e",
+            "ipns://..",
+            "ipns://../api/v0/id",
+            "ipns://.",
+        ).forEach { assertNull(it, Gateways.probeUrlFor(it)) }
+        // A sound root is probed alone, whatever path the request carries:
+        // the interceptor refuses that path once the tab loads it.
+        assertEquals("http://127.0.0.1:1633/bzz/$ref64", Gateways.probeUrlFor("bzz://$ref64"))
+        assertEquals("http://127.0.0.1:1633/bzz/$ref64", Gateways.probeUrlFor("bzz://$ref64/a%2Fb"))
+        assertEquals("http://127.0.0.1:58312/ipfs/bafy", Gateways.probeUrlFor("ipfs://bafy/..%2f..%2fapi/v0/id"))
+        assertEquals("http://127.0.0.1:58312/ipns/docs.eth", Gateways.probeUrlFor("ipns://docs.eth/x"))
+        assertEquals("http://127.0.0.1:58312/ipns/a", Gateways.probeUrlFor("ipns://a%2f..%2f..%2fapi"))
+        assertEquals("http://127.0.0.1:58312/ipfs/a", Gateways.probeUrlFor("ipfs://a\\..\\api"))
+        // A ref the base pattern doesn't know still gets the whole (contained) URL.
+        assertEquals("http://127.0.0.1:1633/bzz/zz/", Gateways.probeUrlFor("bzz://zz"))
+        assertNull(Gateways.probeUrlFor("https://example.com/"))
+        // Every answer stays beneath its root as sent.
+        listOf("bzz://$ref64", "ipfs://bafy/x", "ipns://docs.eth", "bzz://zz").forEach { uri ->
+            val probe = Gateways.probeUrlFor(uri)!!
+            val path = "/" + probe.substringAfter("://").substringAfter('/')
+            assertTrue(uri, DwebPath.isContainedTarget(path, encodedSeparators = !uri.startsWith("bzz:")))
+        }
+    }
+
     private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"
 
     private fun withLookup(answer: (String) -> EnsResult, block: () -> Unit) {
