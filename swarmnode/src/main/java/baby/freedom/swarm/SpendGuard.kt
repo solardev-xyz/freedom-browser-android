@@ -67,6 +67,30 @@ sealed interface SpendPlan {
     ) : SpendPlan
 
     /**
+     * Topping up browsing credit with xDAI (#543, ant's `POST
+     * /v0/settlement/deposit?amount=`, `fund_deposit_with_xdai`): swap the
+     * xBZZ the node's account lacks ([maxSwapWei] of xDAI at most, what the
+     * confirmation showed the node holds), then one xBZZ `transfer` to
+     * [chequebook] (40 lowercase hex) of at most [amountPlur]: ant tops the
+     * deposit up to what it read plus [amountPlur], so the transfer is
+     * less when the chequebook grew meanwhile, never more. No approval,
+     * no batch, no deploy. [amountPlur] is at most
+     * [SpendPermit.MAX_TOP_UP_PLUR].
+     */
+    data class TopUpCredit(
+        override val owner: String,
+        val chequebook: String,
+        val amountPlur: BigInteger,
+        val maxSwapWei: BigInteger,
+    ) : SpendPlan {
+        init {
+            require(isAddressHex(chequebook)) { "chequebook" }
+            require(amountPlur.signum() > 0 && amountPlur <= SpendPermit.MAX_TOP_UP_PLUR) { "amount" }
+            require(maxSwapWei.signum() >= 0) { "xDAI" }
+        }
+    }
+
+    /**
      * Connecting a batch the wallet bought for the node (#115,
      * `ant_storage_connect_batch`): it buys nothing, but ant then sets up
      * the chequebook — deploys it (issuer = the node) if there's none —
@@ -133,7 +157,9 @@ private fun isAddressHex(s: String) = s.length == 40 && s.all { it in '0'..'9' |
  * another device, which the app doesn't know either). That is safe only
  * because no ant gateway route transfers xBZZ to an address the caller
  * chooses. Several routes transfer xBZZ — `POST /chequebook/deposit`
- * (#117), `POST /v0/settlement/deposit`, and `POST /stamps`, whose
+ * (#117), `POST /v0/settlement/deposit` (which the app itself uses for
+ * an xDAI-funded credit top-up, [SpendPlan.TopUpCredit], #543, always to
+ * the chequebook the node already has), and `POST /stamps`, whose
  * after-buy hook deploys or tops up a chequebook — but every one pays
  * only the node's own chequebook, the one ant loaded or adopted. So
  * during a first buy or connect the only `transfer`s ant can sign go to
@@ -259,12 +285,26 @@ class SpendPermit(val plan: SpendPlan) {
                     address(0) == plan.chequebook && uint(1) == plan.amountPlur
             }
         }
+        if (plan is SpendPlan.TopUpCredit) {
+            // The swap, within the xDAI the confirmation showed; then one transfer of
+            // at most the confirmed xBZZ to exactly the confirmed chequebook.
+            return when {
+                tx.value.signum() != 0 -> Slot.Swap.takeIf {
+                    to == SWAP_HELPER && selector == SEL_SWAP && words == 64 &&
+                        address(0) == owner && tx.value <= plan.maxSwapWei
+                }
+                to == BZZ_TOKEN && selector == SEL_TRANSFER && words == 64 -> Slot.Deposit.takeIf {
+                    address(0) == plan.chequebook && uint(1).signum() > 0 && uint(1) <= plan.amountPlur
+                }
+                else -> null
+            }
+        }
         if (tx.value.signum() != 0) {
             // Only the swap carries xDAI, and never more than the confirmation showed.
             val maxSwap = when (plan) {
                 is SpendPlan.BuyStamp -> plan.maxSwapWei
                 is SpendPlan.ExtendStamp -> plan.maxSwapWei
-                is SpendPlan.DepositChequebook, is SpendPlan.ConnectBatch -> return null
+                is SpendPlan.DepositChequebook, is SpendPlan.ConnectBatch, is SpendPlan.TopUpCredit -> return null
             }
             return Slot.Swap.takeIf {
                 to == SWAP_HELPER && selector == SEL_SWAP && words == 64 &&
@@ -275,7 +315,7 @@ class SpendPermit(val plan: SpendPlan) {
         val (depth, amount) = when (plan) {
             is SpendPlan.BuyStamp -> plan.depth to plan.amountPerChunk
             is SpendPlan.ExtendStamp -> plan.depth to plan.amountPerChunk
-            is SpendPlan.DepositChequebook -> return null
+            is SpendPlan.DepositChequebook, is SpendPlan.TopUpCredit -> return null
             is SpendPlan.ConnectBatch -> null to null
         }
         val setup = plan as? SpendPlan.SetsUpChequebook
@@ -363,6 +403,15 @@ class SpendPermit(val plan: SpendPlan) {
 
         /** The most gas a chequebook deposit can cost: [MAX_GAS_WEI] for its one transaction. */
         val DEPOSIT_MAX_GAS_WEI: BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(DEPOSIT_SLOTS.size.toLong()))
+
+        /** What an xDAI-funded credit top-up (#543) may broadcast: the swap and the deposit transfer. */
+        val TOP_UP_SLOTS: Set<Slot> = setOf(Slot.Swap, Slot.Deposit)
+
+        /** The most gas a credit top-up can cost: [MAX_GAS_WEI] for each of [TOP_UP_SLOTS]. */
+        val TOP_UP_MAX_GAS_WEI: BigInteger = MAX_GAS_WEI.multiply(BigInteger.valueOf(TOP_UP_SLOTS.size.toLong()))
+
+        /** The most one credit top-up may deposit: 10 xBZZ, desktop's ceiling for an amount top-up (#488). */
+        val MAX_TOP_UP_PLUR: BigInteger = BigInteger.TEN.pow(17)
 
         private val METHOD = Regex("\"method\"\\s*:\\s*\"([^\"\\\\]*)\"")
         private val PARAMS = Regex("\"params\"\\s*:\\s*\\[\\s*\"(0x[0-9a-fA-F]*)\"\\s*]")

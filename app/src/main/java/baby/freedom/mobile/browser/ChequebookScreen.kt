@@ -75,7 +75,9 @@ internal fun rememberChequebookState(
         lifecycle.pollWhileStarted(pollMs) {
             val address = gatewayGet("/chequebook/address")?.let(::chequebookFrom)
             val funds = if (address.isNullOrEmpty()) null else gatewayGet("/chequebook/balance")?.let(::chequebookFundsFrom)
-            val wallet = if (withWallet) gatewayGet("/wallet", WALLET_TIMEOUT_MS)?.let(::walletBzzFrom) else null
+            val walletBody = if (withWallet) gatewayGet("/wallet", WALLET_TIMEOUT_MS) else null
+            val wallet = walletBody?.let(::walletBzzFrom)
+            val xdai = walletBody?.let(::walletXdaiFrom)
             // A failed read keeps what was last known.
             val none = address == ""
             val known = address ?: value.address
@@ -83,6 +85,7 @@ internal fun rememberChequebookState(
                 address = known,
                 balancePlur = if (none) null else funds?.totalPlur ?: value.balancePlur,
                 walletPlur = wallet ?: value.walletPlur,
+                walletXdaiWei = xdai ?: value.walletXdaiWei,
                 availablePlur = if (none) null else funds?.availablePlur ?: value.availablePlur,
                 availableUpperBound = if (none) false else funds?.availableUpperBound ?: value.availableUpperBound,
                 ledgerLost = if (none) false else funds?.ledgerLost ?: value.ledgerLost,
@@ -122,6 +125,28 @@ internal fun rememberSwapStatus(running: Boolean, refresh: Any = Unit): SwapStat
 }
 
 /**
+ * What the chequebook paid peers recently (#543), as `:node` counts it,
+ * read every [CREDIT_SPEND_POLL_MS] while [light] and the app is in the
+ * foreground, and again at once whenever [refresh] changes; null until the
+ * first answer. A failed read keeps the last answer.
+ */
+@Composable
+internal fun rememberCreditSpend(light: Boolean, refresh: Any = Unit): CreditSpendFigures? {
+    val lifecycle = currentLifecycle()
+    val spend by produceState<CreditSpendFigures?>(null, light, refresh, lifecycle) {
+        if (!light) {
+            value = null
+            return@produceState
+        }
+        lifecycle.pollWhileStarted(CREDIT_SPEND_POLL_MS) {
+            val answer = withContext(Dispatchers.IO) { StampClient.call("creditSpend") }
+            (answer as? StampClient.Answer.Ok)?.json?.let(::creditSpendFrom)?.let { value = it }
+        }
+    }
+    return spend
+}
+
+/**
  * The chequebook page (#117), over the node page: the node's chequebook,
  * what it holds and what it can still spend, whether downloads pay peers
  * from it (the "Pay peers from the chequebook" switch, and a lost cheque
@@ -145,6 +170,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     val confirmedLedgers by remember(settings) { settings.swarmConfirmedLedgers }.collectAsState(initial = emptySet())
     val state = rememberChequebookState(light = blocked == null, refresh = refresh, withWallet = true, withPlan = true)
         .withConfirmedLedgers(confirmedLedgers)
+    val creditSpend = rememberCreditSpend(light = blocked == null, refresh = refresh)
     // The switch's setting; null until read, so it doesn't flicker.
     // MainActivity relays it to the node, live and after every init.
     val swapWanted by remember(settings) { settings.swarmSwapEnabled }.collectAsState(initial = null)
@@ -169,7 +195,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
     }
     val amountPlur = amount?.let(::BigInteger)
     // What the confirmation shows, captured when it opens: that's what's sent.
-    var confirming by remember { mutableStateOf<Pair<String, BigInteger>?>(null) }
+    var confirming by remember { mutableStateOf<DepositReview?>(null) }
 
     FullScreenScaffold(title = stringResource(R.string.stamps_chequebook_title), onDismiss = onDismiss) {
         LazyColumn(
@@ -190,6 +216,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                 ChequebookCreditCards(
                     state = state,
                     swap = swap,
+                    spend = creditSpend,
                     swapWanted = swapWanted,
                     liabilityOutcome = liabilityOutcome,
                     onSwapChange = { on -> scope.launch { settings.setSwarmSwapEnabled(on) } },
@@ -214,8 +241,8 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                         running -> MutedText(stringResource(R.string.stamps_chequebook_searching))
                         reason != null -> MutedText(reason)
                     }
-                    // Short of xBZZ: fund the node first, as publish setup
-                    // does — its address to send xBZZ to on Gnosis Chain.
+                    // Short of xBZZ and no xDAI to swap: fund the node first, as
+                    // publish setup does — its address on Gnosis Chain.
                     val fundTo = fundingAddress(nodeInfo)
                     if (!running && fundTo != null && depositNeedsFunding(state, amountPlur)) {
                         Spacer(Modifier.height(6.dp))
@@ -227,24 +254,26 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
                     }
                     Spacer(Modifier.height(8.dp))
                     Button(
-                        onClick = {
-                            val address = state.address
-                            if (!address.isNullOrEmpty() && amountPlur != null) confirming = address to amountPlur
-                        },
+                        onClick = { depositReview(state, amountPlur)?.let { confirming = it } },
                         enabled = reason == null && !running,
                     ) { Text(stringResource(R.string.stamps_deposit)) }
                 }
             }
         }
     }
-    confirming?.let { (address, plur) ->
+    confirming?.let { review ->
+        val plur = review.amountPlur
         SpendConfirmDialog(
             title = stringResource(R.string.stamps_chequebook_deposit_title, formatBzzExact(plur)),
-            body = depositConfirmText(plur, address),
+            body = depositConfirmText(review),
             confirmLabel = stringResource(R.string.stamps_deposit),
             onConfirm = {
                 confirming = null
-                if (StampClient.deposit(address, plur)) amount = depositPickAfterDeposit(plur, state.walletPlur)
+                val started = when (val swapWei = review.swapWei) {
+                    null -> StampClient.deposit(review.chequebook, plur)
+                    else -> StampClient.topUp(review.chequebook, plur, swapWei)
+                }
+                if (started) amount = depositPickAfterDeposit(plur, state.walletPlur)
             },
             onDismiss = { confirming = null },
         )
@@ -283,6 +312,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
  * to the on-chain balance, whether downloads pay peers from it and why not
  * (with the "Pay peers from the chequebook" switch), and a lost cheque
  * ledger to confirm. Stateless: [ChequebookScreen] reads the node.
+ * [spend] is what it paid peers recently (#543; null until read).
  * [swapWanted] is the saved switch (null until read); [swap] is ant's
  * `ant_swap_status` (null until read); [liabilityOutcome] how the last
  * lost-ledger confirmation went.
@@ -291,6 +321,7 @@ internal fun ChequebookScreen(nodeInfo: NodeInfo, onDismiss: () -> Unit) {
 internal fun ChequebookCreditCards(
     state: ChequebookState,
     swap: SwapStatus?,
+    spend: CreditSpendFigures? = null,
     swapWanted: Boolean?,
     liabilityOutcome: String?,
     onSwapChange: (Boolean) -> Unit,
@@ -306,6 +337,21 @@ internal fun ChequebookCreditCards(
                 SubLine(stringResource(R.string.stamps_credit_low))
             } else if (credit is CreditStatus.Paying && credit.uncertain) {
                 SubLine(stringResource(R.string.stamps_credit_maybe_low))
+            }
+            // Recent spend (#543), as desktop shows it: a rolling 24 hours and 7 days.
+            if (!state.address.isNullOrEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                DetailRow(
+                    stringResource(R.string.stamps_credit_spent_day),
+                    creditSpendText(spend) { it.dayPlur },
+                    singleLine = false,
+                )
+                DetailRow(
+                    stringResource(R.string.stamps_credit_spent_week),
+                    creditSpendText(spend) { it.weekPlur },
+                    singleLine = false,
+                )
+                spend?.let { SubLine(creditSpendNote(it)) }
             }
             Spacer(Modifier.height(4.dp))
             MutedText(stringResource(R.string.stamps_chequebook_intro))
@@ -350,6 +396,12 @@ internal fun ChequebookCreditCards(
                     singleLine = false,
                 )
                 SubLine(stringResource(R.string.stamps_chequebook_wallet_note))
+                DetailRow(
+                    stringResource(R.string.stamps_node_xdai),
+                    state.walletXdaiWei?.let(::formatXdai) ?: stringResource(R.string.stamps_checking),
+                    singleLine = false,
+                )
+                SubLine(stringResource(R.string.stamps_chequebook_wallet_xdai_note))
                 Spacer(Modifier.height(4.dp))
                 SubLine(stringResource(R.string.stamps_credit_cost_note))
             }
@@ -428,6 +480,9 @@ internal fun liabilityOutcomeText(answer: StampClient.Answer): String = when (an
 }
 
 private const val CHEQUEBOOK_POLL_MS = 10_000L
+
+/** `:node` samples `/settlements` every 5 min; reading its figures once a minute is plenty. */
+private const val CREDIT_SPEND_POLL_MS = 60_000L
 
 /** ant answers `ant_swap_status` from memory: cheap to ask often. */
 private const val SWAP_POLL_MS = 5_000L

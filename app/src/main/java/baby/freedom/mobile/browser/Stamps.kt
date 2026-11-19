@@ -535,7 +535,10 @@ internal object StampClient {
         canSpend(spend, discovery) && publishing !is Publisher.State.Running
 
     enum class Kind {
-        Buy, Extend, Deposit, Connect;
+        Buy, Extend, Deposit, Connect,
+
+        /** An xDAI-funded deposit (#543): the node swaps for the xBZZ it lacks first. */
+        TopUp;
 
         /** A buy or a connect may end by reloading the gateway: the first one sets up the chequebook (#115). */
         val mayRestartGateway: Boolean get() = this == Buy || this == Connect
@@ -588,6 +591,19 @@ internal object StampClient {
     }
 
     /**
+     * Tops the credit in [chequebook] up by [amountPlur] (#543), as the user
+     * just confirmed: the node swaps at most [maxSwapWei] of its xDAI (what
+     * the confirmation showed it holds) for the xBZZ it lacks, then
+     * deposits. False if a spend is already running.
+     */
+    fun topUp(chequebook: String, amountPlur: BigInteger, maxSwapWei: BigInteger): Boolean = start(Kind.TopUp, null) {
+        JSONObject()
+            .put("chequebook", chequebook)
+            .put("amountPlur", amountPlur.toString())
+            .put("maxSwapWei", maxSwapWei.toString())
+    }
+
+    /**
      * Connects batch [batchId], which the wallet bought for the node
      * through SwarmNodeFunder (#115, [SwarmFunding]), so the node stamps
      * with it; it also sets up the node's chequebook, moving at most
@@ -617,6 +633,7 @@ internal object StampClient {
                 Kind.Buy -> "buy"
                 Kind.Extend -> "extend"
                 Kind.Deposit -> "deposit"
+                Kind.TopUp -> "topUp"
                 Kind.Connect -> "connect"
             }
             val outcome = try {
@@ -659,7 +676,7 @@ internal object StampClient {
      * not as a failure (#117).
      */
     internal fun stillSendingMessage(kind: Kind): String = when (kind) {
-        Kind.Deposit -> Strings.get(R.string.stamps_deposit_still_sending, SwarmNode.DEPOSIT_MAYBE_SENT)
+        Kind.Deposit, Kind.TopUp -> Strings.get(R.string.stamps_deposit_still_sending, SwarmNode.DEPOSIT_MAYBE_SENT)
         else -> Strings.get(R.string.stamps_still_sending)
     }
 

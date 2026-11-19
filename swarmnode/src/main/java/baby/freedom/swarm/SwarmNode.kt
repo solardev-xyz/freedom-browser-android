@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +62,8 @@ class SwarmNode internal constructor(
      * isn't mistaken for the one the hold's [clock] reading came from.
      */
     private val bootId: () -> String? = { null },
+    /** Wall-clock ms, for dating browsing-credit spend to the hour (#543). */
+    private val wallClock: () -> Long = { System.currentTimeMillis() },
 ) {
     constructor(config: Config) : this(
         config,
@@ -392,6 +395,7 @@ class SwarmNode internal constructor(
                     )
                 }
                 startPeerPolling()
+                if (mode.light) startCreditSampling()
                 true
             }
             if (published) {
@@ -431,6 +435,8 @@ class SwarmNode internal constructor(
             generation++
             peerPoller?.cancel()
             peerPoller = null
+            creditSampler?.cancel()
+            creditSampler = null
             _state.update {
                 it.copy(
                     status = NodeStatus.Stopped,
@@ -846,44 +852,96 @@ class SwarmNode internal constructor(
                 ?: throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_balance_unreadable))
             check(wallet >= amountPlur) { SwarmStrings.get(R.string.swarmnode_balance_short, formatBzz(wallet)) }
             val before = chequebookBalance()
-            synchronized(lock) {
-                loadUnconfirmedDeposit()
-                unconfirmedDeposit?.let { u ->
-                    // A deposit that ended without an answer may still be on
-                    // its way, and `/wallet` doesn't count a pending transfer:
-                    // another one now could move the xBZZ twice. Wait until
-                    // the chequebook shows it (or long enough that it won't).
-                    val landed = u.chequebook == want && u.balanceBefore != null && before != null &&
-                        before >= u.balanceBefore + u.amountPlur
-                    if (landed || u.chequebook != want || holdElapsedMs(clock(), u.atMs, sameBoot(u.bootId)) >= UNCONFIRMED_DEPOSIT_HOLD_MS) {
-                        setUnconfirmedDeposit(null)
-                    } else {
-                        throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_deposit_earlier_pending))
-                    }
+            checkNoDepositPending(want, before)
+            val plan = SpendPlan.DepositChequebook(owner(), want, amountPlur)
+            sendDeposit(want, before, amountPlur) {
+                SpendGuard.during(plan) {
+                    ops.gateway("POST", "/chequebook/deposit?amount=$amountPlur", DEPOSIT_TIMEOUT_MS)
                 }
             }
-            val plan = SpendPlan.DepositChequebook(owner(), want, amountPlur)
-            val answer = SpendGuard.during(plan) {
-                ops.gateway("POST", "/chequebook/deposit?amount=$amountPlur", DEPOSIT_TIMEOUT_MS)
-            }
-            val message = answer?.let { a ->
-                runCatching { JSONObject(a.body).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() }
-            }
-            if (depositMaybeSent(answer, message)) {
-                synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock(), bootId())) }
-                throw DepositMaybeSentException(
-                    SwarmStrings.get(
-                        R.string.swarmnode_deposit_maybe_sent_detail,
-                        DEPOSIT_MAYBE_SENT,
-                        message ?: SwarmStrings.get(R.string.swarmnode_gateway_no_answer),
-                    ),
-                )
-            }
-            if (answer!!.code !in 200..299) {
-                throw RuntimeException(message ?: SwarmStrings.get(R.string.swarmnode_deposit_failed_http, answer.code))
-            }
-            answer.body
         }
+    }
+
+    /**
+     * Tops browsing credit up by [amountPlur] (#543): ant's `POST
+     * /v0/settlement/deposit?amount=`, which swaps the xBZZ the node's
+     * account lacks from its xDAI, at most [maxSwapWei] (what the
+     * confirmation showed the node holds), and then moves the amount into
+     * [chequebook]. Refuses unless the gateway's chequebook is
+     * [chequebook]. Shares [depositChequebook]'s hold: while an earlier
+     * deposit may still be on its way, it sends nothing. SPENDS: only the
+     * swap and the transfer get out ([SpendPlan.TopUpCredit]). Returns
+     * ant's settlement-deposit JSON.
+     */
+    fun topUpCredit(chequebook: String, amountPlur: BigInteger, maxSwapWei: BigInteger): String {
+        require(amountPlur.signum() > 0 && amountPlur <= SpendPermit.MAX_TOP_UP_PLUR) { "bad amount" }
+        require(maxSwapWei.signum() >= 0) { "bad xDAI total" }
+        val want = normalizeAddress(chequebook) ?: throw IllegalArgumentException("not a chequebook address")
+        return withLightNode { _, _ ->
+            when (gatewayChequebook()) {
+                null -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_unknown))
+                "" -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_none))
+                want -> Unit
+                else -> throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_chequebook_other))
+            }
+            val before = chequebookBalance()
+            checkNoDepositPending(want, before)
+            val plan = SpendPlan.TopUpCredit(owner(), want, amountPlur, maxSwapWei)
+            sendDeposit(want, before, amountPlur) {
+                SpendGuard.during(plan) {
+                    ops.gateway("POST", "/v0/settlement/deposit?amount=$amountPlur", TOP_UP_TIMEOUT_MS)
+                }
+            }
+        }
+    }
+
+    /**
+     * Throws while a deposit into [want] that ended without an answer may
+     * still be on its way: `/wallet` doesn't count a pending transfer, so
+     * another one now could move the xBZZ twice. Lifts the hold once the
+     * chequebook (holding [before] now) shows it, or long enough has
+     * passed that it won't.
+     */
+    private fun checkNoDepositPending(want: String, before: BigInteger?) {
+        synchronized(lock) {
+            loadUnconfirmedDeposit()
+            unconfirmedDeposit?.let { u ->
+                val landed = u.chequebook == want && u.balanceBefore != null && before != null &&
+                    before >= u.balanceBefore + u.amountPlur
+                if (landed || u.chequebook != want || holdElapsedMs(clock(), u.atMs, sameBoot(u.bootId)) >= UNCONFIRMED_DEPOSIT_HOLD_MS) {
+                    setUnconfirmedDeposit(null)
+                } else {
+                    throw IllegalStateException(SwarmStrings.get(R.string.swarmnode_deposit_earlier_pending))
+                }
+            }
+        }
+    }
+
+    /**
+     * Sends a deposit of [amountPlur] into [want] (which held [before]) with
+     * [send], and reads its answer: one that may have gone out takes the
+     * hold ([checkNoDepositPending]) and throws [DepositMaybeSentException];
+     * any other failure throws with ant's reason. The answer's body on success.
+     */
+    private fun sendDeposit(want: String, before: BigInteger?, amountPlur: BigInteger, send: () -> GatewayAnswer?): String {
+        val answer = send()
+        val message = answer?.let { a ->
+            runCatching { JSONObject(a.body).optString("message") }.getOrNull()?.takeIf { it.isNotBlank() }
+        }
+        if (depositMaybeSent(answer, message)) {
+            synchronized(lock) { setUnconfirmedDeposit(UnconfirmedDeposit(want, before, amountPlur, clock(), bootId())) }
+            throw DepositMaybeSentException(
+                SwarmStrings.get(
+                    R.string.swarmnode_deposit_maybe_sent_detail,
+                    DEPOSIT_MAYBE_SENT,
+                    message ?: SwarmStrings.get(R.string.swarmnode_gateway_no_answer),
+                ),
+            )
+        }
+        if (answer!!.code !in 200..299) {
+            throw RuntimeException(message ?: SwarmStrings.get(R.string.swarmnode_deposit_failed_http, answer.code))
+        }
+        return answer.body
     }
 
     /**
@@ -1001,6 +1059,86 @@ class SwarmNode internal constructor(
     fun dispose() {
         stop()
         scope.cancel()
+    }
+
+    /**
+     * Reads `/settlements` every [CreditSpend.SAMPLE_MS] while the node
+     * runs in light mode (#543), so spend lands in its hour whether or not
+     * the chequebook page is open: `:node` runs as long as the node does.
+     * Under [lock].
+     */
+    private fun startCreditSampling() {
+        creditSampler?.cancel()
+        creditSampler = scope.launch {
+            while (isActive) {
+                sampleCredit()
+                delay(CreditSpend.SAMPLE_MS)
+            }
+        }
+    }
+
+    private var creditSampler: Job? = null
+    private val creditStore by lazy { CreditSpendStore(File(config.dataDir, CREDIT_SPEND_FILE)) }
+
+    /** Guards the sampling state below; held across one sample's gateway reads. */
+    private val creditLock = Any()
+
+    /** When this process last read `/settlements` for each chequebook: a ledger's own `sampled` lags while idle. */
+    private val creditLastSampled = HashMap<String, Long>()
+    private var creditSampledAt: Long? = null
+    private var creditChequebook: String? = null
+
+    /**
+     * Folds one `/settlements` reading into the chequebook's spend ledger.
+     * Never throws: a failed read is just a missed sample (and the next
+     * one, after a gap, a baseline).
+     */
+    private fun sampleCredit() {
+        try {
+            synchronized(creditLock) {
+                val info = _state.value
+                if (info.status != NodeStatus.Running || !info.lightMode) return
+                val chequebook = gatewayChequebook() ?: return
+                creditChequebook = chequebook.takeIf { it.isNotEmpty() }?.let { "0x$it" }
+                val key = creditChequebook ?: return
+                val rows = ops.gateway("GET", "/settlements", GATEWAY_READ_TIMEOUT_MS)
+                    ?.takeIf { it.code == 200 }?.let { CreditSpend.rowsFrom(it.body) } ?: return
+                val at = wallClock()
+                creditSampledAt = at
+                val previous = creditStore.get(key)
+                // A previous time later than now (the clock stepped back) dates nothing.
+                val lastAt = listOfNotNull(creditLastSampled[key], previous?.sampled).filter { it <= at }.maxOrNull()
+                val (ledger, changed) = CreditSpend.record(previous, rows, at, lastAt)
+                creditLastSampled[key] = at
+                if (changed) creditStore.set(key, ledger)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "reading the settlements failed: ${t.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * What the chequebook paid peers recently (#543), as JSON:
+     * `{"chequebook":"0x…"|null,"dayPlur","weekPlur","since"}`, the spend
+     * figures and `since` (wall-clock ms of the first reading) only when
+     * there's a history for the chequebook. Reads `/settlements` first
+     * when the last reading is older than [CREDIT_READ_MAX_AGE_MS].
+     * Throws [IllegalStateException] unless the node runs in light mode.
+     */
+    fun creditSpend(): String {
+        val info = _state.value
+        check(info.status == NodeStatus.Running) { SwarmStrings.get(R.string.swarmnode_not_running) }
+        check(info.lightMode) { SwarmStrings.get(R.string.swarmnode_not_light) }
+        val stale = synchronized(creditLock) { creditSampledAt }.let { it == null || wallClock() - it !in 0 until CREDIT_READ_MAX_AGE_MS }
+        if (stale) sampleCredit()
+        val chequebook = synchronized(creditLock) { creditChequebook }
+        val o = JSONObject().put("chequebook", chequebook ?: JSONObject.NULL)
+        val ledger = chequebook?.let(creditStore::get) ?: return o.toString()
+        val at = wallClock()
+        return o.put("dayPlur", CreditSpend.spendWithin(ledger, CreditSpend.DAY_MS, at).toString())
+            .put("weekPlur", CreditSpend.spendWithin(ledger, CreditSpend.WEEK_MS, at).toString())
+            .put("since", ledger.since)
+            .toString()
     }
 
     private fun startPeerPolling() {
@@ -1124,6 +1262,13 @@ class SwarmNode internal constructor(
         private const val DEPOSIT_TIMEOUT_MS = 4 * 60_000
 
         /**
+         * ant gives an xDAI-funded deposit 5 min (a swap and a transfer,
+         * each waited on), then answers 504; a little longer here, and
+         * still inside the app's 10-minute wait for a spend.
+         */
+        private const val TOP_UP_TIMEOUT_MS = 6 * 60_000
+
+        /**
          * How long a deposit that ended without a clear answer blocks
          * another into the same chequebook, unless its balance shows it
          * landed first. Past it, a transfer still unmined isn't coming.
@@ -1170,6 +1315,12 @@ class SwarmNode internal constructor(
         }
 
         private const val UNCONFIRMED_DEPOSIT_FILE = "unconfirmed-deposit.json"
+
+        /** The browsing-credit spend ledgers (#543), next to the deposit hold. */
+        internal const val CREDIT_SPEND_FILE = "credit-spend.json"
+
+        /** A spend read older than this samples `/settlements` first, as desktop's card read does. */
+        private const val CREDIT_READ_MAX_AGE_MS = 15_000L
 
         /** How a deposit that may have gone out after all ([depositMaybeSent]) starts its error. */
         val DEPOSIT_MAYBE_SENT: String get() = SwarmStrings.get(R.string.swarmnode_deposit_maybe_sent)

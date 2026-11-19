@@ -116,6 +116,8 @@ internal data class ChequebookState(
     val balancePlur: BigInteger? = null,
     /** The node account's own xBZZ, from `GET /wallet`: what a deposit moves. */
     val walletPlur: BigInteger? = null,
+    /** The node account's xDAI, from `GET /wallet`: what a top-up swaps for the xBZZ it lacks (#543). */
+    val walletXdaiWei: BigInteger? = null,
     /** What the chequebook can still pay: bee's `availableBalance`. */
     val availablePlur: BigInteger? = null,
     /** [availablePlur] is only an upper bound: ant couldn't count its cheques (`availableBalanceError`). */
@@ -322,13 +324,50 @@ internal fun creditStatusText(status: CreditStatus): String = when (status) {
 }
 
 /**
- * Does the deposit need xBZZ the node's account doesn't hold? Then the page
- * says how to fund the node first, with its address.
+ * Does the deposit need funds the node's account doesn't hold: less xBZZ
+ * than [amountPlur] and no xDAI to swap for the rest? Then the page says
+ * how to fund the node first, with its address.
  */
 internal fun depositNeedsFunding(state: ChequebookState, amountPlur: BigInteger?): Boolean {
     val wallet = state.walletPlur ?: return false
-    return wallet.signum() == 0 || (amountPlur != null && amountPlur > wallet)
+    val short = wallet.signum() == 0 || (amountPlur != null && amountPlur > wallet)
+    return short && state.walletXdaiWei?.signum() == 0
 }
+
+/**
+ * What a deposit the user is about to confirm does, captured when the
+ * review opens: that's what is sent. [swapWei] null: the node's own xBZZ
+ * covers [amountPlur], and it moves it (#117). Otherwise a top-up (#543):
+ * the node swaps xDAI, at most [swapWei], for the xBZZ it lacks beyond the
+ * [walletPlur] it holds, then deposits.
+ */
+internal data class DepositReview(
+    val chequebook: String,
+    val amountPlur: BigInteger,
+    val walletPlur: BigInteger,
+    val swapWei: BigInteger?,
+)
+
+/**
+ * The review for depositing [amountPlur] now, or null while it can't go
+ * ahead ([depositBlockedReason]). A swap may use the node's xDAI as the
+ * page shows it, rounded down to the 6 decimals shown, so the most it can
+ * swap is exactly the figure the review names (desktop: never more than
+ * the screen showed).
+ */
+internal fun depositReview(state: ChequebookState, amountPlur: BigInteger?): DepositReview? {
+    val chequebook = state.address?.takeIf { it.isNotEmpty() } ?: return null
+    val wallet = state.walletPlur ?: return null
+    amountPlur ?: return null
+    if (wallet >= amountPlur) return DepositReview(chequebook, amountPlur, wallet, null)
+    val xdai = state.walletXdaiWei?.let(::shownXdaiWei)?.takeIf { it.signum() > 0 } ?: return null
+    return DepositReview(chequebook, amountPlur, wallet, xdai)
+}
+
+/** [wei] rounded down to the 6 decimals [formatXdai] shows. */
+internal fun shownXdaiWei(wei: BigInteger): BigInteger = wei.divide(XDAI_SHOWN_STEP_WEI).multiply(XDAI_SHOWN_STEP_WEI)
+
+private val XDAI_SHOWN_STEP_WEI: BigInteger = BigInteger.TEN.pow(12)
 
 /** The chequebook's balance from a `/chequebook/balance` body (bee's `totalBalance`, PLUR). */
 internal fun chequebookBalanceFrom(body: String): BigInteger? =
@@ -337,6 +376,10 @@ internal fun chequebookBalanceFrom(body: String): BigInteger? =
 /** The node account's xBZZ from a `/wallet` body (`bzzBalance`, PLUR). */
 internal fun walletBzzFrom(body: String): BigInteger? =
     runCatching { BigInteger(JSONObject(body).getString("bzzBalance")) }.getOrNull()?.takeIf { it.signum() >= 0 }
+
+/** The node account's xDAI from a `/wallet` body (`nativeTokenBalance`, wei). */
+internal fun walletXdaiFrom(body: String): BigInteger? =
+    runCatching { BigInteger(JSONObject(body).getString("nativeTokenBalance")) }.getOrNull()?.takeIf { it.signum() >= 0 }
 
 /** Why the chequebook page can't read anything now, or null when it can. */
 internal fun chequebookBlockedReason(node: NodeInfo): String? = when {
@@ -357,15 +400,70 @@ internal fun depositBlockedReason(node: NodeInfo, state: ChequebookState, amount
         state.address == null -> Strings.get(R.string.stamps_chequebook_checking)
         state.address.isEmpty() -> Strings.get(R.string.stamps_chequebook_none)
         state.walletPlur == null -> Strings.get(R.string.stamps_chequebook_checking_xbzz)
-        state.walletPlur.signum() == 0 -> Strings.get(R.string.stamps_chequebook_no_xbzz)
         amountPlur == null -> Strings.get(R.string.stamps_chequebook_choose_amount)
-        amountPlur > state.walletPlur -> Strings.get(R.string.stamps_chequebook_holds_only, formatBzz(state.walletPlur))
+        amountPlur <= state.walletPlur -> null
+        // Short of xBZZ: the node swaps xDAI for the rest (#543), if it has any.
+        state.walletXdaiWei == null -> Strings.get(R.string.stamps_chequebook_checking_xbzz)
+        shownXdaiWei(state.walletXdaiWei).signum() == 0 ->
+            if (state.walletPlur.signum() == 0) {
+                Strings.get(R.string.stamps_chequebook_no_xbzz)
+            } else {
+                Strings.get(R.string.stamps_chequebook_holds_only, formatBzz(state.walletPlur))
+            }
         else -> null
     }
 
-/** The confirmation's body: the amount, where it goes, and the most it can cost in gas. */
-internal fun depositConfirmText(amountPlur: BigInteger, chequebook: String): String =
-    Strings.get(
+/**
+ * The confirmation's body: the amount, where it goes, and the most it can
+ * cost in gas; for a top-up (#543), also what the node holds and the most
+ * xDAI it may swap.
+ */
+internal fun depositConfirmText(review: DepositReview): String = when (val swap = review.swapWei) {
+    null -> Strings.get(
         R.string.stamps_chequebook_deposit_confirm,
-        formatBzzExact(amountPlur), chequebook, formatXdai(SpendPermit.DEPOSIT_MAX_GAS_WEI),
+        formatBzzExact(review.amountPlur), review.chequebook, formatXdai(SpendPermit.DEPOSIT_MAX_GAS_WEI),
     )
+    else -> Strings.get(
+        R.string.stamps_chequebook_top_up_confirm,
+        formatBzz(review.walletPlur), formatXdai(swap), formatBzzExact(review.amountPlur), review.chequebook,
+        formatXdai(SpendPermit.TOP_UP_MAX_GAS_WEI),
+    )
+}
+
+/**
+ * What the chequebook paid peers recently (#543): in the last 24 hours
+ * ([dayPlur]) and 7 days ([weekPlur]), counted by `:node` since [since]
+ * (wall-clock ms). Null figures: no history for this chequebook yet.
+ */
+internal data class CreditSpendFigures(
+    val dayPlur: BigInteger?,
+    val weekPlur: BigInteger?,
+    val since: Long?,
+)
+
+/** `:node`'s `creditSpend` answer; null when it isn't one. */
+internal fun creditSpendFrom(o: JSONObject): CreditSpendFigures? {
+    if (!o.has("chequebook")) return null
+    fun plur(key: String) = o.optString(key).takeIf { it.isNotEmpty() }?.let { runCatching { BigInteger(it) }.getOrNull() }
+        ?.takeIf { it.signum() >= 0 }
+    val day = plur("dayPlur")
+    val week = plur("weekPlur")
+    val since = o.optLong("since", -1L).takeIf { it >= 0 }
+    if (day == null || week == null || since == null) return CreditSpendFigures(null, null, null)
+    return CreditSpendFigures(day, week, since)
+}
+
+/** The note under the spend figures: since when they count, and what they leave out. */
+internal fun creditSpendNote(spend: CreditSpendFigures): String = when (val since = spend.since) {
+    null -> Strings.get(R.string.stamps_credit_spent_note_none)
+    else -> Strings.get(
+        R.string.stamps_credit_spent_note,
+        java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM).format(java.util.Date(since)),
+    )
+}
+
+/** A spend figure, "Not counted yet" before there is a history; "Checking…" until read. */
+internal fun creditSpendText(spend: CreditSpendFigures?, plur: (CreditSpendFigures) -> BigInteger?): String = when {
+    spend == null -> Strings.get(R.string.stamps_checking)
+    else -> plur(spend)?.let(::formatBzz) ?: Strings.get(R.string.stamps_credit_spent_none_yet)
+}

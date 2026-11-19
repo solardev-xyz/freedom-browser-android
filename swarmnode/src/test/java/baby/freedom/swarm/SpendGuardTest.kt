@@ -213,6 +213,52 @@ class SpendGuardTest {
         refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(depositAmount), TestTx.word(BigInteger.ONE))))
     }
 
+    private val topUpAmount = BigInteger.TEN.pow(15) // 0.1 xBZZ
+    private val topUp = SpendPlan.TopUpCredit(TestTx.OWNER, chequebook, topUpAmount, maxSwap)
+
+    @Test
+    fun aTopUpAdmitsTheSwapAndOneTransferToTheConfirmedChequebook() {
+        // #543: ant swaps for the xBZZ the node lacks, then deposits.
+        val p = SpendPermit(topUp)
+        assertTrue(p.admits(TestTx.swap(maxSwap)))
+        assertTrue(p.admits(TestTx.transfer(chequebook, topUpAmount)))
+        // Each once.
+        assertFalse(p.admits(TestTx.swap(BigInteger.ONE)))
+        assertFalse(p.admits(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(BigInteger.ONE)), nonce = 10)))
+        // Less than the amount: ant tops up to what it read plus the amount, so a
+        // chequebook that grew meanwhile takes less.
+        assertTrue(SpendPermit(topUp).admits(TestTx.transfer(chequebook, topUpAmount.subtract(BigInteger.ONE))))
+        // No swap is needed when the node already holds the xBZZ.
+        assertTrue(SpendPermit(topUp).admits(TestTx.transfer(chequebook, topUpAmount)))
+
+        fun refused(raw: ByteArray) = assertFalse(SpendPermit(topUp).admits(raw))
+        refused(TestTx.swap(maxSwap.add(BigInteger.ONE))) // more xDAI than the review showed
+        refused(TestTx.swap(maxSwap, recipient = "22".repeat(20))) // xBZZ bought for someone else
+        refused(TestTx.transfer(chequebook, topUpAmount.add(BigInteger.ONE))) // more
+        refused(TestTx.transfer(chequebook, BigInteger.ZERO))
+        refused(TestTx.transfer("cc".repeat(20), topUpAmount)) // another recipient
+        refused(TestTx.approve(topUpAmount, spender = chequebook))
+        refused(TestTx.approve(amount.shiftLeft(17)))
+        refused(TestTx.createBatch(TestTx.OWNER, amount, 17, false))
+        refused(TestTx.topUp(batch, amount))
+        refused(TestTx.deployChequebook())
+        refused(TestTx.withdraw(chequebook, topUpAmount))
+        // A transfer that also carries xDAI.
+        refused(TestTx.tx(SpendPermit.BZZ_TOKEN, TestTx.call("a9059cbb", TestTx.addr(chequebook), TestTx.word(topUpAmount)), value = BigInteger.ONE))
+    }
+
+    @Test
+    fun aTopUpIsBoundedAndCostsTwoTransactionsOfGas() {
+        assertEquals(setOf(SpendPermit.Slot.Swap, SpendPermit.Slot.Deposit), SpendPermit.TOP_UP_SLOTS)
+        assertEquals(BigInteger("20000000000000000"), SpendPermit.TOP_UP_MAX_GAS_WEI) // 2 × 0.01 xDAI
+        assertEquals(BigInteger.TEN.pow(17), SpendPermit.MAX_TOP_UP_PLUR) // 10 xBZZ
+        fun invalid(block: () -> Unit) = assertTrue(runCatching(block).isFailure)
+        invalid { SpendPlan.TopUpCredit(TestTx.OWNER, chequebook, BigInteger.ZERO, maxSwap) }
+        invalid { SpendPlan.TopUpCredit(TestTx.OWNER, chequebook, SpendPermit.MAX_TOP_UP_PLUR.add(BigInteger.ONE), maxSwap) }
+        invalid { SpendPlan.TopUpCredit(TestTx.OWNER, "0x$chequebook", topUpAmount, maxSwap) }
+        invalid { SpendPlan.TopUpCredit(TestTx.OWNER, chequebook, topUpAmount, BigInteger.ONE.negate()) }
+    }
+
     @Test
     fun aStampPermitAdmitsNoDepositBeyondItsSettlementSlot() {
         // A buy's settlement slot takes at most the confirmed deposit (here 0.001 xBZZ);

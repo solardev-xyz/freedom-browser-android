@@ -112,12 +112,14 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
         StampClient.Kind.Buy -> Strings.get(R.string.stamps_spend_running_buy)
         StampClient.Kind.Extend -> Strings.get(R.string.stamps_spend_running_extend)
         StampClient.Kind.Deposit -> Strings.get(R.string.stamps_spend_running_deposit)
+        StampClient.Kind.TopUp -> Strings.get(R.string.stamps_spend_running_top_up)
         StampClient.Kind.Connect -> Strings.get(R.string.stamps_spend_running_connect)
     }
     is StampClient.Spend.Done -> when (spend.kind) {
         StampClient.Kind.Buy -> Strings.get(R.string.stamps_spend_done_buy)
         StampClient.Kind.Extend -> Strings.get(R.string.stamps_spend_done_extend)
         StampClient.Kind.Deposit -> Strings.get(R.string.stamps_spend_done_deposit)
+        StampClient.Kind.TopUp -> Strings.get(R.string.stamps_spend_done_top_up)
         StampClient.Kind.Connect -> Strings.get(R.string.stamps_spend_done_connect)
     }
     is StampClient.Spend.Failed -> Strings.get(
@@ -131,6 +133,8 @@ internal fun spendStatusText(spend: StampClient.Spend): String? = when (spend) {
             // Ended without a clear answer (#117): not a failure, it may be out.
             StampClient.Kind.Deposit ->
                 if (spend.noReport) R.string.stamps_spend_deposit_no_report else R.string.stamps_spend_deposit_failed
+            StampClient.Kind.TopUp ->
+                if (spend.noReport) R.string.stamps_spend_top_up_no_report else R.string.stamps_spend_top_up_failed
         },
         spend.message,
     )

@@ -578,6 +578,15 @@ class NodeService : Service() {
                 Log.i(TAG, "depositing into the chequebook, as the user confirmed")
                 swarmNode.depositChequebook(args.getString("chequebook"), plur)
             }
+            // An xDAI-funded credit top-up (#543): the node swaps for what it lacks, then deposits.
+            "topUp" -> spending {
+                spendable()
+                val plur = BigInteger(args.getString("amountPlur")).also { require(it.signum() > 0) { "bad amount" } }
+                Log.i(TAG, "topping up the chequebook with xDAI, as the user confirmed")
+                swarmNode.topUpCredit(args.getString("chequebook"), plur, maxSwap())
+            }
+            // What the chequebook paid peers recently (#543): no chain, no spend.
+            "creditSpend" -> swarmNode.creditSpend()
             else -> throw IllegalArgumentException("unknown stamp call")
         }
     }

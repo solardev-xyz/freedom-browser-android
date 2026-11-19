@@ -189,6 +189,10 @@ class SwarmNodeTest {
         /** What a `POST /chequebook/deposit` does, in place of ant's transaction. */
         @Volatile var onDeposit: (String) -> SwarmNode.GatewayAnswer? =
             { SwarmNode.GatewayAnswer(201, "{\"transactionHash\":\"0x${"ee".repeat(32)}\"}") }
+        /** What a `POST /v0/settlement/deposit?amount=` (#543) does, in place of ant's swap and transfer. */
+        @Volatile var onTopUp: (String) -> SwarmNode.GatewayAnswer? = { SwarmNode.GatewayAnswer(200, "{\"enabled\":true}") }
+        /** The `GET /settlements` body (#543); null answers 503. */
+        @Volatile var settlementsBody: String? = null
         override fun gateway(method: String, path: String, timeoutMs: Int): SwarmNode.GatewayAnswer? {
             calls += "gateway:$method $path"
             return when {
@@ -200,6 +204,10 @@ class SwarmNodeTest {
                     SwarmNode.GatewayAnswer(200, "{\"bzzBalance\":\"$walletPlur\",\"nativeTokenBalance\":\"1\"}")
                 method == "POST" && path.startsWith("/chequebook/deposit?amount=") ->
                     onDeposit(path.substringAfter("amount="))
+                method == "POST" && path.startsWith("/v0/settlement/deposit?amount=") ->
+                    onTopUp(path.substringAfter("amount="))
+                method == "GET" && path == "/settlements" ->
+                    settlementsBody?.let { SwarmNode.GatewayAnswer(200, it) } ?: SwarmNode.GatewayAnswer(503, "{}")
                 else -> SwarmNode.GatewayAnswer(404, "")
             }
         }
@@ -561,6 +569,7 @@ class SwarmNodeTest {
         dataDir: String = config.dataDir,
         clock: () -> Long = { System.nanoTime() / 1_000_000 },
         bootId: () -> String? = { null },
+        wallClock: () -> Long = { System.currentTimeMillis() },
     ): SwarmNode {
         ops.releaseSeed.countDown()
         ops.releaseInit.countDown()
@@ -570,6 +579,7 @@ class SwarmNodeTest {
             ops,
             clock,
             bootId,
+            wallClock,
         )
         node.start()
         awaitStatus(node, NodeStatus.Running)
@@ -915,6 +925,156 @@ class SwarmNodeTest {
         assertTrue(third.message!!.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT))
         assertEquals(3, posts())
         node.dispose()
+    }
+
+    private val tenthBzz = java.math.BigInteger.TEN.pow(15)
+    private val maxSwap = java.math.BigInteger("250000000000000000") // 0.25 xDAI
+
+    @Test
+    fun aTopUpSwapsAndDepositsInsideAPermitForTheConfirmedChequebookAmountAndXdai() {
+        // #543: the node holds less xBZZ than the amount; ant swaps xDAI for the rest.
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.chequebookHex = chequebook
+        val seen = mutableListOf<Boolean>()
+        ops.onTopUp = { amount ->
+            assertEquals(tenthBzz.toString(), amount)
+            seen += SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap.add(java.math.BigInteger.ONE))))
+            seen += SpendGuard.admit(TestTx.request(TestTx.transfer("cc".repeat(20), tenthBzz)))
+            seen += SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap)))
+            seen += SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, tenthBzz)))
+            SwarmNode.GatewayAnswer(200, """{"enabled":true,"deposit_plur":"1000000000000000"}""")
+        }
+        assertEquals(
+            """{"enabled":true,"deposit_plur":"1000000000000000"}""",
+            node.topUpCredit("0x" + chequebook.uppercase(), tenthBzz, maxSwap),
+        )
+        assertEquals(listOf(false, false, true, true), seen)
+        assertTrue(ops.calls.contains("gateway:POST /v0/settlement/deposit?amount=$tenthBzz"))
+        // Closed again once it returns.
+        assertFalse(SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, tenthBzz))))
+        node.dispose()
+    }
+
+    @Test
+    fun aTopUpRefusesAnotherChequebookNoneOrABadAmount() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        fun refused(cb: String): String {
+            val e = assertThrows(IllegalStateException::class.java) { node.topUpCredit(cb, tenthBzz, maxSwap) }
+            assertFalse(ops.calls.any { it.startsWith("gateway:POST") })
+            return e.message!!
+        }
+        assertEquals("the node has no chequebook yet", refused(chequebook))
+        ops.chequebookHex = "cc".repeat(20)
+        assertEquals("the node's chequebook isn't the one you confirmed", refused(chequebook))
+        ops.chequebookHex = chequebook
+        assertThrows(IllegalArgumentException::class.java) { node.topUpCredit(chequebook, java.math.BigInteger.ZERO, maxSwap) }
+        assertThrows(IllegalArgumentException::class.java) {
+            node.topUpCredit(chequebook, SpendPermit.MAX_TOP_UP_PLUR.add(java.math.BigInteger.ONE), maxSwap)
+        }
+        assertThrows(IllegalArgumentException::class.java) { node.topUpCredit(chequebook, tenthBzz, java.math.BigInteger.ONE.negate()) }
+        assertFalse(ops.calls.any { it.startsWith("gateway:POST") })
+        node.dispose()
+    }
+
+    @Test
+    fun aTopUpSaysWhyWhenTheNodeRefusesBeforeSending() {
+        // ant prices the swap first and refuses before any transaction when the xDAI is short.
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.chequebookHex = chequebook
+        ops.onTopUp = { SwarmNode.GatewayAnswer(400, """{"code":400,"message":"not enough xDAI: send 0.02 xDAI more"}""") }
+        val e = assertThrows(RuntimeException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }
+        assertFalse(e is DepositMaybeSentException)
+        assertEquals("not enough xDAI: send 0.02 xDAI more", e.message)
+        // Nothing may be out, so nothing is held: a retry goes ahead.
+        ops.onTopUp = { SwarmNode.GatewayAnswer(200, "{}") }
+        node.topUpCredit(chequebook, tenthBzz, maxSwap)
+        assertEquals(2, ops.calls.count { it.startsWith("gateway:POST") })
+        node.dispose()
+    }
+
+    @Test
+    fun aTopUpAndADepositShareTheHoldAfterAnUnansweredOne() {
+        val ops = FakeOps()
+        var now = 1_000_000L
+        val node = lightNode(ops, clock = { now })
+        ops.chequebookHex = chequebook
+        ops.walletPlur = tenthBzz.toString()
+        ops.chequebookBalancePlur = milliBzz.toString()
+        // ant's 5-minute wait ran out: the swap or the transfer may be out.
+        ops.onTopUp = { SwarmNode.GatewayAnswer(504, """{"code":504,"message":"chain transaction timed out"}""") }
+        val first = assertThrows(DepositMaybeSentException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }
+        assertTrue(first.message!!, first.message!!.startsWith(SwarmNode.DEPOSIT_MAYBE_SENT))
+        fun posts() = ops.calls.count { it.startsWith("gateway:POST") }
+        assertEquals(1, posts())
+        // Neither a plain deposit nor another top-up goes out meanwhile.
+        now += 60_000
+        for (attempt in listOf({ node.depositChequebook(chequebook, milliBzz) }, { node.topUpCredit(chequebook, tenthBzz, maxSwap) })) {
+            val held = assertThrows(IllegalStateException::class.java) { attempt() }
+            assertTrue(held.message!!, held.message!!.startsWith("an earlier deposit may still be on its way"))
+        }
+        assertEquals(1, posts())
+        // Once the chequebook shows it, the hold lifts.
+        ops.chequebookBalancePlur = (milliBzz + tenthBzz).toString()
+        ops.onTopUp = { SwarmNode.GatewayAnswer(200, "{}") }
+        node.topUpCredit(chequebook, tenthBzz, maxSwap)
+        assertEquals(2, posts())
+        node.dispose()
+    }
+
+    @Test
+    fun theNodeCountsWhatItsChequebookPaysPeers() {
+        // #543: `:node` reads /settlements and dates the growth to the hour.
+        val dir = java.nio.file.Files.createTempDirectory("swarmnode-credit").toFile()
+        try {
+            val ops = FakeOps()
+            ops.chequebookHex = chequebook
+            ops.settlementsBody = """{"totalSent":"100","settlements":[{"peer":"aa","received":"0","sent":"100"}]}"""
+            var wall = 1_790_856_000_000L
+            val node = lightNode(ops, dir.path, wallClock = { wall })
+            // The first reading is a baseline.
+            val first = org.json.JSONObject(node.creditSpend())
+            assertEquals("0x$chequebook", first.getString("chequebook"))
+            assertEquals("0", first.getString("dayPlur"))
+            assertEquals(wall, first.getLong("since"))
+            // Five minutes on, aa's figure grew by 60.
+            wall += CreditSpend.SAMPLE_MS
+            ops.settlementsBody = """{"totalSent":"160","settlements":[{"peer":"aa","received":"0","sent":"160"}]}"""
+            val second = org.json.JSONObject(node.creditSpend())
+            assertEquals("60", second.getString("dayPlur"))
+            assertEquals("60", second.getString("weekPlur"))
+            node.dispose()
+            // Kept for the next start of `:node`; a reading days later is a baseline again.
+            assertTrue(File(dir, SwarmNode.CREDIT_SPEND_FILE).exists())
+            val ops2 = FakeOps().apply {
+                chequebookHex = chequebook
+                settlementsBody = """{"totalSent":"900","settlements":[{"peer":"aa","received":"0","sent":"900"}]}"""
+            }
+            wall += 2 * CreditSpend.DAY_MS
+            val again = lightNode(ops2, dir.path, wallClock = { wall })
+            val third = org.json.JSONObject(again.creditSpend())
+            assertEquals("0", third.getString("dayPlur"))
+            assertEquals("60", third.getString("weekPlur"))
+            again.dispose()
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun noChequebookNoSpendFigures() {
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.settlementsBody = """{"settlements":[]}"""
+        val o = org.json.JSONObject(node.creditSpend())
+        assertTrue(o.isNull("chequebook"))
+        assertFalse(o.has("dayPlur"))
+        node.dispose()
+        val ultraLight = SwarmNode(config, FakeOps().apply { releaseSeed.countDown(); releaseInit.countDown() })
+        assertThrows(IllegalStateException::class.java) { ultraLight.creditSpend() }
+        ultraLight.dispose()
     }
 
     @Test
