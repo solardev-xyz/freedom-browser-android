@@ -591,11 +591,12 @@ internal class DisconnectOnCloseInputStream(
  * [limitMs] in all: past that — or once [abandon] fires — [conn] is
  * disconnected off this thread, which fails the blocked read, and this
  * throws [SocketTimeoutException] (the caller tells a page that gave up
- * apart by [AbandonSignal.abandoned]). The connection's read timeout alone bounds each read, not the
- * whole: a gateway trickling a byte at a time under it would otherwise
- * hold the interceptor thread for up to [max] such waits, and a main-frame
- * fetch has no [AbandonSignal] (nor header deadline) to cut it short, so
- * this limit is all that bounds it there (PR #557 R3-M2).
+ * apart by [AbandonSignal.abandoned]). The connection's read timeout
+ * alone bounds each read, not the whole: a gateway trickling a byte at
+ * a time under it would otherwise hold the interceptor thread for up to
+ * [max] such waits, and a main-frame fetch has no [AbandonSignal] (nor
+ * header deadline) to cut it short, so this limit is all that bounds it
+ * there (PR #557 R3-M2).
  */
 internal fun readAheadWithin(
     input: InputStream,

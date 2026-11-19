@@ -153,7 +153,7 @@ class GatewayFetchPolicyDeviceTest {
         val trickled = AtomicInteger(0)
         script = { n, out, _ ->
             if (n == 0) {
-                out.write(head(404, "Not Found", 4_096))
+                out.write(head(404, "Not Found", 4_096, "application/json"))
                 out.flush()
                 repeat(4_096) {
                     out.write('x'.code)
@@ -178,6 +178,39 @@ class GatewayFetchPolicyDeviceTest {
         assertEquals(2, connections.get())
         assertTrue("the first answer never trickled", trickled.get() >= 1)
         assertTrue("took $ms ms", ms in MISSING_PATH_PEEK_MS..MISSING_PATH_PEEK_MS + 2_000)
+    }
+
+    /**
+     * PR #557 R4-M3: another gateway's own HTML 404 page can't be ant's
+     * JSON path miss, so it isn't read ahead. Trickled out slower than
+     * [MISSING_PATH_PEEK_MS] on every attempt, it's still polled through
+     * as any 404 and the last one handed on as the page it is, not cut
+     * into timeouts that end on the generic error page.
+     */
+    @Test
+    fun aSlowHtmlNavigation404IsHandedOnUnread() {
+        val page = "<html>not here</html>".toByteArray()
+        script = { _, out, _ ->
+            out.write(head(404, "Not Found", page.size, "text/html; charset=utf-8"))
+            out.flush()
+            for (b in page) {
+                out.write(b.toInt())
+                out.flush()
+                Thread.sleep(250)
+            }
+        }
+        val url = "$base/bzz/$SWARM_HASH/nope.html"
+        val response = fetchWithRetry(
+            FakeRequest(url, mainFrame = true), url, url,
+            fresh = false, policy = gatewayFetchPolicy(mainFrame = true, media = false),
+        )
+        assertNotNull("ended on the error page", response)
+        assertEquals(404, response!!.statusCode)
+        val started = System.nanoTime()
+        assertArrayEquals(page, response.data.readBytes())
+        val ms = elapsedMs(started)
+        assertTrue("the page came in $ms ms, not trickled past the peek limit", ms > MISSING_PATH_PEEK_MS)
+        assertEquals(8, connections.get())
     }
 
     @Test
@@ -955,8 +988,8 @@ class GatewayFetchPolicyDeviceTest {
 
     private fun elapsedMs(since: Long) = (System.nanoTime() - since) / 1_000_000
 
-    private fun head(status: Int, reason: String, length: Int) =
-        ("HTTP/1.1 $status $reason\r\nContent-Type: application/octet-stream\r\n" +
+    private fun head(status: Int, reason: String, length: Int, type: String = "application/octet-stream") =
+        ("HTTP/1.1 $status $reason\r\nContent-Type: $type\r\n" +
             "Content-Length: $length\r\n\r\n").toByteArray()
 
     private fun readRequestHead(input: InputStream) {

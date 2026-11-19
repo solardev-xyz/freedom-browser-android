@@ -6957,7 +6957,10 @@ private fun fetchOnce(
         null
     }
     // The page giving up cuts the attempt where it is: connecting, or
-    // waiting on its headers (once they're in, the body's close does it).
+    // waiting on its headers. Once they're in, a main-frame 404's
+    // read-ahead below is bounded by [MISSING_PATH_PEEK_MS] (and by
+    // [abandon], though a main frame has none); any later body read
+    // ends with the body's close.
     val unwatch = abandon?.onAbandon { deadline?.abandon() }
     return try {
         val target = URL(targetUrl)
@@ -7011,8 +7014,10 @@ private fun fetchOnce(
         // `onReceivedHttpError`, so a tag there would reach nobody
         // (checked on the AVD, PR #557 R2-M1).
         var missingPath = false
+        // JSON only: another gateway's own 404 page isn't read ahead, so
+        // a slow one still shows as it comes (PR #557 R4-M3).
         if (raw != null && status == 404 && req.isForMainFrame && conn.requestMethod != "HEAD" &&
-            GatewayUrls.extractBase(targetUrl)?.protocol == "bzz"
+            GatewayProbe.missingPathType(rawCt) && GatewayUrls.extractBase(targetUrl)?.protocol == "bzz"
         ) {
             // Bounded as a whole, not just per read (PR #557 R3-M2).
             val head = readAheadWithin(raw, conn, MISSING_PATH_PEEK_BYTES, MISSING_PATH_PEEK_MS, abandon)
@@ -7091,7 +7096,8 @@ private const val MISSING_PATH_PEEK_BYTES = 1_024
 /**
  * How long [fetchOnce] gives that read-ahead in all: ant writes its 404
  * body with its headers. Past this the attempt fails as a timeout and is
- * retried, as one whose headers never came.
+ * retried, as one whose headers never came. Only a JSON 404 is read ahead
+ * ([GatewayProbe.missingPathType]): an HTML 404 page is never held to it.
  */
 internal const val MISSING_PATH_PEEK_MS = 3_000L
 

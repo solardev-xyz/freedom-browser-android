@@ -433,6 +433,16 @@ class GatewayProbe {
             return base.prefix + path
         }
 
+        /**
+         * Whether a 404 with this raw `Content-Type` can be ant's (and
+         * Bee's) JSON path miss, and so is worth reading ahead for it:
+         * both answer `application/json`. Anything else (an external
+         * gateway's own HTML 404 page) goes on to WebView unread, at
+         * whatever pace it comes (PR #557 R4-M3).
+         */
+        internal fun missingPathType(contentType: String?): Boolean =
+            contentType?.substringBefore(';')?.trim()?.equals("application/json", ignoreCase = true) == true
+
         /** Whether [body] is ant's (and Bee's) JSON for a manifest path miss. */
         internal fun missingPathBody(body: String): Boolean = try {
             JSONObject(body).optString("message").lowercase() == MISSING_PATH_MESSAGE

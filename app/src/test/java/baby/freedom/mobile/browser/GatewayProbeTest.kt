@@ -335,6 +335,17 @@ class GatewayProbeTest {
     }
 
     @Test
+    fun `only a JSON 404 is read ahead for a path miss`() {
+        assertTrue(GatewayProbe.missingPathType("application/json"))
+        assertTrue(GatewayProbe.missingPathType("application/json; charset=utf-8"))
+        assertTrue(GatewayProbe.missingPathType(" Application/JSON "))
+        assertEquals(false, GatewayProbe.missingPathType("text/html; charset=utf-8"))
+        assertEquals(false, GatewayProbe.missingPathType("text/plain"))
+        assertEquals(false, GatewayProbe.missingPathType(""))
+        assertEquals(false, GatewayProbe.missingPathType(null))
+    }
+
+    @Test
     fun `only ant's path miss and a peers list parse`() {
         assertTrue(GatewayProbe.missingPathBody(missingPath))
         assertEquals(false, GatewayProbe.missingPathBody("""{"message":"Not Found"}"""))
