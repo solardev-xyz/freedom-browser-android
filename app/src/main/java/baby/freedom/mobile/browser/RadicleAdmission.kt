@@ -38,11 +38,21 @@ import kotlin.concurrent.withLock
  * generations are dropped at the commit, not at the request: the page on
  * screen stays live until then, and a navigation may never commit.
  *
+ * Each request that started a generation stays pending, with its URL,
+ * until a commit claims it: a commit on the same URL claims that one
+ * (and any older), else a commit with requests pending claims the oldest
+ * (a redirect commits on another URL than was requested). A commit
+ * drops only the generations before the one it claimed, never a later
+ * request's: two navigations requested before either commits each find
+ * their own at their commit. Only a commit with nothing pending starts a
+ * generation of its own.
+ *
  * Known gap: a request the page on screen makes between the next
  * navigation's request and its commit counts as the incoming document's,
  * and so does one made after a navigation that never committed, until
- * the tab's next commit after another request. Such a call only ends at
- * its own deadline.
+ * the tab's next commit that claims a later request. Such a call only
+ * ends at its own deadline. The gap only ever leaves a call running, it
+ * never drops one from the document on screen.
  */
 internal class RadicleAdmission(private val limits: Limits = Limits()) {
     data class Limits(
@@ -93,58 +103,84 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
     /** Per tab, the generation its calls from before were last dropped at. */
     private val droppedBelow = HashMap<Long, Long>()
 
-    /** Tabs whose current generation began at a main-frame request, not yet committed. */
-    private val requested = HashSet<Long>()
+    /**
+     * Per tab, the main-frame requests no commit has claimed yet, oldest
+     * first: the generation each started and its URL (fragment dropped).
+     * At most [MAX_PENDING]; past that the oldest is forgotten, which
+     * only leaves its calls to their own deadline.
+     */
+    private val requested = HashMap<Long, ArrayDeque<Pending>>()
+
+    private class Pending(val generation: Long, val url: String?)
 
     /** [tab]'s document now, for a request it makes. */
     fun requester(tab: Long?): Requester =
         if (tab == null) Requester(NO_TAB, 0) else lock.withLock { Requester(tab, generations[tab] ?: 0) }
 
     /**
-     * [tab]'s main-frame request reached the interceptor: requests from
-     * here on are the incoming document's. The page on screen keeps what
-     * it has queued or running until the navigation commits
-     * ([documentStarted]) — it may never (a download, a 204, Stop).
+     * [tab]'s main-frame request for [url] reached the interceptor:
+     * requests from here on are the incoming document's. The page on
+     * screen keeps what it has queued or running until the navigation
+     * commits ([documentStarted]) — it may never (a download, a 204, Stop).
      */
-    fun navigationRequested(tab: Long) = lock.withLock {
-        requested += tab
-        generations[tab] = (generations[tab] ?: 0) + 1
+    fun navigationRequested(tab: Long, url: String? = null) = lock.withLock {
+        val next = (generations[tab] ?: 0) + 1
+        generations[tab] = next
+        val pending = requested.getOrPut(tab) { ArrayDeque() }
+        pending.addLast(Pending(next, url?.let(::withoutFragment)))
+        while (pending.size > MAX_PENDING) pending.removeFirst()
     }
 
     /**
-     * [tab] committed a new document (UI thread); [gone]: its document is
-     * being torn down with no new one. What earlier documents still have
-     * queued or running is dropped. If the navigation's own request
-     * already started a new generation ([navigationRequested]), that
-     * generation is the committed document's; otherwise one starts now.
+     * [tab] committed a new document on [url] (UI thread); [gone]: its
+     * document is being torn down with no new one. What earlier documents
+     * still have queued or running is dropped. If a navigation's own
+     * request already started a generation for it ([navigationRequested];
+     * which one: see the class), that generation is the committed
+     * document's; otherwise one starts now.
      *
      * [blank]: the document is `about:blank`, which no request is made
-     * for, so it can't be the commit of the one [navigationRequested]
-     * saw: a new tab commits its blank page after the request for the
-     * address it was opened on has already reached the interceptor, and
-     * that address's own commit must still find it.
+     * for, so it can't be the commit of one [navigationRequested] saw: a
+     * new tab commits its blank page after the request for the address it
+     * was opened on has already reached the interceptor, and that
+     * address's own commit must still find it.
      */
-    fun documentStarted(tab: Long, gone: Boolean = false, blank: Boolean = false) = lock.withLock {
+    fun documentStarted(
+        tab: Long,
+        url: String? = null,
+        gone: Boolean = false,
+        blank: Boolean = false,
+    ) = lock.withLock {
+        val pending = requested[tab]
         when {
             gone -> {
                 requested.remove(tab)
                 advance(tab)
             }
-            blank && tab in requested -> cancel(tab, generations[tab] ?: 0)
-            requested.remove(tab) -> cancel(tab, generations[tab] ?: 0)
-            else -> advance(tab)
+            pending.isNullOrEmpty() -> advance(tab)
+            blank -> cancel(tab, pending.first().generation)
+            else -> {
+                val key = url?.let(::withoutFragment)
+                val claimed = pending.firstOrNull { key != null && it.url == key } ?: pending.first()
+                while (pending.first() !== claimed) pending.removeFirst()
+                pending.removeFirst()
+                if (pending.isEmpty()) requested.remove(tab)
+                cancel(tab, claimed.generation)
+            }
         }
     }
 
     /**
      * [tab] closed: everything it has queued or running is dropped, and
-     * a call its documents make later is refused. Its generations stay
-     * (two numbers per closed tab), so a request captured before the
-     * close stays out of date.
+     * any call it makes later is refused — one whose requester was
+     * captured after the close too (an interceptor call racing it). Its
+     * generations stay (two numbers per closed tab); tab ids aren't
+     * reused within a process.
      */
     fun tabClosed(tab: Long) = lock.withLock {
         requested.remove(tab)
         advance(tab)
+        droppedBelow[tab] = Long.MAX_VALUE
     }
 
     private fun advance(tab: Long) {
@@ -261,5 +297,10 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
     companion object {
         /** The requester of a call no tab made (the app's own reads, a service worker's). */
         const val NO_TAB = -1L
+
+        /** Main-frame requests a tab keeps waiting for their commit. */
+        private const val MAX_PENDING = 8
+
+        private fun withoutFragment(url: String): String = url.substringBefore('#')
     }
 }

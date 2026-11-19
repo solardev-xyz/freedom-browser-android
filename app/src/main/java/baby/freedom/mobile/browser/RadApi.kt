@@ -103,12 +103,14 @@ object RadApi {
      *
      * [tabId]: the tab asking, null for a service worker or a native
      * re-fetch. Every main-frame request of a tab — on any host — starts
-     * its next document for [RadicleClient]: the reads the page on screen
-     * still has queued or running are dropped (#533), and the incoming
-     * document's own reads, this one included, are its.
+     * its next document for [RadicleClient]: the incoming document's own
+     * reads, this one included, are its. The reads the page on screen
+     * still has queued or running are dropped only once that navigation
+     * commits (#533; [RadicleClient.documentStarted]), not here: it may
+     * never commit (a download, a 204, Stop).
      */
     internal fun intercept(request: WebResourceRequest, url: String, tabId: Long? = null): WebResourceResponse? {
-        if (tabId != null && request.isForMainFrame) RadicleClient.navigationRequested(tabId)
+        if (tabId != null && request.isForMainFrame) RadicleClient.navigationRequested(tabId, url)
         if (!RadUrl.isVirtualUrl(url) && !isUnderHost(url)) return null
         val reply = if (RadUrl.isVirtualUrl(url)) {
             val requester = RadicleClient.requesterFor(tabId)

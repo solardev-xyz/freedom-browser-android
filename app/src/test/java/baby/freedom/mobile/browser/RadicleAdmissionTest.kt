@@ -224,6 +224,83 @@ class RadicleAdmissionTest {
     }
 
     @Test
+    fun `a closed tab's call captured after the close is refused too`() {
+        // An interceptor call racing the close captures its requester late.
+        val adm = RadicleAdmission()
+        adm.tabClosed(tabA)
+        assertSame(Admit.Cancelled, adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.navigationRequested(tabA, "https://late.example/")
+        assertSame(Admit.Cancelled, adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        assertEquals(0 to 0, adm.stats())
+    }
+
+    @Test
+    fun `two navigations requested before either commits each keep their own reads`() {
+        // B's commit reaches the UI thread only after C's request (R1-F1).
+        val adm = RadicleAdmission()
+        val page = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.navigationRequested(tabA, "https://b.example/")
+        adm.navigationRequested(tabA, "https://c.example/")
+        adm.documentStarted(tabA, "https://b.example/")
+        assertTrue(page.cancelled)
+        val fromC = adm.requester(tabA)
+        val c = granted(adm.admit(fromC, write = false, waitMs = 1_000))
+        adm.documentStarted(tabA, "https://c.example/#top")
+        assertFalse(c.cancelled)
+        page.release()
+        granted(adm.admit(fromC, write = false, waitMs = 1_000)).release()
+        c.release()
+        // The next commit with nothing requested is a document of its own.
+        adm.documentStarted(tabA, "https://d.example/")
+        assertSame(Admit.Cancelled, adm.admit(fromC, write = false, waitMs = 1_000))
+    }
+
+    @Test
+    fun `redirected commits claim the requests in order`() {
+        // Neither commit is on the URL that was requested.
+        val adm = RadicleAdmission()
+        adm.navigationRequested(tabA, "http://b.example/")
+        adm.navigationRequested(tabA, "http://c.example/")
+        adm.documentStarted(tabA, "https://b.example/")
+        val c = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.documentStarted(tabA, "https://c.example/")
+        assertFalse(c.cancelled)
+        c.release()
+    }
+
+    @Test
+    fun `a commit no request was seen for doesn't drop a later request's reads`() {
+        // A history entry or a service worker's answer commits after the
+        // next navigation's request reached the interceptor.
+        val adm = RadicleAdmission()
+        val page = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.navigationRequested(tabA, "https://c.example/")
+        val c = granted(adm.admit(adm.requester(tabA), write = false, waitMs = 1_000))
+        adm.documentStarted(tabA, "https://back.example/")
+        assertTrue(page.cancelled)
+        assertFalse(c.cancelled)
+        adm.documentStarted(tabA, "https://other.example/")
+        assertTrue(c.cancelled)
+        page.release()
+        c.release()
+    }
+
+    @Test
+    fun `a commit on the URL of a superseded request drops it with the older`() {
+        // B is abandoned for C; C commits.
+        val adm = RadicleAdmission()
+        adm.navigationRequested(tabA, "https://b.example/")
+        val fromB = adm.requester(tabA)
+        adm.navigationRequested(tabA, "https://c.example/")
+        adm.documentStarted(tabA, "https://c.example/")
+        assertSame(Admit.Cancelled, adm.admit(fromB, write = false, waitMs = 1_000))
+        val c = adm.requester(tabA)
+        // Nothing is left pending: the next request-less commit is its own.
+        adm.documentStarted(tabA, "https://history.example/")
+        assertSame(Admit.Cancelled, adm.admit(c, write = false, waitMs = 1_000))
+    }
+
+    @Test
     fun `a torn-down document is dropped even after its navigation's request`() {
         val adm = RadicleAdmission()
         adm.navigationRequested(tabA)

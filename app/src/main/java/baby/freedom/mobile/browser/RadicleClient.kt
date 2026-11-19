@@ -103,6 +103,10 @@ object RadicleClient {
      * Its slots bound what this process waits for; `:node` bounds the
      * native calls themselves (`MAX_RADICLE_CALLS`), and skips one whose
      * reader gave up (a cancelled call's pipe is closed) before it starts.
+     * A native call already running can't be stopped: a cancelled one
+     * frees its slot here at once, but keeps its `:node` permit until it
+     * returns, so abandoned calls can still make another tab's admitted
+     * read wait in `:node` (as on main; desktop holds its own slot instead).
      */
     private val admission = RadicleAdmission()
 
@@ -120,12 +124,12 @@ object RadicleClient {
     internal fun requesterContext(requester: RadicleAdmission.Requester): CoroutineContext =
         currentRequester.asContextElement(requester)
 
-    /** [tab]'s main-frame request reached the interceptor (its thread). */
-    fun navigationRequested(tab: Long) = admission.navigationRequested(tab)
+    /** [tab]'s main-frame request for [url] reached the interceptor (its thread). */
+    fun navigationRequested(tab: Long, url: String) = admission.navigationRequested(tab, url)
 
     /** [tab] committed a document on [url]; null: it was torn down with none in its place. */
     fun documentStarted(tab: Long, url: String?) =
-        admission.documentStarted(tab, gone = url == null, blank = url == ABOUT_BLANK)
+        admission.documentStarted(tab, url, gone = url == null, blank = url == ABOUT_BLANK)
 
     /** [tab] closed. */
     fun tabClosed(tab: Long) = admission.tabClosed(tab)
