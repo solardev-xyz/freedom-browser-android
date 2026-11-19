@@ -93,9 +93,18 @@ class SwarmProviderTest {
 
     /** ant's gateway, in memory: chunks by address, SOCs checked, feeds resolved by walking indexes. */
     private class FakeNode : SwarmProvider.Http {
-        val requests = mutableListOf<Triple<String, String, Map<String, String>>>()
+        val requests: MutableList<Triple<String, String, Map<String, String>>> = java.util.Collections.synchronizedList(mutableListOf())
         val bodies = HashMap<String, ByteArray>()
         val chunks = HashMap<String, ByteArray>()
+        /** Whole blobs by root reference, as `GET /bytes` joins them. */
+        val blobs = HashMap<String, ByteArray>()
+        /** Each capped request's path and cap. */
+        val caps: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
+
+        override fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int, maxBytes: Int): SwarmProvider.Http.Answer {
+            caps += path to maxBytes
+            return super.request(method, path, headers, body, timeoutMs, maxBytes)
+        }
         var beeMode = "light"
         var stamps = JSONArray().put(
             JSONObject().put("batchID", "ab".repeat(32)).put("usable", true).put("depth", 20).put("bucketDepth", 16)
@@ -155,6 +164,8 @@ class SwarmProviderTest {
                     chunks[address.swarmHex()] = wire
                     json(JSONObject().put("reference", address.swarmHex()), 201)
                 }
+                method == "GET" && bare.startsWith("/bytes/") -> blobs[bare.removePrefix("/bytes/")]
+                    ?.let { SwarmProvider.Http.Answer(200, emptyMap(), it) } ?: notFound()
                 method == "GET" && bare.startsWith("/chunks/") -> chunks[bare.removePrefix("/chunks/")]
                     ?.let { SwarmProvider.Http.Answer(200, emptyMap(), it) } ?: notFound()
                 method == "GET" && bare.startsWith("/feeds/") && feedsNotReady -> json(
@@ -505,6 +516,125 @@ class SwarmProviderTest {
         now += SwarmProvider.BUDGET_WINDOW_MS
         ok(call("swarm_listFeeds"))
         assertEquals(1, provider.budgetOrigins())
+    }
+
+    // -------------------------------------------------------------------
+    // Feed reads against the read budget (#532)
+    // -------------------------------------------------------------------
+
+    private val entryKey = ByteArray(32) { 0x33 }
+    private val entryTopic = ByteArray(32) { 5 }
+
+    /**
+     * A feed entry at [index] whose wrapped chunk has [span]: [data] itself
+     * when it fits one chunk, else a root standing in for a [data]-sized
+     * tree that the node joins from [FakeNode.blobs].
+     */
+    private fun plantEntry(index: Long, data: ByteArray, span: ULong = data.size.toULong()) {
+        val cac = if (span <= 4096u) SwarmChunks.cac(data, span) else SwarmChunks.cac(data.copyOf(4096), span)
+        if (span > 4096u) node.blobs[cac.address.swarmHex()] = data
+        val identifier = SwarmChunks.feedIdentifier(entryTopic, index)
+        val soc = SwarmChunks.sign(identifier, cac, entryKey)
+        node.chunks[soc.address.swarmHex()] = identifier + soc.signature + soc.cac.data()
+    }
+
+    private fun entryParams(index: Long? = 0) = JSONObject().put("topic", entryTopic.swarmHex()).put("owner", PublisherKeys.address(entryKey))
+        .apply { if (index != null) put("index", index) }
+
+    private fun joins() = node.requests.count { it.first == "GET" && it.second.startsWith("/bytes/") }
+
+    @Test
+    fun `a feed entry larger than the byte budget is data_too_large before the node joins it`() {
+        val big = ByteArray(1024 * 1024) { it.toByte() }
+        plantEntry(0, big)
+        val e = err(call("swarm_readFeedEntry", entryParams(), origin = other))
+        assertEquals(-32602, e.code)
+        assertEquals("data_too_large", e.reason)
+        assertEquals(512 * 1024, e.data!!.getInt("limit"))
+        assertEquals(1024 * 1024, e.data!!.getInt("actual"))
+        assertEquals("never asked for", 0, joins())
+        // The latest entry is the same read.
+        assertEquals("data_too_large", err(call("swarm_readFeedEntry", entryParams(index = null), origin = other)).reason)
+        assertEquals(0, joins())
+
+        // A connected site's budget fits it: the join is asked for, held to the entry's size.
+        connect(other)
+        val read = okJson(call("swarm_readFeedEntry", entryParams(), origin = other))
+        assertArrayEquals(big, Base64.getDecoder().decode(read.getString("data")))
+        assertEquals(1, joins())
+        assertEquals(1024 * 1024, node.caps.single().second)
+    }
+
+    @Test
+    fun `a feed read reserves its size first, so a second one that doesn't fit never reaches the node`() {
+        plantEntry(0, ByteArray(300 * 1024) { 1 })
+        ok(call("swarm_readFeedEntry", entryParams(), origin = other))
+        val e = err(call("swarm_readFeedEntry", entryParams(), origin = other))
+        assertEquals("rate_limited", e.reason)
+        assertEquals(512 * 1024, e.data!!.getInt("maxBytes"))
+        assertEquals("only the first read was joined", 1, joins())
+        now += SwarmProvider.BUDGET_WINDOW_MS
+        ok(call("swarm_readFeedEntry", entryParams(), origin = other))
+        assertEquals(2, joins())
+    }
+
+    @Test
+    fun `parallel feed reads can't together pass the byte budget`() = runBlocking {
+        plantEntry(0, ByteArray(200 * 1024) { 2 })
+        val release = java.util.concurrent.CountDownLatch(1)
+        val arrived = java.util.concurrent.atomic.AtomicInteger()
+        val finished = java.util.concurrent.atomic.AtomicInteger()
+        // Every join is held until all the reads have either reached the node or been refused.
+        node.onRequest = { _, path ->
+            if (path.startsWith("/bytes/")) {
+                arrived.incrementAndGet()
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }
+        val reads = (1..8).map {
+            async(Dispatchers.IO) {
+                provider.request(other, "swarm_readFeedEntry", entryParams()) { SwarmProvider.Answer.REJECTED }
+                    .also { finished.incrementAndGet() }
+            }
+        }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (arrived.get() + finished.get() < 8 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertEquals("two 200 KiB entries fit a 512 KiB window, a third doesn't", 2, arrived.get())
+        release.countDown()
+        val replies = reads.map { it.await() }
+        assertEquals(2, replies.count { it is SwarmProvider.Reply.Ok })
+        assertEquals(6, replies.count { (it as? SwarmProvider.Reply.Err)?.reason == "rate_limited" })
+        assertEquals(2, joins())
+    }
+
+    @Test
+    fun `a one-chunk feed entry is held to its span`() {
+        plantEntry(0, ByteArray(4096) { 7 }, span = 1u)
+        assertArrayEquals(byteArrayOf(7), Base64.getDecoder().decode(okJson(call("swarm_readFeedEntry", entryParams(), origin = other)).getString("data")))
+        plantEntry(1, ByteArray(10) { 7 }, span = 100u)
+        val short = err(call("swarm_readFeedEntry", entryParams(1), origin = other))
+        assertEquals(-32603, short.code)
+        assertTrue(short.message, short.message.contains("10 bytes for a 100-byte feed entry"))
+        assertEquals("neither asks for a join", 0, joins())
+    }
+
+    @Test
+    fun `a join longer or shorter than the entry's span is refused`() {
+        plantEntry(0, ByteArray(8000) { 3 })
+        node.blobs[node.blobs.keys.single()] = ByteArray(8001)
+        val long = err(call("swarm_readFeedEntry", entryParams(), origin = other))
+        assertEquals(-32603, long.code)
+        assertTrue(long.message, long.message.contains("more than 8000 bytes"))
+        node.blobs[node.blobs.keys.single()] = ByteArray(7999)
+        val short = err(call("swarm_readFeedEntry", entryParams(), origin = other))
+        assertTrue(short.message, short.message.contains("7999 bytes for a 8000-byte feed entry"))
+    }
+
+    @Test
+    fun `an entry's size is its span with the redundancy level cleared`() {
+        assertEquals(5000uL, SwarmProvider.dataSize(5000uL))
+        assertEquals(5000uL, SwarmProvider.dataSize((0x81uL shl 56) or 5000uL))
+        assertEquals((0x80uL shl 56) or 5000uL, SwarmProvider.dataSize((0x80uL shl 56) or 5000uL))
     }
 
     // -------------------------------------------------------------------
