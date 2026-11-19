@@ -861,6 +861,38 @@ class SwarmProviderTest {
         assertEquals(2, joins())
     }
 
+    @Test
+    fun `no more than MAX_CONCURRENT_JOINS joins hold an IO thread at once, and the rest wait their turn`() = runBlocking {
+        // Just over one chunk: each reserves only a few KiB, so the budget alone wouldn't bound them.
+        val ref = plantBlob(ByteArray(4097) { 5 })
+        val cap = SwarmProvider.MAX_CONCURRENT_JOINS
+        val release = java.util.concurrent.CountDownLatch(1)
+        val inJoin = java.util.concurrent.atomic.AtomicInteger()
+        val most = java.util.concurrent.atomic.AtomicInteger()
+        node.onRequest = { _, path ->
+            if (path.startsWith("/bytes/")) {
+                most.accumulateAndGet(inJoin.incrementAndGet(), ::maxOf)
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                inJoin.decrementAndGet()
+            }
+        }
+        val count = cap + 12
+        val reads = (1..count).map {
+            async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        }
+        val deadline = System.currentTimeMillis() + 5_000
+        while (inJoin.get() < cap && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        Thread.sleep(200)
+        assertEquals("the rest wait for a slot, holding no thread", cap, inJoin.get())
+        release.countDown()
+        val replies = reads.map { it.await() }
+        assertEquals("every queued read still joins once a slot frees", count, replies.count { it is SwarmProvider.Reply.Ok })
+        assertEquals(cap, most.get())
+        assertEquals(count, joins())
+        // A join that waited for its slot still answers inside the 290 s budget.
+        assertTrue(node.capTimeouts.all { it.second + 10_000 <= 290_000 })
+    }
+
     // -------------------------------------------------------------------
     // Feeds and signing
     // -------------------------------------------------------------------

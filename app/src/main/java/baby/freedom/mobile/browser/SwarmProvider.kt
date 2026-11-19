@@ -15,8 +15,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -241,6 +243,15 @@ class SwarmProvider(
 
     /** How many origins have a read budget running: for tests. */
     internal fun budgetOrigins(): Int = synchronized(budgets) { budgets.size }
+
+    /**
+     * `swarm_readData` joins running at once, across every page. A join
+     * blocks an [io] thread for as long as bee holds `/bytes` open (up to
+     * ~280 s), so without this a page's burst of small-blob reads could
+     * tie up the shared IO pool for the whole app; a read past the cap
+     * waits here, suspended, holding no thread.
+     */
+    private val joins = Semaphore(MAX_CONCURRENT_JOINS)
 
     /** Upload tag → the origin that made it: nobody else may read its progress. Session only. */
     private val tagOwners = ConcurrentHashMap<Long, String>()
@@ -1113,7 +1124,10 @@ class SwarmProvider(
      * join has no deadline of its own on desktop beyond the page's 300 s;
      * here it gets what is left of [DATA_READ_DEADLINE_MS] less the
      * [PREFLIGHT_TIMEOUT_MS] re-probe a cut-short join may still need, so the
-     * page still gets a real answer before its own timer gives up.
+     * page still gets a real answer before its own timer gives up. At most
+     * [MAX_CONCURRENT_JOINS] joins run at once across all pages ([joins]);
+     * a read past that waits, suspended, for a slot within the same
+     * deadline, and is -32603 if none frees in time.
      */
     private suspend fun readData(origin: String, params: JSONObject): Reply {
         val started = System.nanoTime()
@@ -1146,12 +1160,16 @@ class SwarmProvider(
             if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
             // Room is kept for [cutShort]'s `GET /node`, so a join cut at its
             // deadline still answers inside [DATA_READ_DEADLINE_MS].
-            val left = DATA_READ_DEADLINE_MS - PREFLIGHT_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000
+            fun left() = DATA_READ_DEADLINE_MS - PREFLIGHT_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000
+            // A free join slot ([joins]) is waited for within the same
+            // deadline; the join then gets whatever is left of it.
+            withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) { joins.acquire() }
+                ?: return Reply.Err(INTERNAL, "Data can't be read: too many Swarm reads are in progress. Try again.")
             val answer = try {
                 withContext(io) {
                     node.request(
                         "GET", "/bytes/${reference.swarmHex()}", emptyMap(), null,
-                        left.coerceAtLeast(READ_TIMEOUT_MS.toLong()).toInt(), maxBytes = expected,
+                        left().coerceAtLeast(MIN_JOIN_MS).toInt(), maxBytes = expected,
                     )
                 }
             } catch (e: Http.AnswerTooLarge) {
@@ -1160,6 +1178,10 @@ class SwarmProvider(
                 // bee has sent its 200 and the length, then hit a chunk it
                 // can't retrieve — or was stopped part-way through.
                 return cutShort("Data can't be read: the node's answer broke off before the $expected-byte blob was complete")
+            } finally {
+                // withContext waits for the blocking call even when cancelled,
+                // so the slot is free only once its IO thread is.
+                joins.release()
             }
             // As [chunk]: bee says "read chunk failed" with a 500 for a chunk it can't find.
             if (answer.status == 404 || (answer.status == 500 && answer.message().trim().equals("read chunk failed", ignoreCase = true))) {
@@ -1633,6 +1655,12 @@ class SwarmProvider(
          * a cut-short join, the `GET /node` re-probe.
          */
         private const val DATA_READ_DEADLINE_MS = 290_000L
+
+        /** [joins]: at most this many `swarm_readData` joins hold an IO thread at once. */
+        internal const val MAX_CONCURRENT_JOINS = 8
+
+        /** The least a join is started with once it has its slot. */
+        private const val MIN_JOIN_MS = 5_000L
         private const val UPLOAD_TIMEOUT_MS = 5 * 60_000
 
         private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
