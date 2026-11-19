@@ -108,6 +108,25 @@ internal object SwarmChunks {
         return Soc(identifier, signature, owner, cac)
     }
 
+    /**
+     * A SOC someone else signed (`swarm_publishSingleOwnerChunk`, desktop
+     * #647), rebuilt from its parts: [cac] at [identifier], [signature]
+     * by [owner] over the same digest [sign] makes. Null unless the
+     * signature recovers to exactly [owner]. The recovery byte must be 27
+     * or 28: bee reads anything else as one of those and could recover a
+     * different owner from a 0/1-style byte than the one checked here.
+     */
+    fun verifySigned(identifier: ByteArray, signature: ByteArray, owner: ByteArray, cac: Cac): Soc? {
+        if (identifier.size != 32 || signature.size != 65 || owner.size != 20) return null
+        val v = signature[64].toInt() and 0xff
+        if (v != 27 && v != 28) return null
+        val digest = MessageSigning.personalDigest(Keccak256.digest(identifier + cac.address))
+        val recovered = Secp256k1.recover(digest, "0x" + signature.swarmHex())?.removePrefix("0x")?.hexToBytesOrNull()
+            ?: return null
+        if (!recovered.contentEquals(owner)) return null
+        return Soc(identifier.copyOf(), signature.copyOf(), owner.copyOf(), cac)
+    }
+
     /** A sequence feed's identifier for [index]: `keccak256(topic ‖ index as 8 bytes big-endian)`. */
     fun feedIdentifier(topic: ByteArray, index: Long): ByteArray {
         require(topic.size == 32) { "topic must be 32 bytes" }

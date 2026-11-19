@@ -11,10 +11,15 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import baby.freedom.mobile.data.SwarmFeedStore
 import baby.freedom.mobile.data.SwarmGrantStore
+import baby.freedom.mobile.wallet.KeystoreVaultStore
+import baby.freedom.mobile.wallet.NodeIdentityStore
 import baby.freedom.mobile.wallet.PublisherIdentity
 import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.PublisherKeys
 import baby.freedom.mobile.wallet.Vault
+import baby.freedom.mobile.wallet.VaultLockedException
+import baby.freedom.mobile.wallet.WalletAccountStore
+import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.swarm.SwarmNode
 import java.io.File
 import java.io.IOException
@@ -235,6 +240,7 @@ object SwarmProviders {
                 override fun signingKey(identity: PublisherIdentity) = PublisherKeys.signingKey(vault, identity)
                 override fun lockCount() = vault.lockCount()
                 override fun noteActivity() = vault.noteActivity()
+                override fun ownAddresses() = ownAddresses(app, vault)
             },
             node = GatewayHttp,
             subscriptions = SwarmSubscriptions({ kind, key, onMessage ->
@@ -251,6 +257,40 @@ object SwarmProviders {
             scope.launch { emit(origin, event, data) }
         }
         provider = p
+    }
+
+    /**
+     * [SwarmProvider.Publishers.ownAddresses] on this device: the
+     * wallet's accounts (the list kept for the switcher, public and
+     * readable while locked) and the Ant wallet key derived from it
+     * (from the seed when the wallet is open, else the node keys kept
+     * for booting the node). No wallet: none — the node's own running
+     * key is asked for separately. Either missing while a wallet exists
+     * leaves the answer incomplete.
+     */
+    private fun ownAddresses(app: Context, vault: Vault): SwarmProvider.OwnAddresses {
+        if (vault.state.value == Vault.State.Empty) return SwarmProvider.OwnAddresses(emptySet(), complete = true)
+        fun bare(address: String) = address.removePrefix("0x").lowercase()
+        val addresses = HashSet<String>()
+        var complete = true
+        val accounts = WalletAccounts.get(app).accounts.value
+            ?: vault.identityTag()?.let { WalletAccountStore.get(app).read(it) }
+        if (accounts == null) complete = false else accounts.accounts.forEach { addresses += bare(it.address) }
+        val ant = try {
+            val key = PublisherKeys.signingKey(vault, PublisherIdentity.antWallet())
+            try {
+                PublisherKeys.address(key)
+            } finally {
+                key.fill(0)
+            }
+        } catch (e: VaultLockedException) {
+            NodeIdentityStore.get(app).boot(KeystoreVaultStore(app))?.let { boot ->
+                boot.antIdentity.fill(0)
+                boot.swarmAddress
+            }
+        }
+        if (ant == null) complete = false else addresses += bare(ant)
+        return SwarmProvider.OwnAddresses(addresses, complete)
     }
 
     /**
@@ -871,7 +911,7 @@ object SwarmProviders {
     internal val MANIFEST_GATED: Set<String> = setOf(
         "swarm_requestAccess",
         "swarm_getUploadStatus",
-        "swarm_publishData", "swarm_publishFiles", "swarm_publishChunk",
+        "swarm_publishData", "swarm_publishFiles", "swarm_publishChunk", "swarm_publishSingleOwnerChunk",
         "swarm_createFeed", "swarm_updateFeed", "swarm_writeFeedEntry",
         "swarm_writeSingleOwnerChunk", "swarm_getSigningIdentity",
         "swarm_getMessagingIdentity", "swarm_sendPss", "swarm_sendGsoc", "swarm_subscribe",
@@ -1381,7 +1421,7 @@ internal fun swarmProviderJs(channel: String): String {
     for (var j = 0; j < ks.length; j++) v[ks[j]] = decode(v[ks[j]]);
     return v;
   }
-  var LONG = { swarm_publishData: 1, swarm_publishFiles: 1, swarm_publishChunk: 1, swarm_createFeed: 1,
+  var LONG = { swarm_publishData: 1, swarm_publishFiles: 1, swarm_publishChunk: 1, swarm_publishSingleOwnerChunk: 1, swarm_createFeed: 1,
     swarm_updateFeed: 1, swarm_writeFeedEntry: 1, swarm_writeSingleOwnerChunk: 1, swarm_getSigningIdentity: 1,
     swarm_requestAccess: 1, swarm_sendPss: 1, swarm_sendGsoc: 1, swarm_getMessagingIdentity: 1,
     swarm_subscribe: 1, swarm_readData: 1 };
@@ -1469,6 +1509,7 @@ internal fun swarmProviderJs(channel: String): String {
     readChunk: method('swarm_readChunk'),
     readData: method('swarm_readData'),
     writeSingleOwnerChunk: method('swarm_writeSingleOwnerChunk'),
+    publishSingleOwnerChunk: method('swarm_publishSingleOwnerChunk'),
     readSingleOwnerChunk: method('swarm_readSingleOwnerChunk'),
     getSigningIdentity: method('swarm_getSigningIdentity'),
     getMessagingIdentity: method('swarm_getMessagingIdentity'),

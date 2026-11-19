@@ -101,6 +101,28 @@ class SwarmChunksTest {
     }
 
     @Test
+    fun `a page-signed SOC verifies only under its own owner, with a 27 or 28 recovery byte`() {
+        val key = hex("5a".repeat(32))
+        val identifier = hex("cd".repeat(32))
+        val cac = SwarmChunks.cac("hello".toByteArray())
+        val signed = SwarmChunks.sign(identifier, cac, key)
+        val soc = SwarmChunks.verifySigned(identifier, signed.signature, signed.owner, cac)
+        assertNotNull(soc)
+        assertArrayEquals(signed.address, soc!!.address)
+        // Each part the signature covers, changed: no longer the owner's.
+        assertNull(SwarmChunks.verifySigned(hex("ce".repeat(32)), signed.signature, signed.owner, cac))
+        assertNull(SwarmChunks.verifySigned(identifier, signed.signature, signed.owner, SwarmChunks.cac("hellp".toByteArray())))
+        assertNull(SwarmChunks.verifySigned(identifier, signed.signature, signed.owner, SwarmChunks.cac("hello".toByteArray(), 6uL)))
+        val other = PublisherKeys.address(hex("5b".repeat(32))).removePrefix("0x")
+        assertNull(SwarmChunks.verifySigned(identifier, signed.signature, hex(other), cac))
+        // The same signature with a 0/1 or junk recovery byte, and a short one.
+        for (v in listOf(0, 1, 29, 255)) {
+            assertNull("v=$v", SwarmChunks.verifySigned(identifier, signed.signature.copyOf().also { it[64] = v.toByte() }, signed.owner, cac))
+        }
+        assertNull(SwarmChunks.verifySigned(identifier, signed.signature.copyOf(64), signed.owner, cac))
+    }
+
+    @Test
     fun `a CAC read back must hash to the reference asked for`() {
         val cac = SwarmChunks.cac("abc".toByteArray())
         assertNotNull(SwarmChunks.parseCac(cac.address, cac.data()))

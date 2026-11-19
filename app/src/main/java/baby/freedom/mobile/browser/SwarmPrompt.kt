@@ -168,6 +168,7 @@ internal fun swarmShownTopic(topic: String): String = buildString {
 internal fun swarmPublishWhat(ask: SwarmAsk.Publish): String = when (ask.kind) {
     SwarmAsk.Publish.Kind.Files -> Strings.plural(R.plurals.swarm_publish_files, ask.paths.size, ask.paths.size)
     SwarmAsk.Publish.Kind.Chunk -> Strings.get(R.string.swarm_publish_chunk)
+    SwarmAsk.Publish.Kind.SignedSoc -> Strings.get(R.string.swarm_publish_signed_soc)
     SwarmAsk.Publish.Kind.Data -> ask.contentType?.let(::swarmShownTopic) ?: Strings.get(R.string.swarm_publish_data)
 }
 
@@ -334,6 +335,8 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size))
                         ask.name?.let { DetailRow(stringResource(R.string.swarm_detail_name), swarmShownTopic(it)) }
                         if (ask.kind == SwarmAsk.Publish.Kind.Files) DetailRow(stringResource(R.string.swarm_detail_files), swarmPathsPreview(ask.paths), mono = true)
+                        // The page's own key signed it; Freedom signs nothing (desktop #647).
+                        ask.owner?.let { DetailRow(stringResource(R.string.swarm_detail_signed_by), it, mono = true) }
                     }
                     is SwarmAsk.Sign -> {
                         if (ask.kind == SwarmProvider.AutoApprove.Signing) {

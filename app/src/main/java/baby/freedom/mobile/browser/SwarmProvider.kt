@@ -42,7 +42,10 @@ import org.json.JSONObject
  *    `swarm_getUploadStatus`, and the publish methods below.
  *  - publish (a sheet per upload, unless the user ticked "always allow"
  *    for the site): `swarm_publishData`, `swarm_publishFiles`,
- *    `swarm_publishChunk`. Uploads spend the node's postage stamps.
+ *    `swarm_publishChunk`, and `swarm_publishSingleOwnerChunk` (a SOC the
+ *    page signed with its own key, desktop #647: no Freedom key signs,
+ *    and one owned by the node or a wallet account is refused). Uploads
+ *    spend the node's postage stamps.
  *  - feeds / signing (a sheet the first time, which grants the site
  *    feed access; then one per call unless "always allow" was ticked for
  *    that kind): `swarm_createFeed`, `swarm_updateFeed`,
@@ -155,7 +158,27 @@ class SwarmProvider(
          * rewriting the same SOC can reuse its stamp slot.
          */
         fun noteActivity()
+
+        /**
+         * The addresses this device's own keys sign as, outside the
+         * node's running key (which [SwarmProvider] asks the node for):
+         * every wallet account, Ledger ones too, and the Ant wallet key
+         * derived from the wallet. A page must not publish a SOC owned by
+         * one of these (`swarm_publishSingleOwnerChunk`): it can get a
+         * wallet account's `personal_sign` of 32 bytes, which is exactly
+         * a SOC signature. Never reads a key a user must unlock for and
+         * never counts as wallet activity. Throws if it can't be read.
+         */
+        fun ownAddresses(): OwnAddresses
     }
+
+    /**
+     * [Publishers.ownAddresses]: 40 lower-case hex digits each, no `0x`.
+     * [complete] is false when one of them can't be known now (a locked
+     * wallet whose account list or Ant wallet key isn't on hand): the
+     * owner check then fails closed.
+     */
+    class OwnAddresses(val addresses: Set<String>, val complete: Boolean)
 
     /** The node's bee-shaped HTTP API. [request] blocks and throws [IOException] if the node can't be reached. */
     fun interface Http {
@@ -344,6 +367,7 @@ class SwarmProvider(
                     "swarm_publishData" -> publishData(origin, params, calls)
                     "swarm_publishFiles" -> publishFiles(origin, params, calls)
                     "swarm_publishChunk" -> publishChunk(origin, params, calls)
+                    "swarm_publishSingleOwnerChunk" -> publishSignedSoc(origin, params, calls)
                     "swarm_getUploadStatus" -> uploadStatus(origin, params)
                     "swarm_createFeed", "swarm_updateFeed", "swarm_writeFeedEntry",
                     "swarm_writeSingleOwnerChunk", "swarm_getSigningIdentity",
@@ -386,7 +410,8 @@ class SwarmProvider(
             .put("reason", if (!connected) "not-connected" else preflight ?: JSONObject.NULL)
             .put("publisherIdentityModes", JSONArray(listOf("app-scoped", "bee-wallet")))
             .put("features", JSONArray(listOf("messaging")))
-            .put("extensions", JSONObject().put("publisherSigning", true))
+            // pageSignedSingleOwnerChunks: swarm_publishSingleOwnerChunk (desktop #647).
+            .put("extensions", JSONObject().put("publisherSigning", true).put("pageSignedSingleOwnerChunks", true))
             .put(
                 "limits",
                 JSONObject()
@@ -495,6 +520,88 @@ class SwarmProvider(
         if (!answer.ok) throw Invalid(Reply.Err(INTERNAL, "Chunk upload failed: ${answer.message()}"))
         publishers.noteActivity()
         return Reply.Ok(JSONObject().put("reference", cac.address.swarmHex()))
+    }
+
+    /**
+     * desktop's `swarm_publishSingleOwnerChunk` (#647): a SOC the page
+     * signed with its own key, stamped by the node. Publish tier, like
+     * `swarm_publishChunk`: no Freedom key signs, so no feed access or
+     * signing grant is needed. The signature must recover to `owner` for
+     * this identifier and chunk, and `owner` must not be one of this
+     * device's own identities ([ownerCheck]), before anyone is asked; the
+     * bytes that verified are the ones uploaded.
+     *
+     * Unlike desktop, the signature is checked before the owner: with
+     * the owner check first, any connected site could ask, sheet-free,
+     * whether an address it names is one of the user's.
+     */
+    private suspend fun publishSignedSoc(origin: String, params: JSONObject, calls: Calls): Reply {
+        emptyOptions(params)
+        val owner = ownerParam(params.opt("owner"))
+        val identifier = hex32(params.opt("identifier"), "invalid_identifier", "identifier")
+        val signature = (params.opt("signature") as? String)?.removePrefix("0x")?.takeIf { HEX130.matches(it) }
+            ?.hexToBytesOrNull() ?: fail("signature must be a 130-character hex string", "invalid_signature")
+        val payload = chunkPayload(params.opt("data"))
+        val span = span(params.opt("span"))
+        val soc = SwarmChunks.verifySigned(identifier, signature, owner, SwarmChunks.cac(payload, span))
+            ?: fail("The signature does not recover to owner for this identifier and chunk", "invalid_signature")
+        preflightOrFail()
+        ownerCheck(soc.owner)
+        approvePublish(
+            origin, calls,
+            SwarmAsk.Publish(
+                origin, SwarmAsk.Publish.Kind.SignedSoc, payload.size.toLong(), null, null, emptyList(),
+                owner = SwarmChunks.checksum(soc.owner),
+            ),
+        )
+        // Again after the sheet: a wallet or an account may have come since it went up.
+        ownerCheck(soc.owner)
+        val batch = batchFor(SwarmChunks.MAX_PAYLOAD.toLong())
+        uploadSoc(soc, batch)
+        publishers.noteActivity()
+        return Reply.Ok(
+            JSONObject()
+                .put("reference", soc.address.swarmHex())
+                .put("owner", SwarmChunks.checksum(soc.owner))
+                .put("identifier", identifier.swarmHex()),
+        )
+    }
+
+    /**
+     * Refuses an [owner] that is one of this device's own identities:
+     * the node's running key (`/addresses`) or one of
+     * [Publishers.ownAddresses]. Fails closed when they can't all be told.
+     */
+    private suspend fun ownerCheck(owner: ByteArray) {
+        val hex = owner.swarmHex()
+        val held = try {
+            withContext(io) {
+                val own = publishers.ownAddresses()
+                val answer = node.request("GET", "/addresses", emptyMap(), null, PREFLIGHT_TIMEOUT_MS)
+                val nodeKey = answer.takeIf { it.ok }?.json()?.optString("ethereum")?.removePrefix("0x")?.lowercase()
+                    ?.takeIf { HEX40.matches(it) }
+                    ?: throw IOException("the node didn't say its address")
+                OwnAddresses(own.addresses + nodeKey, own.complete)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw Invalid(Reply.Err(INTERNAL, "Could not check the owner against Freedom identities"))
+        }
+        if (hex in held.addresses) {
+            throw Invalid(
+                Reply.Err(
+                    UNAUTHORIZED,
+                    "The owner is one of Freedom's own identities; use swarm_writeSingleOwnerChunk or a feed method",
+                    reason("freedom_identity"),
+                ),
+            )
+        }
+        if (!held.complete) {
+            throw Invalid(
+                Reply.Err(INTERNAL, "The wallet is locked: an account address is not known until it's unlocked", reason("vault_locked")),
+            )
+        }
     }
 
     private suspend fun uploadStatus(origin: String, params: JSONObject): Reply {
@@ -1754,6 +1861,7 @@ class SwarmProvider(
 
         private val HEX64 = Regex("^[0-9a-fA-F]{64}$")
         private val HEX40 = Regex("^[0-9a-fA-F]{40}$")
+        private val HEX130 = Regex("^[0-9a-fA-F]{130}$")
         private val COMPRESSED_KEY = Regex("^0[23][0-9a-fA-F]{64}$")
         private val EVEN_HEX = Regex("^([0-9a-fA-F]{2})+$")
 
@@ -1793,6 +1901,7 @@ class SwarmProvider(
             "swarm_readChunk",
             "swarm_readData",
             "swarm_writeSingleOwnerChunk",
+            "swarm_publishSingleOwnerChunk",
             "swarm_readSingleOwnerChunk",
             "swarm_getSigningIdentity",
             "swarm_getMessagingIdentity",
@@ -1975,8 +2084,10 @@ sealed interface SwarmAsk {
         val contentType: String?,
         val name: String?,
         val paths: List<String>,
+        /** A [Kind.SignedSoc]'s signer (EIP-55): the page's key, never Freedom's. */
+        val owner: String? = null,
     ) : SwarmAsk {
-        enum class Kind { Data, Files, Chunk }
+        enum class Kind { Data, Files, Chunk, SignedSoc }
     }
 
     /**
