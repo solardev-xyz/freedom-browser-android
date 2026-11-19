@@ -317,6 +317,13 @@ class GatewaysTest {
         assertEquals("http://127.0.0.1:1633/bzz/zz/", Gateways.probeUrlFor("bzz://zz"))
         assertEquals("http://127.0.0.1:1633/bzz/zz/", Gateways.probeUrlFor("bzz://zz/docs/index.html"))
         assertNull(Gateways.probeUrlFor("https://example.com/"))
+        // With nothing to probe and no virtual origin to refuse it in place,
+        // the submit flow shows the path-refused page, not "not ready yet,
+        // try again" (R4-F1): these never map to a virtual origin.
+        listOf("bzz://$ref64%2f..%2f..%2fstamps", "bzz://zz/a%2Fb", "bzz://zz/../../stamps").forEach {
+            assertNull(it, Gateways.probeUrlFor(it))
+            assertFalse(it, VirtualOrigin.isVirtualUrl(Gateways.toLoadable(it)))
+        }
         // Every answer stays beneath its root as sent.
         listOf("bzz://$ref64", "ipfs://bafy/x", "ipns://docs.eth", "bzz://zz").forEach { uri ->
             val probe = Gateways.probeUrlFor(uri)!!

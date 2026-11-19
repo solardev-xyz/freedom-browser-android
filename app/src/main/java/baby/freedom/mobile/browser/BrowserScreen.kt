@@ -1205,7 +1205,9 @@ fun BrowserScreen(
             // Nothing to probe. A virtual origin's load reaches the
             // interceptor, which refuses it in place with its reason;
             // anything else would load the gateway URL itself, so it
-            // doesn't load at all.
+            // doesn't load at all, and the page says why: the path
+            // leaves the content root, which no retry changes — not the
+            // "not ready yet, try again" page.
             if (VirtualOrigin.isVirtualUrl(Gateways.toLoadable(loadUri))) {
                 target.loadUrl(
                     loadUri,
@@ -1214,7 +1216,7 @@ fun BrowserScreen(
                     bypassCache = bypassCache,
                 )
             } else {
-                showError("swarm_content_not_found")
+                showError(ErrorPage.DWEB_PATH_REFUSED)
             }
             return
         }
