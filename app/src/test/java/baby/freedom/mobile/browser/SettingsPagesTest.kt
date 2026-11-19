@@ -219,8 +219,8 @@ class SettingsPagesTest {
         assertEquals("2 of 4 blocklists on", adblockPageSummary(2, 4, 0))
         assertEquals("Locked · 1 chain", walletPageSummary("Locked", 1))
         assertEquals("Locked · 3 chains", walletPageSummary("Locked", 3))
-        assertEquals("Colibri proofs on · 5 RPC endpoints", namesPageSummary(true, 5))
-        assertEquals("Colibri proofs off · 1 RPC endpoint", namesPageSummary(false, 1))
+        assertEquals("5 RPC endpoints · Colibri chain-read proofs on", namesPageSummary(true, 5))
+        assertEquals("1 RPC endpoint · Colibri chain-read proofs off", namesPageSummary(false, 1))
         assertEquals(
             "Swarm: embedded · IPFS: external · Radicle: Off",
             nodesPageSummary("", "https://gw.example", "Off"),
