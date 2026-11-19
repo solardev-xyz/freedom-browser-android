@@ -108,6 +108,18 @@ class EnsColibriTest {
 
     private val success = JSONObject().put("status", "success").put("result", "0xabcd")
 
+    /** The core's final status and the provers it came from. */
+    private data class Proven(val status: JSONObject, val provers: List<String>)
+
+    /** A mainnet `eth_call`, as the chain-data router asks one (#329). */
+    private suspend fun EnsColibri.ethCall(to: String, data: ByteArray, ethRpcs: List<String>): Proven {
+        val params = JSONArray()
+            .put(JSONObject().put("to", to).put("data", "0x" + data.joinToString("") { "%02x".format(it) }))
+            .put("latest")
+        val (status, provers) = request(1, "eth_call", params, ethRpcs)
+        return Proven(status, provers)
+    }
+
     private fun call(colibri: EnsColibri) = runBlocking {
         colibri.ethCall("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe", byteArrayOf(1, 2), rpcs)
     }
@@ -128,7 +140,7 @@ class EnsColibriTest {
 
         val proven = call(EnsColibri(engine, http, clock = { 1_000_000_000L }))
 
-        assertEquals(EnsColibri.Outcome.Returned("0xabcd"), proven.outcome)
+        assertEquals("0xabcd", proven.status.getString("result"))
         assertEquals(listOf("mainnet1.colibri-proof.tech"), proven.provers)
         // The call itself, as the core was given it.
         val (method, params) = engine.created.single()
@@ -276,7 +288,8 @@ class EnsColibriTest {
 
         val proven = call(EnsColibri(engine, ScriptHttp { ok("") }))
 
-        assertEquals(EnsColibri.Outcome.Reverted("0x77209fe8"), proven.outcome)
+        assertEquals("revert", proven.status.getString("status"))
+        assertEquals("0x77209fe8", proven.status.getString("data"))
         assertEquals(listOf(42L), engine.freed)
     }
 

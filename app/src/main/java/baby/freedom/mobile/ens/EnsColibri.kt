@@ -26,21 +26,21 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * One `eth_call` on Ethereum mainnet, proven (#100) — or, for the
- * chain-data router ([request], #329), any read the core can prove on
- * Ethereum or Gnosis: corpus.core's Colibri
- * stateless verifier ([ColibriNative]) checks the answer against
- * Ethereum's sync committee on this device, so it has the trust of the
- * chain's own consensus rather than of RPC servers agreeing — the tier
- * above [EnsQuorum]. The Android counterpart of desktop's
- * `colibri-resolver.js` and iOS's `ColibriENSClient`, with their
- * settings pinned the same way:
+ * A chain read, proven — for the chain-data router ([request], #329),
+ * any read the core can prove on Ethereum or Gnosis: corpus.core's
+ * Colibri stateless verifier ([ColibriNative]) checks the answer against
+ * the chain's sync committee on this device. Names are not resolved
+ * through it (#529, desktop #1076): Colibri runs an `eth_call` on
+ * contract code it takes from an RPC server without checking it against
+ * the proven code hash, so a call that reads no storage (the Universal
+ * Resolver's, a NameNFT registry's) proves nothing. Settings are pinned
+ * as on desktop and iOS:
  *
  * - a remote prover ([PROVERS]) builds the proof; nothing it says is
  *   taken on trust — a wrong proof fails verification;
  * - *privacy mode basic* (PAP, [ColibriNative.VERIFY_FLAG_PAP]): the
- *   call's storage reads go to the RPC endpoints name resolution already
- *   uses (`ethRpcs`) and are checked against the proven state root, so
+ *   call's storage reads go to the caller's RPC endpoints (`ethRpcs`)
+ *   and are checked against the proven state root, so
  *   the prover learns which storage the call touches but not the call;
  * - ZK sync-committee proofs, and a proof for `latest` older than
  *   [MAX_LATEST_AGE_SECONDS] is refused (a stale-but-valid proof would
@@ -53,7 +53,7 @@ import org.json.JSONObject
  * files ([ColibriNative.init]), so only the first call after install
  * (or after a library upgrade) bootstraps it.
  *
- * Cancellation-honest and bounded by the caller: cancelling [ethCall]
+ * Cancellation-honest and bounded by the caller: cancelling [request]
  * stops waiting at once, aborts its HTTP requests from another thread
  * (a read stalled on a trickling server can't hold it), and frees the
  * native context; see [fetch].
@@ -63,15 +63,6 @@ internal class EnsColibri(
     private val http: Http = Http.Default,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    /** What the verifier proved one call returned. */
-    sealed class Outcome {
-        /** The call's return data, `0x…`. */
-        data class Returned(val data: String) : Outcome()
-
-        /** The call reverted — itself proven — with this revert data (`0x` when none). */
-        data class Reverted(val data: String) : Outcome()
-    }
-
     /**
      * The verifier couldn't answer: a prover or network failure, or a
      * proof that didn't check out. [unreachable] when a request the core
@@ -84,30 +75,8 @@ internal class EnsColibri(
      */
     class Failure(message: String, val unreachable: Boolean = false) : Exception(message)
 
-    /**
-     * A proven answer and the provers whose proofs it came from — the
-     * `prover` requests' hosts, for the trust shield ([EnsTrust.agreed]).
-     */
-    data class Proven(val outcome: Outcome, val provers: List<String>)
-
     /** Whether the verifier can run in this build ([ColibriNative.available]). */
     val available: Boolean get() = engine.available
-
-    /**
-     * Prove `eth_call({to, data}, "latest")`, with the call's storage
-     * reads sent to [ethRpcs] (in order). Throws [Failure] when no proven
-     * answer can be had, `CancellationException` when cancelled.
-     */
-    suspend fun ethCall(to: String, data: ByteArray, ethRpcs: List<String>): Proven {
-        val params = JSONArray()
-            .put(JSONObject().put("to", to).put("data", "0x" + data.toHex()))
-            .put("latest")
-        val (status, provers) = run(MAINNET, "eth_call", params, ethRpcs)
-        return when (status.optString("status")) {
-            "revert" -> Proven(Outcome.Reverted(status.optString("data", "0x").ifEmpty { "0x" }), provers)
-            else -> Proven(Outcome.Returned(resultHex(status)), provers)
-        }
-    }
 
     /**
      * Prove [method] with [params] on chain [chainId] ([CHAINS]) — the
@@ -206,12 +175,6 @@ internal class EnsColibri(
      * taken as-is too.
      */
     internal fun parsePtr(text: String): Long? = text.trim().let { it.toULongOrNull()?.toLong() ?: it.toLongOrNull() }
-
-    private fun resultHex(status: JSONObject): String {
-        val result = status.opt("result")
-        return (result as? String)?.takeIf { it.startsWith("0x") }
-            ?: throw Failure("the verifier's result isn't return data")
-    }
 
     private sealed class Served {
         class Ok(val body: ByteArray, val index: Int, val url: String) : Served()
@@ -343,7 +306,7 @@ internal class EnsColibri(
 
     /**
      * [ColibriNative], set up on first use (off the main thread, from
-     * [ethCall]) with its state in [statesDir] — `null` until the app has
+     * [request]) with its state in [statesDir] — `null` until the app has
      * said where, which leaves the tier off.
      */
     class NativeEngine(private val statesDir: () -> java.io.File?) : Engine {
@@ -428,7 +391,7 @@ internal class EnsColibri(
 
         /**
          * The core's error (v3.0.0, `eth_check_latest_freshness`) for a
-         * `latest` proof older than the floor [ethCall] sets.
+         * `latest` proof older than the floor [request] sets.
          */
         internal const val STALE_LATEST = "proof for latest too old"
 

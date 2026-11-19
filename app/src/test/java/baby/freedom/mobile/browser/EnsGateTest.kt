@@ -118,13 +118,11 @@ class EnsGateTest {
     }
 
     @Test
-    fun `with Colibri on the settings hint only warns about answers it can't prove`() {
-        // #100: a proven answer loads without asking, however few endpoints.
-        for (hint in listOf(tooFewEndpointsHint(1, colibri = true)!!, tooFewEndpointsHint(2, colibri = true)!!, tooFewEndpointsHint(2, 4, colibri = true)!!)) {
-            assertTrue(hint, hint.contains("an answer Colibri can't prove"))
-            assertTrue(hint, hint.contains("you'll be asked before that name loads"))
-            assertFalse(hint, hint.contains("each name"))
+    fun `the settings hint doesn't count on Colibri for names`() {
+        // #529: Colibri proves no name, so too few endpoints leaves every answer one server's word.
+        for (hint in listOf(tooFewEndpointsHint(1)!!, tooFewEndpointsHint(2)!!, tooFewEndpointsHint(2, 4)!!)) {
+            assertFalse(hint, hint.contains("Colibri"))
+            assertTrue(hint, hint.contains("each name"))
         }
-        assertNull(tooFewEndpointsHint(3, colibri = true))
     }
 }

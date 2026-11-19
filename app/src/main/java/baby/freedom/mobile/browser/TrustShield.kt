@@ -46,10 +46,9 @@ import baby.freedom.mobile.l10n.Strings
  * behind it. Mirrors iOS's `TrustShield.swift` / `ENSTrustLevel`, with
  * the tiers this browser's resolver can produce (#96, #100):
  *
- * - [Proven]: the Colibri verifier checked a proof of the record
- *   against Ethereum's sync committee on this device, or the Myotis
- *   light client ran the lookup itself against state proven to that
- *   committee ([EnsTrust.lightClient], #101) — the chain's own
+ * - [Proven]: the Myotis light client ran the lookup itself against
+ *   state proven to Ethereum's sync committee ([EnsTrust.lightClient],
+ *   #101) — the chain's own
  *   consensus, not servers agreeing. A seal rather than a shield, as on
  *   iOS, so the two verified tiers are told apart at a glance.
  * - [Verified]: at least [baby.freedom.mobile.ens.EnsQuorum.M]
@@ -63,7 +62,8 @@ import baby.freedom.mobile.l10n.Strings
  * ENS, WNS (`.wei`), GNS (`.gwei`) and Tezos Domains (`.tez`, #176),
  * whose providers vote the same way ([NameTrust.system] names whose
  * record it is). [Proven] is Ethereum's alone: `.tez` records live on
- * Tezos, which neither Colibri nor Myotis covers.
+ * Tezos, which Myotis doesn't cover. The Colibri verifier proves no
+ * name (#529): it runs the lookup on contract code it doesn't prove.
  *
  * iOS's other two tiers have no page to sit on here: servers that
  * *disagree* (a conflict, #174's third verdict) never load anything —
@@ -117,11 +117,6 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
         get() = trust.block?.let { Strings.get(R.string.names_trust_at_block, it.toString()) }
             ?: Strings.get(R.string.names_trust_at_latest_block)
 
-    /** Who gave a proof: the prover's host(s), or the prover by name. */
-    private val prover: String
-        get() = trust.shownAgreed.joinToString(Strings.get(R.string.names_trust_prover_separator))
-            .ifEmpty { Strings.get(R.string.names_trust_colibri_prover) }
-
     /** The one server that answered, by host when known. */
     private val loneServer: String
         get() = trust.shownAgreed.singleOrNull() ?: Strings.get(R.string.names_trust_one_rpc_server)
@@ -135,13 +130,7 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
     /** One sentence on what the tier means for this answer. */
     val summary: String
         get() = when (tier) {
-            TrustTier.Proven -> if (trust.lightClient) {
-                Strings.get(R.string.names_summary_light_client, system, shown, block)
-            } else if (trust.offchain) {
-                Strings.get(R.string.names_summary_proven_offchain, shown, system, prover, block)
-            } else {
-                Strings.get(R.string.names_summary_proven, prover, shown, system, block)
-            }
+            TrustTier.Proven -> Strings.get(R.string.names_summary_light_client, system, shown, block)
             TrustTier.Verified -> {
                 val n = trust.agreed.size
                 if (n >= 2) {
@@ -160,13 +149,7 @@ internal data class NameTrust(val name: String, val trust: EnsTrust, val answer:
      */
     val recipientSummary: String
         get() = when (tier) {
-            TrustTier.Proven -> if (trust.lightClient) {
-                Strings.get(R.string.names_recipient_light_client, shown, system, block)
-            } else if (trust.offchain) {
-                Strings.get(R.string.names_recipient_proven_offchain, shown, prover, block)
-            } else {
-                Strings.get(R.string.names_recipient_proven, prover, shown, system, block)
-            }
+            TrustTier.Proven -> Strings.get(R.string.names_recipient_light_client, shown, system, block)
             TrustTier.Verified -> {
                 val n = trust.agreed.size
                 if (n >= 2) {
@@ -320,9 +303,7 @@ internal fun TrustFacts(trust: NameTrust) {
         if (trust.trust.agreed.isNotEmpty()) {
             TrustFact(
                 when (trust.tier) {
-                    TrustTier.Proven -> stringResource(
-                        if (trust.trust.lightClient) R.string.names_fact_verified_by else R.string.names_fact_proof_from,
-                    )
+                    TrustTier.Proven -> stringResource(R.string.names_fact_verified_by)
                     TrustTier.Verified -> stringResource(R.string.names_fact_agreed, trust.trust.agreed.size)
                     TrustTier.Unverified -> stringResource(R.string.names_fact_answered_by)
                 },

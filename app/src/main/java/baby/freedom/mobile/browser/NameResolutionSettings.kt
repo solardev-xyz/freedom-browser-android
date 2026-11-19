@@ -104,32 +104,16 @@ private val LAST_ENDPOINT_HELP: String get() = Strings.get(R.string.names_last_e
  * than [EnsQuorum.MIN_PROVIDERS] different providers ([enabled],
  * [EnsRpcConfig.providerCount]) among the [endpoints] that are on leaves
  * every answer one server's word, which the browser then asks about each
- * time — every answer the Colibri verifier can't prove, when Colibri
- * proofs are on ([colibri], #100). `null` when there are enough.
+ * time. Colibri proves no name (#529), so it doesn't change this.
+ * `null` when there are enough.
  */
-internal fun tooFewEndpointsHint(enabled: Int, endpoints: Int = enabled, colibri: Boolean = false): String? {
+internal fun tooFewEndpointsHint(enabled: Int, endpoints: Int = enabled): String? {
     if (enabled >= EnsQuorum.MIN_PROVIDERS) return null
-    // A proven answer (#100) needs no cross-check and loads without
-    // asking; only one Colibri can't prove falls to a single endpoint.
     val min = EnsQuorum.MIN_PROVIDERS
     return when {
-        endpoints > enabled -> Strings.plural(
-            if (colibri) R.plurals.names_too_few_providers_colibri else R.plurals.names_too_few_providers,
-            enabled,
-            endpoints,
-            enabled,
-            min,
-        )
-        enabled == 1 -> Strings.get(
-            if (colibri) R.string.names_one_endpoint_colibri else R.string.names_one_endpoint,
-            min,
-        )
-        else -> Strings.plural(
-            if (colibri) R.plurals.names_too_few_endpoints_colibri else R.plurals.names_too_few_endpoints,
-            enabled,
-            enabled,
-            min,
-        )
+        endpoints > enabled -> Strings.plural(R.plurals.names_too_few_providers, enabled, endpoints, enabled, min)
+        enabled == 1 -> Strings.get(R.string.names_one_endpoint, min)
+        else -> Strings.plural(R.plurals.names_too_few_endpoints, enabled, enabled, min)
     }
 }
 
@@ -145,7 +129,7 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
         "order",
         ROW_ORDER,
         ORDER_HELP,
-        tooFewEndpointsHint(config.providerCount, config.sources.size, config.colibri),
+        tooFewEndpointsHint(config.providerCount, config.sources.size),
         *config.sources.map(::sourceLine).toTypedArray(),
     ),
     settingsRow(
@@ -218,7 +202,7 @@ internal fun NameResolutionSection(
                     )
                 }
             }
-            tooFewEndpointsHint(config.providerCount, config.sources.size, config.colibri)?.let {
+            tooFewEndpointsHint(config.providerCount, config.sources.size)?.let {
                 Spacer(Modifier.height(6.dp))
                 WarningText(it)
             }
@@ -393,7 +377,7 @@ internal fun RpcProvidersSection(
                     )
                 }
             }
-            tooFewEndpointsHint(config.providerCount, config.sources.size, config.colibri)?.let {
+            tooFewEndpointsHint(config.providerCount, config.sources.size)?.let {
                 Spacer(Modifier.height(6.dp))
                 WarningText(it)
             }

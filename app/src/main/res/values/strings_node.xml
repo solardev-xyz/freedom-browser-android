@@ -51,7 +51,7 @@
     <string name="node_status_starting">Starting…</string>
     <string name="node_status_stopped">Stopped</string>
     <string name="node_light_client">Ethereum light client</string>
-    <string name="node_light_client_about">Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis). Each chain runs on its own. With Ethereum off, names are checked through Colibri or your RPCs instead.</string>
+    <string name="node_light_client_about">Verifies Ethereum and Gnosis peer-to-peer on this device (Myotis). Each chain runs on its own. With Ethereum off, names are checked through your RPCs instead.</string>
     <!-- Accessibility label of a chain's switch; %1$s is the chain (Ethereum, Gnosis). -->
     <string name="node_run_chain">Run %1$s</string>
     <string name="node_start_chain_at_launch">Start %1$s at launch</string>

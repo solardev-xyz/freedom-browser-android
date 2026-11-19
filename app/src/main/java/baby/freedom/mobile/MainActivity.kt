@@ -123,7 +123,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
-import java.io.File
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -460,7 +459,6 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         // Name resolution reads the user's RPC settings for every
         // lookup, so a change in Settings applies to the next name.
         Gateways.ensRpcConfig = { settings.ensRpcConfig.first() }
-        Gateways.colibriStatesDir = File(filesDir, "colibri")
         // The first read moves what an earlier build kept in the settings
         // file — API keys in plain text among them — to where they now
         // live (encrypted); do it now rather than at the first name.
