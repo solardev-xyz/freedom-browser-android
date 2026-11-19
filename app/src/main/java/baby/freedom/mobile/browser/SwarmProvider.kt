@@ -1111,8 +1111,9 @@ class SwarmProvider(
      * it can't retrieve, which is -32603, not `node-stopped`. Only
      * 32-byte references: an encrypted one is `invalid_reference`. The
      * join has no deadline of its own on desktop beyond the page's 300 s;
-     * here it gets what is left of [DATA_READ_DEADLINE_MS], so the page
-     * still gets a real answer before its own timer gives up.
+     * here it gets what is left of [DATA_READ_DEADLINE_MS] less the
+     * [PREFLIGHT_TIMEOUT_MS] re-probe a cut-short join may still need, so the
+     * page still gets a real answer before its own timer gives up.
      */
     private suspend fun readData(origin: String, params: JSONObject): Reply {
         val started = System.nanoTime()
@@ -1143,7 +1144,9 @@ class SwarmProvider(
             root.payload.copyOf(expected)
         } else {
             if (expected > raw.size) reserveBudget(origin, (expected - raw.size).toLong())?.let { return it }
-            val left = DATA_READ_DEADLINE_MS - (System.nanoTime() - started) / 1_000_000
+            // Room is kept for [cutShort]'s `GET /node`, so a join cut at its
+            // deadline still answers inside [DATA_READ_DEADLINE_MS].
+            val left = DATA_READ_DEADLINE_MS - PREFLIGHT_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000
             val answer = try {
                 withContext(io) {
                     node.request(
@@ -1626,6 +1629,8 @@ class SwarmProvider(
         /**
          * A whole `swarm_readData` call, join included: inside the page's
          * 300 s (`LONG` in the page script), so a slow join still answers.
+         * Covers the reachability probe, the root read, the join and, after
+         * a cut-short join, the `GET /node` re-probe.
          */
         private const val DATA_READ_DEADLINE_MS = 290_000L
         private const val UPLOAD_TIMEOUT_MS = 5 * 60_000

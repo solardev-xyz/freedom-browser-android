@@ -106,9 +106,12 @@ class SwarmProviderTest {
         var stopOnCut = false
         /** Each capped request's path and cap. */
         val caps: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
+        /** Each capped request's path and timeout. */
+        val capTimeouts: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
 
         override fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int, maxBytes: Int): SwarmProvider.Http.Answer {
             caps += path to maxBytes
+            capTimeouts += path to timeoutMs
             return super.request(method, path, headers, body, timeoutMs, maxBytes)
         }
         var beeMode = "light"
@@ -683,6 +686,17 @@ class SwarmProviderTest {
         assertEquals(1, joins())
         assertEquals("the join is held to the blob's size", "/bytes/$big" to 10_000, node.caps.single())
         assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `a join cut short at its deadline still answers inside the 290 s budget`() {
+        val big = plantBlob(ByteArray(10_000) { 1 })
+        assertTrue(call("swarm_readData", dataParams(big), origin = other) is SwarmProvider.Reply.Ok)
+        val join = node.capTimeouts.single().second
+        // The join, then cutShort's 10 s `GET /node`, all inside the 290 s
+        // DATA_READ_DEADLINE_MS that keeps clear of the page's 300 s timer.
+        assertTrue("join gets $join ms", join + 10_000 <= 290_000)
+        assertTrue("but nearly all of what is left: $join ms", join > 270_000)
     }
 
     @Test
