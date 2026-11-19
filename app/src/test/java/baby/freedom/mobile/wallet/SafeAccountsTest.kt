@@ -19,9 +19,13 @@ import baby.freedom.mobile.ens.toHex
 import java.io.File
 import java.math.BigInteger
 import java.nio.file.Files
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -59,7 +63,15 @@ class SafeAccountsTest {
     private val stranger = "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF"
     private val local = listOf(account1.address, account2.address)
 
-    private fun safes() = SafeAccounts(vault, SafeStore(file), scope, Dispatchers.Unconfined, clock = { 42L })
+    private fun safes(
+        readDeployment: suspend (Long, String) -> SafeDeployment = { _, _ -> SafeDeployment.UNVERIFIED },
+        activationRetryMs: Long = 5_000,
+        monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
+        clock: () -> Long = { 42L },
+    ) = SafeAccounts(
+        vault, SafeStore(file), scope, Dispatchers.Unconfined, clock = clock,
+        readDeployment = readDeployment, activationRetryMs = activationRetryMs, monotonicMs = monotonicMs,
+    )
 
     @After
     fun tearDown() {
@@ -67,9 +79,9 @@ class SafeAccountsTest {
         dir.deleteRecursively()
     }
 
-    private suspend fun opened(): SafeAccounts {
+    private suspend fun opened(readDeployment: suspend (Long, String) -> SafeDeployment = { _, _ -> SafeDeployment.UNVERIFIED }): SafeAccounts {
         vault.create(abandon12, auth, imported = true)
-        return safes().also { it.reconcile(vault.state.value) }
+        return safes(readDeployment).also { it.reconcile(vault.state.value) }
     }
 
     private fun expectSafeError(block: suspend () -> Unit): String = runBlocking {
@@ -204,8 +216,9 @@ class SafeAccountsTest {
     }
 
     @Test
-    fun `the Safe’s own sends are followed, so a mined activation marks it active, a mined execution clears its transaction`() = runBlocking<Unit> {
-        val s = opened()
+    fun `the Safe’s own sends are followed, so a mined activation read back verified marks it active, a mined execution clears its transaction`() = runBlocking<Unit> {
+        val reads = mutableListOf<String>()
+        val s = opened { _, address -> reads += address; SafeDeployment.ACTIVE }
         val safe = s.create("Team", listOf(account1.address, other), 1, local)
         val gnosis = BuiltInChains.GNOSIS
         fun status(data: ByteArray, to: String, activates: Boolean, stage: SendStatus.Stage, hash: String?) = SendStatus(
@@ -220,7 +233,10 @@ class SafeAccountsTest {
         val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
         s.noteSend(status(deploy, SafeProtocol.FACTORY, true, SendStatus.Stage.Pending, "0x" + "aa".repeat(32)))
         assertFalse(s.state.value!!.safes.single().deployed)
+        assertTrue(reads.isEmpty())
         s.noteSend(status(deploy, SafeProtocol.FACTORY, true, SendStatus.Stage.Confirmed(10, null), "0x" + "aa".repeat(32)))
+        // The receipt alone marks nothing (#535): the Safe's code, read verified, does.
+        assertEquals(listOf(safe.address), reads)
         assertTrue(s.state.value!!.safes.single().deployed)
 
         val tx = SafeProtocol.SafeTx(account1.address, BigInteger.ONE, ByteArray(0), BigInteger.ZERO)
@@ -489,7 +505,7 @@ class SafeAccountsTest {
         val safe = opened().create("", listOf(account1.address, other), 1, local)
         val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
         // A fresh process: the journal brings back the mined activation before safes.json is read.
-        val s = safes()
+        val s = safes({ _, _ -> SafeDeployment.ACTIVE })
         s.noteSend(execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e1".repeat(32)))
         assertNull(s.state.value)
         val sends = MutableStateFlow<SendStatus?>(execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e1".repeat(32)))
@@ -888,6 +904,204 @@ class SafeAccountsTest {
         assertTrue((bad as ScannedCode.Unrecognized).reason.contains("delegate call"))
         assertEquals(other to BigInteger.TEN, erc20Transfer(Erc20.transferData(other, BigInteger.TEN)))
         assertNull(erc20Transfer(ByteArray(4)))
+    }
+
+    @Test
+    fun `a mined activation no verified read confirms leaves the Safe pending, and a later verified read marks it`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        val confirmed = execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e2".repeat(32))
+        // Every read one RPC's word: a few tries, then left pending for the Safe page.
+        var reads = 0
+        val lone = safes({ _, _ -> reads++; SafeDeployment.UNVERIFIED }, activationRetryMs = 1).also { it.reconcile(vault.state.value) }
+        lone.noteSend(confirmed)
+        withTimeout(5_000) { while (reads < 4) delay(5) }
+        delay(50)
+        assertEquals(4, reads)
+        assertFalse(lone.state.value!!.safes.single().deployed)
+        assertTrue(expectSafeError { lone.proposeMessage(lone.state.value!!.safes.single(), "hi") }.isNotEmpty())
+        // A quorum forming on the second read (the RPCs catching up with the block) marks it.
+        var tries = 0
+        val catching = safes({ _, _ -> if (tries++ == 0) SafeDeployment.NOT_ACTIVE else SafeDeployment.ACTIVE }, activationRetryMs = 1)
+            .also { it.reconcile(vault.state.value) }
+        catching.noteSend(confirmed)
+        withTimeout(5_000) { while (catching.state.value?.safes?.single()?.deployed != true) delay(5) }
+        assertEquals(2, tries)
+    }
+
+    @Test
+    fun `a read throwing an Error while confirming a mined activation is caught, and the next read still marks it`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        val confirmed = execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e4".repeat(32))
+        // As in production: an unattended job on a SupervisorJob; anything escaping it would reach the handler (the app's default one, a crash).
+        val uncaught = mutableListOf<Throwable>()
+        val background = CoroutineScope(SupervisorJob(job) + Dispatchers.Unconfined + CoroutineExceptionHandler { _, e -> uncaught += e })
+        var reads = 0
+        val s = SafeAccounts(
+            vault, SafeStore(file), background, Dispatchers.Unconfined, clock = { 42L }, activationRetryMs = 1,
+            readDeployment = { _, _ -> if (reads++ == 0) throw StackOverflowError("deep") else SafeDeployment.ACTIVE },
+        ).also { it.reconcile(vault.state.value) }
+        s.noteSend(confirmed)
+        withTimeout(5_000) { while (s.state.value?.safes?.single()?.deployed != true) delay(5) }
+        assertEquals(2, reads)
+        assertTrue(uncaught.isEmpty())
+    }
+
+    @Test
+    fun `a no-code read just after a mined activation doesn't offer activation again, for a while`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        val confirmed = execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e3".repeat(32))
+        var found = SafeDeployment.NOT_ACTIVE
+        var now = 1_000L
+        var reads = 0
+        val s = safes({ _, _ -> reads++; found }, activationRetryMs = 1, monotonicMs = { now }).also { it.reconcile(vault.state.value) }
+        // Before any activation was seen mined, no code is just not active.
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        s.noteSend(confirmed)
+        withTimeout(5_000) { while (reads < 5) delay(5) }
+        // RPCs behind the block: settling, not "activate again"; and still not marked.
+        assertEquals(SafeDeployment.SETTLING, s.checkDeployed(s.state.value!!.safes.single()))
+        assertFalse(s.state.value!!.safes.single().deployed)
+        now += SafeAccounts.ACTIVATION_SETTLE_MS - 1
+        assertEquals(SafeDeployment.SETTLING, s.checkDeployed(s.state.value!!.safes.single()))
+        // Code on one RPC's word stays unverified, as ever.
+        found = SafeDeployment.UNVERIFIED
+        assertEquals(SafeDeployment.UNVERIFIED, s.checkDeployed(s.state.value!!.safes.single()))
+        // The receipt is one RPC's word too: past the window, no code reads as not active again.
+        found = SafeDeployment.NOT_ACTIVE
+        now += 1
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        // A clock that went backwards doesn't hold it forever either.
+        s.noteSend(confirmed)
+        now -= 5
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        // A verified read marks it, as before.
+        s.noteSend(confirmed)
+        found = SafeDeployment.ACTIVE
+        assertEquals(SafeDeployment.ACTIVE, s.checkDeployed(s.state.value!!.safes.single()))
+        assertTrue(s.state.value!!.safes.single().deployed)
+    }
+
+    @Test
+    fun `the settle window after a mined activation outlives a process restart, and stays bounded`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        val confirmed = execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e4".repeat(32))
+        var wall = 1_000_000L
+        var reads = 0
+        val first = safes({ _, _ -> reads++; SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, clock = { wall }).also { it.reconcile(vault.state.value) }
+        first.noteSend(confirmed)
+        withTimeout(5_000) { while (reads < 4) delay(5) }
+        assertEquals(1_000_000L, first.state.value!!.safes.single().activationMinedAt)
+        assertTrue(JSONObject(file.readText()).getJSONArray("safes").getJSONObject(0).getLong("activationMinedAt") == 1_000_000L)
+
+        // The process restarts: a fresh instance, a monotonic clock that knows nothing, the time on disk.
+        wall += 60_000
+        val again = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, monotonicMs = { 5L }, clock = { wall })
+            .also { it.reconcile(vault.state.value) }
+        assertEquals(SafeDeployment.SETTLING, again.checkDeployed(again.state.value!!.safes.single()))
+        wall = 1_000_000L + SafeAccounts.ACTIVATION_SETTLE_MS - 1
+        assertEquals(SafeDeployment.SETTLING, again.checkDeployed(again.state.value!!.safes.single()))
+        // Past the window it's not active again, and the time comes off disk.
+        wall += 1
+        assertEquals(SafeDeployment.NOT_ACTIVE, again.checkDeployed(again.state.value!!.safes.single()))
+        assertEquals(null, again.state.value!!.safes.single().activationMinedAt)
+        assertTrue(JSONObject(file.readText()).getJSONArray("safes").getJSONObject(0).isNull("activationMinedAt"))
+
+        // A wall clock set back since doesn't hold the window open either.
+        val third = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, clock = { wall }).also { it.reconcile(vault.state.value) }
+        third.noteSend(confirmed)
+        val fourth = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, clock = { wall - 5 }).also { it.reconcile(vault.state.value) }
+        assertEquals(SafeDeployment.NOT_ACTIVE, fourth.checkDeployed(fourth.state.value!!.safes.single()))
+
+        // A status replayed after a restart keeps the first sighting's window rather than opening a new one.
+        wall = 2_000_000L
+        var mono = 10_000L
+        val fifth = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, monotonicMs = { mono }, clock = { wall }).also { it.reconcile(vault.state.value) }
+        fifth.noteSend(confirmed)
+        wall += 5 * 60_000
+        mono += 5 * 60_000
+        val sixth = safes({ _, _ -> SafeDeployment.NOT_ACTIVE }, activationRetryMs = 1, monotonicMs = { mono }, clock = { wall }).also { it.reconcile(vault.state.value) }
+        sixth.noteSend(confirmed)
+        assertEquals(2_000_000L, sixth.state.value!!.safes.single().activationMinedAt)
+        mono += 5 * 60_000
+        wall += 5 * 60_000
+        assertEquals(SafeDeployment.NOT_ACTIVE, sixth.checkDeployed(sixth.state.value!!.safes.single()))
+
+        // A verified read marks it and drops the time.
+        sixth.noteSend(confirmed)
+        val seventh = safes({ _, _ -> SafeDeployment.ACTIVE }, clock = { wall }).also { it.reconcile(vault.state.value) }
+        assertEquals(SafeDeployment.ACTIVE, seventh.checkDeployed(seventh.state.value!!.safes.single()))
+        assertTrue(seventh.state.value!!.safes.single().deployed)
+        assertEquals(null, seventh.state.value!!.safes.single().activationMinedAt)
+    }
+
+    @Test
+    fun `only a verified read marks a Safe active, and a mark an earlier release wrote reads as pending until one does`() = runBlocking<Unit> {
+        var found = SafeDeployment.UNVERIFIED
+        val s = opened { _, _ -> found }
+        val safe = s.create("", listOf(account1.address, other), 1, local)
+        assertEquals(SafeDeployment.UNVERIFIED, s.checkDeployed(safe))
+        assertFalse(s.state.value!!.safes.single().deployed)
+        found = SafeDeployment.NOT_ACTIVE
+        assertEquals(SafeDeployment.NOT_ACTIVE, s.checkDeployed(safe))
+        assertFalse(s.state.value!!.safes.single().deployed)
+
+        // A release before #535 marked it on one RPC's eth_getCode: `deployed` with no `deployedVerified`.
+        val legacy = JSONObject(file.readText())
+        legacy.getJSONArray("safes").getJSONObject(0).put("deployed", true).remove("deployedVerified")
+        file.writeText(legacy.toString())
+        found = SafeDeployment.UNVERIFIED
+        val restarted = safes({ _, _ -> found }).also { it.reconcile(vault.state.value) }
+        val pending = restarted.state.value!!.safes.single()
+        assertFalse(pending.deployed)
+        // Pending, so nothing can be proposed for it yet; nothing else about it is lost.
+        assertTrue(expectSafeError { restarted.proposeMessage(pending, "hi") }.isNotEmpty())
+        assertEquals(safe.address, pending.address)
+        assertEquals(SafeDeployment.UNVERIFIED, restarted.checkDeployed(pending))
+        assertFalse(restarted.state.value!!.safes.single().deployed)
+
+        found = SafeDeployment.ACTIVE
+        assertEquals(SafeDeployment.ACTIVE, restarted.checkDeployed(pending))
+        assertTrue(restarted.state.value!!.safes.single().deployed)
+        assertTrue(JSONObject(file.readText()).getJSONArray("safes").getJSONObject(0).getBoolean("deployedVerified"))
+        // Kept across a restart, and a Safe marked active isn't read again.
+        found = SafeDeployment.UNVERIFIED
+        val again = safes({ _, _ -> found }).also { it.reconcile(vault.state.value) }
+        assertTrue(again.state.value!!.safes.single().deployed)
+        assertEquals(SafeDeployment.ACTIVE, again.checkDeployed(again.state.value!!.safes.single()))
+        again.proposeMessage(again.state.value!!.safes.single(), "hi")
+    }
+
+    @Test
+    fun `a Safe's code counts as active only on a verified read`() = runBlocking<Unit> {
+        val safe = SafeProtocol.predictAddress(listOf(account1.address, other), 1, "7")
+        val urls = listOf("https://a.example", "https://b.example", "https://c.example")
+        fun codeRpc(urls: List<String>, code: (String) -> String) = WalletRpc(
+            ChainDataRouter(
+                chains = { listOf<Chain>(BuiltInChains.GNOSIS.copy(rpcUrls = urls)) },
+                transport = RpcTransport { url, body, _ ->
+                    val result = when (JSONObject(body).getString("method")) {
+                        "eth_getCode" -> "\"${code(url)}\""
+                        "eth_blockNumber" -> "\"0x10\""
+                        else -> "null"
+                    }
+                    """{"jsonrpc":"2.0","id":1,"result":$result}"""
+                },
+            ),
+        )
+        // Three RPCs agreeing on its code: a quorum, verified.
+        assertEquals(SafeDeployment.ACTIVE, SafeChain(codeRpc(urls) { "0x6080" }).deployment(100, safe))
+        // One RPC's word: code, but not confirmed.
+        assertEquals(SafeDeployment.UNVERIFIED, SafeChain(codeRpc(urls.take(1)) { "0x6080" }).deployment(100, safe))
+        // RPCs that each say something else: no quorum.
+        assertEquals(SafeDeployment.UNVERIFIED, SafeChain(codeRpc(urls) { "0x60" + it.substring(8, 9).toByteArray()[0].toString(16) }).deployment(100, safe))
+        // No code: not active, whoever says so.
+        assertEquals(SafeDeployment.NOT_ACTIVE, SafeChain(codeRpc(urls.take(1)) { "0x" }).deployment(100, safe))
+        assertEquals(SafeDeployment.NOT_ACTIVE, SafeChain(codeRpc(urls) { "0x" }).deployment(100, safe))
     }
 
     /** A confirmed [SafeChain.policy] reading of [owners] / [threshold] at [block], the Safe's nonce [nonce]. */

@@ -94,6 +94,7 @@ import baby.freedom.mobile.wallet.SafeAccounts
 import baby.freedom.mobile.wallet.SafeCallLabel
 import baby.freedom.mobile.wallet.SafeChain
 import baby.freedom.mobile.wallet.SafePolicyChange
+import baby.freedom.mobile.wallet.SafeDeployment
 import baby.freedom.mobile.wallet.SafeException
 import baby.freedom.mobile.wallet.SafePending
 import baby.freedom.mobile.wallet.SafeProtocol
@@ -496,20 +497,35 @@ internal fun SafePage(
     var refreshTick by remember { mutableStateOf(0) }
     var activation by remember { mutableStateOf<SafeChain.Activation?>(null) }
     var checkError by remember { mutableStateOf<String?>(null) }
+    // Why activation isn't offered though no code was confirmed (UNVERIFIED/SETTLING). Kept apart from checkError, a failed read:
+    // the header shows that one in the balance slot, and a balance read failing after this must not wipe the explanation.
+    var activationNote by remember { mutableStateOf<String?>(null) }
     var checking by remember { mutableStateOf(false) }
     var holdings by remember { mutableStateOf<List<Pair<Token, BigInteger>>?>(null) }
 
-    // Where it stands on chain: deployed (healing the record, as desktop does), and if not, the activation's price.
+    // Where it stands on chain: deployed (healing the record on a verified read only, #535), and if not, the activation's price.
     LaunchedEffect(safe.deployed, executor?.address, chain, refreshTick) {
         val c = chain ?: return@LaunchedEffect
         checking = true
         checkError = null
+        activationNote = null
+        // Until this check has priced it again, an earlier price must not stand: the Safe may be active by now.
+        activation = null
         try {
             if (!safe.deployed) {
-                if (chainReads.deployed(c.id, safe.address)) {
-                    safes.markDeployed(safe.address)
-                } else {
-                    activation = executor?.let { chainReads.activation(safe, it.address) }
+                when (safes.checkDeployed(safe)) {
+                    SafeDeployment.ACTIVE -> Unit
+                    SafeDeployment.NOT_ACTIVE -> activation = executor?.let { chainReads.activation(safe, it.address) }
+                    // Code no verified read confirms: it may well be active, so activation isn't offered. Pending, to check again.
+                    SafeDeployment.UNVERIFIED -> {
+                        activation = null
+                        activationNote = Strings.get(R.string.safe_activation_unverified, c.name)
+                    }
+                    // Its activation was just mined, and the RPCs don't have that block yet: not offered again either.
+                    SafeDeployment.SETTLING -> {
+                        activation = null
+                        activationNote = Strings.get(R.string.safe_activation_settling, c.name)
+                    }
                 }
             }
             holdings = TokenRegistry.tokens(c).mapNotNull { token ->
@@ -638,6 +654,7 @@ internal fun SafePage(
                         activation = activation,
                         checking = checking,
                         checkError = checkError,
+                        activationNote = activationNote,
                         error = error,
                         busy = busy,
                         onRefresh = { refreshTick++ },
@@ -879,6 +896,7 @@ private fun SafeActivationSection(
     activation: SafeChain.Activation?,
     checking: Boolean,
     checkError: String?,
+    activationNote: String?,
     error: String?,
     busy: Boolean,
     onRefresh: () -> Unit,
@@ -890,7 +908,15 @@ private fun SafeActivationSection(
         when {
             chain == null -> Text(stringResource(R.string.safe_activation_no_chain), style = MaterialTheme.typography.bodyMedium)
             executor == null -> Text(stringResource(R.string.safe_activation_no_executor), style = MaterialTheme.typography.bodyMedium)
-            activation == null && checkError != null -> FieldText(checkError, error = true)
+            activation == null && (activationNote != null || checkError != null) -> {
+                activationNote?.let { FieldText(it, error = true) }
+                checkError?.let { FieldText(it, error = true) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onRefresh, enabled = !checking, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(stringResource(if (checking) R.string.safe_checking else R.string.safe_check_again))
+                    }
+                }
+            }
             activation == null -> Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
@@ -934,7 +960,8 @@ private fun SafeActivationSection(
                 )
                 Spacer(Modifier.height(8.dp))
                 error?.let { FieldText(it, error = true) }
-                Button(onClick = onActivate, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                // Not while a check runs either: what it finds may well be that the Safe is active already.
+                Button(onClick = onActivate, enabled = !busy && !checking, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                     if (busy) BusySpinner(stringResource(R.string.safe_activation_pricing)) else Text(stringResource(R.string.safe_activate_on, chain.name))
                 }
             }

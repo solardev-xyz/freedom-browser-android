@@ -1,11 +1,13 @@
 package baby.freedom.mobile.wallet
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import baby.freedom.mobile.R
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
+import baby.freedom.mobile.chains.rpc.ChainTrust
 import baby.freedom.mobile.chains.rpc.WalletRpc
 import baby.freedom.mobile.chains.rpc.undisputed
 import baby.freedom.mobile.ens.toHex
@@ -18,6 +20,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -67,6 +70,13 @@ data class SafeAccount(
      * never moves back to owners or a threshold the Safe had before.
      */
     val checkedBlock: Long? = null,
+    /**
+     * When (wall clock) its activation was last seen mined, while no
+     * verified read has marked it yet (#535): on disk, so the
+     * [SafeAccounts.ACTIVATION_SETTLE_MS] window during which a "no code"
+     * read is [SafeDeployment.SETTLING] outlives the process.
+     */
+    val activationMinedAt: Long? = null,
 ) {
     /** Who owns the Safe now, as far as this phone knows: the chain's last word, or the init params. */
     val ownersNow: List<String> get() = currentOwners ?: owners
@@ -226,11 +236,14 @@ class SafeStore internal constructor(private val file: File) {
                 threshold = s.getInt("threshold"),
                 saltNonce = s.getString("saltNonce"),
                 chainId = s.getLong("chainId"),
-                deployed = s.getBoolean("deployed"),
+                // Only a mark a verified read wrote (#535): one a release before it wrote from one RPC's
+                // `eth_getCode` reads as not active, and the Safe page checks the chain again.
+                deployed = s.getBoolean("deployed") && s.optBoolean("deployedVerified"),
                 createdAt = s.getLong("createdAt"),
                 currentOwners = s.optJSONArray("currentOwners")?.let { a -> (0 until a.length()).map { SafeProtocol.eip55(a.getString(it)) } },
                 currentThreshold = if (s.has("currentThreshold") && !s.isNull("currentThreshold")) s.getInt("currentThreshold") else null,
                 checkedBlock = if (s.has("checkedBlock") && !s.isNull("checkedBlock")) s.getLong("checkedBlock") else null,
+                activationMinedAt = if (s.has("activationMinedAt") && !s.isNull("activationMinedAt")) s.getLong("activationMinedAt") else null,
             ).also {
                 // Frozen params that no longer give the stored address mean the record was changed: never trust it.
                 require(SafeProtocol.predictAddress(it.owners, it.threshold, it.saltNonce) == it.address)
@@ -290,10 +303,11 @@ class SafeStore internal constructor(private val file: File) {
                         put(
                             JSONObject().put("address", s.address).put("name", s.name).put("owners", JSONArray(s.owners))
                                 .put("threshold", s.threshold).put("saltNonce", s.saltNonce).put("chainId", s.chainId)
-                                .put("deployed", s.deployed).put("createdAt", s.createdAt)
+                                .put("deployed", s.deployed).put("deployedVerified", s.deployed).put("createdAt", s.createdAt)
                                 .put("currentOwners", s.currentOwners?.let { JSONArray(it) } ?: JSONObject.NULL)
                                 .put("currentThreshold", s.currentThreshold ?: JSONObject.NULL)
-                                .put("checkedBlock", s.checkedBlock ?: JSONObject.NULL),
+                                .put("checkedBlock", s.checkedBlock ?: JSONObject.NULL)
+                                .put("activationMinedAt", s.activationMinedAt ?: JSONObject.NULL),
                         )
                     }
                 },
@@ -392,6 +406,12 @@ class SafeAccounts internal constructor(
     private val clock: () -> Long = System::currentTimeMillis,
     /** Signs typed data as a Ledger account (#142): on the device, which shows it. */
     private val ledgerSign: suspend (WalletAccount, Eip712.TypedData, ByteArray) -> String = { _, _, _ -> throw SafeException(Strings.get(R.string.safe_error_ledger_key)) },
+    /** What's at a Safe's address on its chain ([SafeChain.deployment]); with none wired, nothing is ever confirmed active. */
+    private val readDeployment: suspend (chainId: Long, address: String) -> SafeDeployment = { _, _ -> SafeDeployment.UNVERIFIED },
+    /** How long [noteSend] waits between reads of a just-mined activation that weren't verified yet. */
+    private val activationRetryMs: Long = 5_000,
+    /** A clock immune to wall-clock changes that keeps counting in deep sleep, for how long a mined activation holds off a "no code" read. */
+    private val monotonicMs: () -> Long = SystemClock::elapsedRealtime,
 ) {
     private val _state = MutableStateFlow<SafeState?>(null)
 
@@ -522,9 +542,66 @@ class SafeAccounts internal constructor(
         }
     }
 
-    /** Records that [address] is deployed on its chain. */
-    suspend fun markDeployed(address: String) = update { s ->
-        s.copy(safes = s.safes.map { if (it.address.equals(address, ignoreCase = true)) it.copy(deployed = true) else it }) to Unit
+    /**
+     * Reads what's at [safe]'s address ([SafeChain.deployment]) and, only
+     * when a verified read (a proof, or an RPC quorum) finds its code,
+     * marks it active (#535). Code that no verified read confirms marks
+     * nothing: the Safe stays pending, and the caller offers to check again.
+     */
+    suspend fun checkDeployed(safe: SafeAccount): SafeDeployment {
+        if (safe.deployed) return SafeDeployment.ACTIVE
+        val key = safe.address.lowercase()
+        val found = readDeployment(safe.chainId, safe.address)
+        if (found == SafeDeployment.ACTIVE) {
+            markDeployed(safe.address)
+            activationsMined.remove(key)
+            return found
+        }
+        // Its activation was just seen mined: a "no code" read is an RPC still behind that block, not
+        // proof it isn't active, so it mustn't bring Activate back. Bounded, as the receipt is one RPC's word too.
+        if (found != SafeDeployment.NOT_ACTIVE) return found
+        val minedAt = activationsMined[key]
+        if (minedAt != null) {
+            if (monotonicMs() - minedAt in 0 until ACTIVATION_SETTLE_MS) return SafeDeployment.SETTLING
+            activationsMined.remove(key, minedAt)
+            clearActivationMined(safe.address)
+            return found
+        }
+        // Seen mined in an earlier run of the process: only the on-disk wall-clock time survived. Bounded both
+        // ways, so a clock set back or forward since can end the window early but never hold it open.
+        val persisted = _state.value?.safe(safe.address)?.activationMinedAt ?: safe.activationMinedAt
+        if (persisted != null) {
+            if (clock() - persisted in 0 until ACTIVATION_SETTLE_MS) return SafeDeployment.SETTLING
+            clearActivationMined(safe.address)
+        }
+        return found
+    }
+
+    /** Records that [address] is deployed on its chain: only on a verified read ([checkDeployed]). */
+    @VisibleForTesting
+    internal suspend fun markDeployed(address: String) = update { s ->
+        s.copy(safes = s.safes.map { if (it.address.equals(address, ignoreCase = true)) it.copy(deployed = true, activationMinedAt = null) else it }) to Unit
+    }
+
+    /** Puts [at] on disk as when [address]'s activation was seen mined, unless one inside the window is there already. */
+    private suspend fun noteActivationMined(address: String, at: Long) = update { s ->
+        s.copy(
+            safes = s.safes.map {
+                val held = it.activationMinedAt?.let { t -> at - t in 0 until ACTIVATION_SETTLE_MS } == true
+                if (it.address.equals(address, ignoreCase = true) && !it.deployed && !held) it.copy(activationMinedAt = at) else it
+            },
+        ) to Unit
+    }
+
+    /** Takes [address]'s settle window off disk, once it's over. */
+    private suspend fun clearActivationMined(address: String) {
+        if (_state.value?.safe(address)?.activationMinedAt == null) return
+        // Tidying only: a failed write leaves a time the bounded check already reads as over.
+        runCatching {
+            update { s ->
+                s.copy(safes = s.safes.map { if (it.address.equals(address, ignoreCase = true)) it.copy(activationMinedAt = null) else it }) to Unit
+            }
+        }.onFailure { if (it is CancellationException) throw it }
     }
 
     /**
@@ -729,9 +806,47 @@ class SafeAccounts internal constructor(
         ) to Unit
     }
 
+    /** Safes whose activation was seen mined ([noteSend]), by lowercase address: when, on [monotonicMs]. */
+    private val activationsMined = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Safes whose mined activation [confirmActivation] is reading for. */
+    private val confirming = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * A mined activation's receipt is one RPC's word, so it marks nothing
+     * itself (#535): this reads the Safe's code a few times, a quorum
+     * forming once the RPCs have the block, and marks it on the first
+     * verified read. Off the sends collector, so a slow read can't hold
+     * up the statuses behind it. None verified: the Safe page checks again.
+     */
+    private fun confirmActivation(safe: SafeAccount) {
+        val key = safe.address.lowercase()
+        if (!confirming.add(key)) return
+        scope.launch {
+            try {
+                repeat(ACTIVATION_READS) { attempt ->
+                    if (attempt > 0) delay(activationRetryMs)
+                    val current = _state.value?.safe(safe.address) ?: return@launch
+                    val found = try {
+                        checkDeployed(current)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        // Unattended, with no handler on the scope: nothing it throws may reach the default handler and take the app down.
+                        Log.w(TAG, "activation check: ${e.message}")
+                        null
+                    }
+                    if (found == SafeDeployment.ACTIVE) return@launch
+                }
+            } finally {
+                confirming.remove(key)
+            }
+        }
+    }
+
     /**
      * Follows one of the wallet's sends: a Safe's activation that got
-     * mined marks it active; its `execTransaction` going out is noted on
+     * mined is read back from the chain ([confirmActivation]); its `execTransaction` going out is noted on
      * the pending transaction, and once mined, clears it — it's done, and
      * the history keeps the record. A reverted one leaves it to try again
      * (the Safe's nonce only moves when an execution succeeds).
@@ -741,7 +856,15 @@ class SafeAccounts internal constructor(
         val state = _state.value ?: return
         val safe = state.safe(label.address) ?: return
         if (label.activates) {
-            if (status.stage is SendStatus.Stage.Confirmed && !safe.deployed) markDeployed(safe.address)
+            if (status.stage is SendStatus.Stage.Confirmed && !safe.deployed) {
+                // A status replayed after a restart keeps the window the first sighting opened, not a fresh one.
+                val now = clock()
+                val since = safe.activationMinedAt?.let { now - it }?.takeIf { it in 0 until ACTIVATION_SETTLE_MS } ?: 0L
+                activationsMined.putIfAbsent(safe.address.lowercase(), monotonicMs() - since)
+                // On disk too, so a restart inside the window doesn't offer Activate again on a lagging read.
+                runCatching { noteActivationMined(safe.address, now) }.onFailure { if (it is CancellationException) throw it }
+                confirmActivation(safe)
+            }
             return
         }
         val entry = state.pendingFor(safe.address).firstOrNull { it.kind == SafePending.Kind.TX } ?: return
@@ -781,6 +904,12 @@ class SafeAccounts internal constructor(
         const val MAX_MESSAGES = 10
         const val MAX_MESSAGE = 4_000
 
+        /** How many times [confirmActivation] reads a mined activation's code before leaving it to the Safe page. */
+        private const val ACTIVATION_READS = 4
+
+        /** How long after a mined activation a "no code" read reads as [SafeDeployment.SETTLING], not [SafeDeployment.NOT_ACTIVE]. */
+        internal const val ACTIVATION_SETTLE_MS = 10 * 60_000L
+
         @Volatile
         private var instance: SafeAccounts? = null
 
@@ -800,9 +929,28 @@ class SafeAccounts internal constructor(
                 store = SafeStore.get(app),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
                 ledgerSign = { account, data, digest -> Ledger.get(app).signTypedData(account, data, digest) },
+                readDeployment = SafeChain.get(app)::deployment,
             )
         }
     }
+}
+
+/** What [SafeChain.deployment] found at a Safe's address. */
+enum class SafeDeployment {
+    /** Its code, on a verified read. */
+    ACTIVE,
+
+    /** No code: not activated yet. */
+    NOT_ACTIVE,
+
+    /** Code, but no verified read confirms it: left pending, to check again. */
+    UNVERIFIED,
+
+    /**
+     * No code yet, but its activation was just seen mined ([SafeAccounts.checkDeployed]
+     * only): the RPCs are behind that block. Activation isn't offered again; left pending, to check again.
+     */
+    SETTLING,
 }
 
 /** Which owner lists and thresholds a Safe can have. */
@@ -826,7 +974,23 @@ class SafeChain(private val rpc: WalletRpc) {
         val shortfall: BigInteger get() = (maxFee - balance).max(BigInteger.ZERO)
     }
 
+    /** Whether there's code at [address], on any RPC's word: for reads only, never to mark a Safe active ([deployment]). */
     suspend fun deployed(chainId: Long, address: String): Boolean = rpc.code(chainId, address).value.length > 2
+
+    /**
+     * What's at [address] (#535): no code is [SafeDeployment.NOT_ACTIVE];
+     * code is [SafeDeployment.ACTIVE] only on a verified read — a proof, or
+     * an RPC quorum agreeing — and [SafeDeployment.UNVERIFIED] on one RPC's
+     * word, even one the user added, as desktop (#1066).
+     */
+    suspend fun deployment(chainId: Long, address: String): SafeDeployment {
+        val code = rpc.code(chainId, address)
+        return when {
+            code.value.length <= 2 -> SafeDeployment.NOT_ACTIVE
+            code.trust.level == ChainTrust.Level.VERIFIED -> SafeDeployment.ACTIVE
+            else -> SafeDeployment.UNVERIFIED
+        }
+    }
 
     suspend fun nonce(chainId: Long, safe: String): BigInteger =
         SafeProtocol.decodeUint(call(chainId, safe, SafeProtocol.NONCE_CALL)) ?: throw SafeException(Strings.get(R.string.safe_error_no_nonce))
