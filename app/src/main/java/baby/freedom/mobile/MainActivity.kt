@@ -564,8 +564,9 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
                 }
         }
 
-        // The Colibri proofs switch covers the chain-data router's reads
-        // too (#329): this process's, and `:node`'s through the relay.
+        // The Colibri proofs switch governs the chain-data router's reads
+        // (#329; names never use Colibri, #529): this process's, and
+        // `:node`'s through the relay.
         lifecycleScope.launch {
             settings.ensColibri
                 .catch { android.util.Log.w("MainActivity", "reading the Colibri proofs setting failed (${it.javaClass.simpleName})") }
