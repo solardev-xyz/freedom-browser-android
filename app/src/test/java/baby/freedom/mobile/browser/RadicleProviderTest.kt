@@ -55,6 +55,7 @@ class RadicleProviderTest {
         val seeds = mutableListOf<String>()
         val unseeds = mutableListOf<String>()
         var writeAnswer: RadicleClient.Answer = RadicleClient.Answer.Ok(JSONObject().put("id", "abcdef1234"))
+        var repoInfo: RadicleClient.Answer = RadicleClient.Answer.Failed("repository not found", null)
         /** The identity the node runs as; [onIdentity] runs after each identity read. */
         var did = ME
         /** Whether [did] is the wallet's, as `:node` answers it (RadicleNode.WALLET_IDENTITY). */
@@ -75,7 +76,7 @@ class RadicleProviderTest {
                 ).also { onIdentity() }
                 "status" -> RadicleClient.Answer.Ok(JSONObject().put("connectedPeers", 5))
                 "listSeededRepos" -> RadicleClient.Answer.Ok(seeded)
-                "repoInfo" -> RadicleClient.Answer.Failed("repository not found", null)
+                "repoInfo" -> repoInfo
                 "createIssue", "commentIssue", "editIssueState", "commentPatch" -> writeAnswer
                 else -> RadicleClient.Answer.Failed("unexpected $method", null)
             }
@@ -755,6 +756,55 @@ class RadicleProviderTest {
             assertTrue((ok(req("radicle_seed", JSONObject().put("rid", other))) as JSONObject).getBoolean("seeded"))
             scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         }
+    }
+
+    @Test
+    fun `a storage read the node didn't answer never calls a fetched repository idle`() {
+        grants.map[site] = ""
+        val busy = RadicleClient.Answer.Failed("The Radicle node is busy; try again", RadicleClient.REASON_BUSY)
+        fun status() = req("radicle_getSeedStatus", JSONObject().put("rid", rid))
+        // Nothing known yet: the page is told to try again, not "idle".
+        node.repoInfo = busy
+        val e = err(status())
+        assertEquals(RadicleProvider.UNAVAILABLE, e.code)
+        assertEquals(RadicleClient.REASON_BUSY, e.reason)
+        // The node says it's there; a later refusal keeps that answer.
+        node.repoInfo = RadicleClient.Answer.Ok(JSONObject().put("rid", rid))
+        assertEquals("fetched", (ok(status()) as JSONObject).getString("state"))
+        for (reason in listOf(RadicleClient.REASON_BUSY, RadicleClient.REASON_TIMEOUT, RadicleClient.REASON_STOPPED)) {
+            node.repoInfo = RadicleClient.Answer.Failed("no answer", reason)
+            val s = ok(status()) as JSONObject
+            assertEquals(reason, "fetched", s.getString("state"))
+            assertTrue(reason, s.getBoolean("inStorage"))
+        }
+        // A real "not found" is an answer, and is believed.
+        node.repoInfo = RadicleClient.Answer.Failed("repository not found", null)
+        assertEquals("idle", (ok(status()) as JSONObject).getString("state"))
+        // A stopped node with nothing known says so.
+        val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        node.reason = RadicleClient.REASON_STOPPED
+        node.repoInfo = RadicleClient.Answer.Failed("stopped", RadicleClient.REASON_STOPPED)
+        assertEquals(RadicleClient.REASON_STOPPED, err(req("radicle_getSeedStatus", JSONObject().put("rid", other))).reason)
+    }
+
+    @Test
+    fun `a seedStatus event keeps the last known storage when the node is busy`() {
+        grants.map[site] = ""
+        val events = mutableListOf<JSONObject>()
+        provider.events = RadicleProvider.Events { _, e, d -> if (e == "seedStatus") events += d as JSONObject }
+        runBlocking {
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Unconfined)
+            provider.start(scope)
+            node.repoInfo = RadicleClient.Answer.Ok(JSONObject().put("rid", rid))
+            node.seeded = JSONArray().put(JSONObject().put("rid", rid))
+            ok(req("radicle_sync", JSONObject().put("rid", rid)))
+            node.repoInfo = RadicleClient.Answer.Failed("busy", RadicleClient.REASON_BUSY)
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "connecting", "a (1/3)"))
+            node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(rid, "failed", "no seeds found", active = false))
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        }
+        assertEquals(listOf("fetching", "failed"), events.map { it.getString("state") })
+        assertTrue(events.all { it.getBoolean("inStorage") })
     }
 
     @Test

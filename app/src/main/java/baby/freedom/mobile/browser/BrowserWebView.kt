@@ -1720,6 +1720,12 @@ fun BrowserWebViewHost(
                 // (and keep reconnecting) for as long as the process is
                 // cached, with no page to deliver to.
                 for (tab in tabs.tabs) SwarmProviders.onDocumentStarted(tab, url = null)
+                // Its Radicle reads too (#533): queued and running ones
+                // would otherwise hold their per-tab places and `:node`'s
+                // slots until their own wait or deadline ran out, and
+                // their prompts stay up for a page that's gone. Tab ids
+                // aren't reused within a process, so closing is final.
+                for (tab in tabs.tabs) RadicleProviders.onTabClosed(tab.id)
                 // The tabs go too, private ones included (#316): the
                 // process can outlive them (the :node service keeps it),
                 // and a private tab still counted would keep emptying
@@ -4208,6 +4214,7 @@ private fun buildRefreshableWebView(
                         freshDocument = { target -> state.fetchedFresh(generation, target) },
                         private = state.private,
                         abandon = ticket,
+                        tabId = state.id,
                         onMainFrameRoot = { served ->
                             noteMainFrameContentLoad(view, state, generation, served)
                         },
@@ -6298,6 +6305,8 @@ internal fun interceptVirtualRequest(
     private: Boolean = false,
     /** Whether the page has given up on this request ([DwebAborts]); null: never asked. */
     abandon: AbandonSignal? = null,
+    /** The tab asking, for its Radicle reads (#533); null: a worker's or a native re-fetch. */
+    tabId: Long? = null,
     onMainFrameRoot: (ContentRoot?) -> Unit = {},
     onMainFrameGateway: (String?) -> Unit = {},
 ): WebResourceResponse? {
@@ -6323,7 +6332,7 @@ internal fun interceptVirtualRequest(
     // the whole process — every tab — so a bug a page can reach (#355:
     // a page-chosen Range header) answers a 502 instead.
     val response = try {
-        RadApi.intercept(req, url)
+        RadApi.intercept(req, url, tabId)
             ?: interceptOnchainAppRequest(req, url, onchain)
             ?: siteDataCleanupFor(req, url, tab, private)
             ?: interceptVirtualRequestFor(req, ensPins, incoming, assertedProtocol, freshFetch, freshDocument, onMainFrameRoot, onMainFrameGateway, private, abandon)

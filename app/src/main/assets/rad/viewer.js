@@ -319,6 +319,15 @@
       return notice('warn', S.stopped_title,
         el('p', { text: S.stopped_body }));
     }
+    if (reason === 'busy') {
+      return notice('warn', S.busy_title, el('p', { text: S.busy_body }));
+    }
+    if (reason === 'timeout') {
+      return notice('warn', S.timed_out_title, el('p', { text: S.timed_out_body }));
+    }
+    if (reason === 'too-large') {
+      return notice('error', S.too_large_title, el('p', { text: S.too_large_body }));
+    }
     if (err && err.status === 404 && rid) {
       return notice('error', S.repo_not_found_title,
         el('p', null, fmtNodes(S.repo_not_found_body, el('code', { text: 'rad://' + rid }))),
