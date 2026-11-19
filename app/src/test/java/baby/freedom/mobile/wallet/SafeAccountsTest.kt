@@ -19,9 +19,11 @@ import baby.freedom.mobile.ens.toHex
 import java.io.File
 import java.math.BigInteger
 import java.nio.file.Files
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -924,6 +926,25 @@ class SafeAccountsTest {
         catching.noteSend(confirmed)
         withTimeout(5_000) { while (catching.state.value?.safes?.single()?.deployed != true) delay(5) }
         assertEquals(2, tries)
+    }
+
+    @Test
+    fun `a read throwing an Error while confirming a mined activation is caught, and the next read still marks it`() = runBlocking<Unit> {
+        val safe = opened().create("", listOf(account1.address, other), 1, local)
+        val deploy = SafeProtocol.deploymentData(safe.owners, 1, safe.saltNonce)
+        val confirmed = execStatus(safe, deploy, true, SendStatus.Stage.Confirmed(10, null), "0x" + "e4".repeat(32))
+        // As in production: an unattended job on a SupervisorJob; anything escaping it would reach the handler (the app's default one, a crash).
+        val uncaught = mutableListOf<Throwable>()
+        val background = CoroutineScope(SupervisorJob(job) + Dispatchers.Unconfined + CoroutineExceptionHandler { _, e -> uncaught += e })
+        var reads = 0
+        val s = SafeAccounts(
+            vault, SafeStore(file), background, Dispatchers.Unconfined, clock = { 42L }, activationRetryMs = 1,
+            readDeployment = { _, _ -> if (reads++ == 0) throw StackOverflowError("deep") else SafeDeployment.ACTIVE },
+        ).also { it.reconcile(vault.state.value) }
+        s.noteSend(confirmed)
+        withTimeout(5_000) { while (s.state.value?.safes?.single()?.deployed != true) delay(5) }
+        assertEquals(2, reads)
+        assertTrue(uncaught.isEmpty())
     }
 
     @Test

@@ -1,6 +1,7 @@
 package baby.freedom.mobile.wallet
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import baby.freedom.mobile.R
@@ -400,8 +401,8 @@ class SafeAccounts internal constructor(
     private val readDeployment: suspend (chainId: Long, address: String) -> SafeDeployment = { _, _ -> SafeDeployment.UNVERIFIED },
     /** How long [noteSend] waits between reads of a just-mined activation that weren't verified yet. */
     private val activationRetryMs: Long = 5_000,
-    /** A clock immune to wall-clock changes, for how long a mined activation holds off a "no code" read. */
-    private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** A clock immune to wall-clock changes that keeps counting in deep sleep, for how long a mined activation holds off a "no code" read. */
+    private val monotonicMs: () -> Long = SystemClock::elapsedRealtime,
 ) {
     private val _state = MutableStateFlow<SafeState?>(null)
 
@@ -790,7 +791,8 @@ class SafeAccounts internal constructor(
                         checkDeployed(current)
                     } catch (e: CancellationException) {
                         throw e
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
+                        // Unattended, with no handler on the scope: nothing it throws may reach the default handler and take the app down.
                         Log.w(TAG, "activation check: ${e.message}")
                         null
                     }

@@ -510,7 +510,7 @@ internal fun SafePage(
         checkError = null
         activationNote = null
         // Until this check has priced it again, an earlier price must not stand: the Safe may be active by now.
-        var settled = false
+        activation = null
         try {
             if (!safe.deployed) {
                 when (safes.checkDeployed(safe)) {
@@ -528,7 +528,6 @@ internal fun SafePage(
                     }
                 }
             }
-            settled = true
             holdings = TokenRegistry.tokens(c).mapNotNull { token ->
                 val held = if (token.address == null) chainReads.balance(c.id, safe.address) else chainReads.tokenBalance(c.id, token.address, safe.address)
                 (token to held).takeIf { token.isNative || held.signum() > 0 }
@@ -536,7 +535,6 @@ internal fun SafePage(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (!settled) activation = null
             checkError = safeErrorMessage(e, Strings.get(R.string.safe_action_read), phraseBackedUp)
         } finally {
             checking = false
@@ -962,7 +960,8 @@ private fun SafeActivationSection(
                 )
                 Spacer(Modifier.height(8.dp))
                 error?.let { FieldText(it, error = true) }
-                Button(onClick = onActivate, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                // Not while a check runs either: what it finds may well be that the Safe is active already.
+                Button(onClick = onActivate, enabled = !busy && !checking, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                     if (busy) BusySpinner(stringResource(R.string.safe_activation_pricing)) else Text(stringResource(R.string.safe_activate_on, chain.name))
                 }
             }
