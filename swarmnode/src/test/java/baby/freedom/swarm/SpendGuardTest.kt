@@ -250,6 +250,32 @@ class SpendGuardTest {
     }
 
     @Test
+    fun aRefusedSwapIsToldApartFromARefusedTransfer() {
+        // #566 R2-F2: a top-up's refusal names what was refused. A swap of
+        // more xDAI than confirmed is about the wallet, not the chequebook.
+        val swapRefused = SpendPermit(topUp)
+        SpendGuard.during(swapRefused) {
+            assertFalse(SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap.add(BigInteger.ONE)))))
+        }
+        assertTrue(swapRefused.refusedAny())
+        assertTrue(swapRefused.refusedSwap())
+        assertFalse(swapRefused.used(SpendPermit.Slot.Swap))
+
+        val transferRefused = SpendPermit(topUp)
+        SpendGuard.during(transferRefused) {
+            assertTrue(SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap))))
+            assertFalse(SpendGuard.admit(TestTx.request(TestTx.transfer(chequebook, topUpAmount.add(BigInteger.ONE)))))
+        }
+        assertTrue(transferRefused.refusedAny())
+        assertFalse(transferRefused.refusedSwap())
+
+        val junk = SpendPermit(topUp)
+        SpendGuard.during(junk) { assertFalse(SpendGuard.admit("{}")) }
+        assertTrue(junk.refusedAny())
+        assertFalse(junk.refusedSwap())
+    }
+
+    @Test
     fun aClosedPermitLetsNothingOutAndSaysWhatItLetOut() {
         // #566 R1-F2: the deposit's hold is decided from what the permit let
         // out, after the spend ends. A transport thread that picked the permit

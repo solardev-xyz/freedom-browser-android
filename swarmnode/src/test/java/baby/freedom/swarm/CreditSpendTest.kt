@@ -197,6 +197,38 @@ class CreditSpendTest {
     }
 
     @Test
+    fun `spend dated while the clock ran ahead leaves the windows once the clock is corrected`() {
+        // #566 R2-F1: the clock 30 days ahead; aa grows 100 -> 150 across two
+        // readings five minutes apart; NTP corrects it. Ten real days later
+        // that payment is no "last 24 hours" spend, nor any week's.
+        val ahead = t0 + 30 * DAY_MS
+        var ledger = record(null, listOf(row("aa", 100)), ahead).first
+        ledger = record(ledger, listOf(row("aa", 150)), ahead + SAMPLE_MS).first
+        assertEquals(big(50), spendWithin(ledger, DAY_MS, ahead + SAMPLE_MS))
+        val real = t0 + 10 * DAY_MS
+        assertEquals(BigInteger.ZERO, spendWithin(ledger, DAY_MS, real))
+        assertEquals(BigInteger.ZERO, spendWithin(ledger, WEEK_MS, real))
+        // Also when read back from disk.
+        val stored = CreditSpend.fromJson(CreditSpend.toJson(ledger))!!
+        assertEquals(BigInteger.ZERO, spendWithin(stored, DAY_MS, real))
+        assertEquals(BigInteger.ZERO, spendWithin(stored, WEEK_MS, real))
+        // The next reading drops the future bucket and the future `since`,
+        // and later spend lands in a bucket of its own, in order.
+        val (next, changed) = record(stored, listOf(row("aa", 150)), real)
+        assertTrue(changed)
+        assertEquals(emptyList<SpendBucket>(), next.buckets)
+        assertEquals(real, next.since)
+        ledger = record(next, listOf(row("aa", 157)), real + SAMPLE_MS).first
+        assertEquals(listOf(big(7)), ledger.buckets.map { it.plur })
+        assertEquals(big(7), spendWithin(ledger, DAY_MS, real + SAMPLE_MS))
+        // A bucket for the hour now is in, however late in the hour.
+        val hour = Math.floorDiv(real, BUCKET_MS) * BUCKET_MS
+        val one = SpendLedger(real, real, emptyMap(), listOf(SpendBucket(hour, big(3))))
+        assertEquals(big(3), spendWithin(one, DAY_MS, hour))
+        assertEquals(BigInteger.ZERO, spendWithin(one, DAY_MS, hour - 1))
+    }
+
+    @Test
     fun `reads the gateway's settlements and ignores malformed rows`() {
         val rows = CreditSpend.rowsFrom(
             """{"totalReceived":"0","totalSent":"10","settlements":[

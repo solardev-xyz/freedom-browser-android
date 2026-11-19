@@ -1049,6 +1049,32 @@ class SwarmNodeTest {
     }
 
     @Test
+    fun aTopUpWhoseSwapTheGuardRefusedSaysSoNotTheChequebook() {
+        // #566 R2-F2: xDAI reached the node after the review read /wallet, so
+        // ant tries to swap more than the review showed; the guard refuses the
+        // swap and ant answers 502. The reason is the swap, not the chequebook.
+        val ops = FakeOps()
+        val node = lightNode(ops)
+        ops.chequebookHex = chequebook
+        ops.walletPlur = tenthBzz.toString()
+        ops.chequebookBalancePlur = milliBzz.toString()
+        ops.onTopUp = {
+            assertFalse(SpendGuard.admit(TestTx.request(TestTx.swap(maxSwap.add(java.math.BigInteger.ONE)))))
+            SwarmNode.GatewayAnswer(
+                502,
+                """{"code":502,"message":"chain tx: swap: rpc error -32003: Freedom only lets the Swarm node send transactions you confirmed in the app"}""",
+            )
+        }
+        val e = assertThrows(RuntimeException::class.java) { node.topUpCredit(chequebook, tenthBzz, maxSwap) }
+        assertFalse(e is DepositMaybeSentException)
+        assertTrue(e.message!!, e.message!!.startsWith("the node asked to swap more xDAI than you confirmed"))
+        assertFalse(e.message!!, e.message!!.contains("chequebook's balance"))
+        // No hold: a plain deposit may go at once.
+        assertTrue(node.depositChequebook(chequebook, milliBzz).contains("transactionHash"))
+        node.dispose()
+    }
+
+    @Test
     fun anUnansweredDepositWhoseTransferNeverWentOutTakesNoHold() {
         // The POST read timed out, but the permit let no transfer out, and it's
         // closed now: nothing can reach the chequebook from this deposit.

@@ -111,7 +111,8 @@ internal object CreditSpend {
         // corrected) says nothing about how long the node went unwatched.
         val dated = at - ledger.sampled in 0..MAX_SAMPLE_GAP_MS
         // A saved `sampled` in the future is rewritten to now, like a peer's.
-        var changed = ledger.sampled > at
+        // So is a `since` in the future: the history can't start after now.
+        var changed = ledger.sampled > at || ledger.since > at
         val peers = LinkedHashMap<String, SpendPeer>()
         for ((peer, known) in ledger.peers) {
             // A last-seen in the future (the clock stepped back) is read as now.
@@ -146,7 +147,11 @@ internal object CreditSpend {
             }
         }
 
-        var buckets = ledger.buckets.filter { it.start + BUCKET_MS > cutoff }
+        // A bucket that starts after now was dated by a clock that ran ahead
+        // (since corrected): its hour never happened yet, so it goes, like
+        // any spend that can't be placed, rather than stay in the windows
+        // until real time catches up with it.
+        var buckets = ledger.buckets.filter { it.start + BUCKET_MS > cutoff && it.start <= at }
         if (buckets.size != ledger.buckets.size) changed = true
         if (spent.signum() > 0) {
             val start = Math.floorDiv(at, BUCKET_MS) * BUCKET_MS
@@ -157,17 +162,18 @@ internal object CreditSpend {
                 buckets + SpendBucket(start, spent)
             }
         }
-        return SpendLedger(ledger.since, at, peers, buckets, current.keys) to changed
+        return SpendLedger(minOf(ledger.since, at), at, peers, buckets, current.keys) to changed
     }
 
     /**
      * Spend in the buckets that overlap the last [windowMs] before [at]: a
      * rolling window, up to one bucket (an hour) longer than [windowMs],
-     * since the oldest bucket counts whole.
+     * since the oldest bucket counts whole. A bucket starting after [at]
+     * (dated while the clock ran ahead) is in no window.
      */
     fun spendWithin(ledger: SpendLedger?, windowMs: Long, at: Long): BigInteger {
         val from = at - windowMs
-        return ledger?.buckets.orEmpty().filter { it.start + BUCKET_MS > from }
+        return ledger?.buckets.orEmpty().filter { it.start + BUCKET_MS > from && it.start <= at }
             .fold(BigInteger.ZERO) { sum, b -> sum + b.plur }
     }
 

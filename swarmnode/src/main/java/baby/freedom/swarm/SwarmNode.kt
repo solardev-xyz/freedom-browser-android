@@ -923,8 +923,9 @@ class SwarmNode internal constructor(
      * no transfer to the chequebook out ([SpendPermit.Slot.Deposit]), none
      * left the phone, whatever ant answered. That's a guard refusal (the
      * chequebook shrank between ant's read and its transfer, so it asked
-     * for more than was confirmed), which ant reports as a 502 like any
-     * RPC error, or a failure before the transfer (a top-up's swap): no
+     * for more than was confirmed) or, for a top-up, a refused swap (the
+     * wallet's xDAI changed, so ant tried to swap more than the review
+     * showed), which ant reports as a 502 like any RPC error, or a failure before the transfer (a top-up's swap): no
      * hold, and the real reason.
      */
     private fun sendDeposit(
@@ -945,6 +946,7 @@ class SwarmNode internal constructor(
                 when {
                     // ant reports the guard's refusal as an RPC error, a 502;
                     // any other answer carries ant's own reason.
+                    answer?.code == 502 && permit.refusedSwap() -> SwarmStrings.get(R.string.swarmnode_topup_swap_refused)
                     answer?.code == 502 && permit.refusedAny() -> SwarmStrings.get(R.string.swarmnode_deposit_refused)
                     answer == null -> SwarmStrings.get(R.string.swarmnode_deposit_not_sent, SwarmStrings.get(R.string.swarmnode_gateway_no_answer))
                     else -> message ?: SwarmStrings.get(R.string.swarmnode_deposit_failed_http, answer.code)

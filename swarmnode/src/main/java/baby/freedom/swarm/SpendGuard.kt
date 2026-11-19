@@ -263,6 +263,7 @@ class SpendPermit(val plan: SpendPlan) {
     private val admitted = HashSet<String>()
     private var closed = false
     private var refusedAny = false
+    private var refusedXdai = false
 
     /**
      * Is [requestJson] a broadcast this permit lets through? Marks its slot
@@ -273,7 +274,12 @@ class SpendPermit(val plan: SpendPlan) {
     fun admit(requestJson: String): Boolean {
         if (closed) return false
         val ok = lets(requestJson)
-        if (!ok) refusedAny = true
+        if (!ok) {
+            refusedAny = true
+            // A refused transaction carrying xDAI is a swap: only a swap does.
+            val tx = rawTransaction(requestJson)?.let(::hexBytes)?.let(LegacyTx::decode)
+            if (tx != null && tx.value.signum() != 0) refusedXdai = true
+        }
         return ok
     }
 
@@ -304,6 +310,13 @@ class SpendPermit(val plan: SpendPlan) {
     /** Whether this permit refused a broadcast while it was open (not counting stragglers after [close]). */
     @Synchronized
     fun refusedAny(): Boolean = refusedAny
+
+    /**
+     * Whether a refused broadcast carried xDAI, i.e. was a swap (more xDAI
+     * than confirmed): the refusal was about the wallet, not the chequebook.
+     */
+    @Synchronized
+    fun refusedSwap(): Boolean = refusedXdai
 
     /** Which of the plan's transactions [tx] is, or null if it's none of them. */
     internal fun slotFor(tx: LegacyTx): Slot? {
