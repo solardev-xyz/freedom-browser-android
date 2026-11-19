@@ -5,7 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** The Colibri proofs switch as the router reads it (#329). */
+/** The Proof check (Colibri) switch as the router reads it (#329). */
 class ColibriReadsTest {
     @After
     fun tearDown() = ColibriReads.reset()

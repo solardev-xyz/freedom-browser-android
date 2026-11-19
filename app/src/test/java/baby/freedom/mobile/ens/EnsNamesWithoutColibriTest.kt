@@ -13,7 +13,7 @@ import org.junit.Test
  * a lookup's `eth_call` on contract code it takes from an RPC server
  * without checking it against the proven code hash, so a call that reads
  * no storage proves nothing: one dishonest server could make up an
- * answer that showed as a *Proven name*. With *Colibri proofs* on in
+ * answer that showed as a *Proven name*. With *Proof check* (Colibri) on in
  * Settings (they still prove chain reads), a name's answer is the RPC
  * servers' and labelled as theirs.
  */
@@ -41,7 +41,7 @@ class EnsNamesWithoutColibriTest {
         }
     }
 
-    /** The resolver as the app builds it, from Settings with Colibri proofs on. */
+    /** The resolver as the app builds it, from Settings with Proof check (Colibri) on. */
     private fun resolver(http: EnsHttp): EnsResolver {
         val config = EnsRpcConfig(customEndpoints = listOf(rpc), colibri = true)
         // Only this server, so a forged answer has nobody to disagree with.

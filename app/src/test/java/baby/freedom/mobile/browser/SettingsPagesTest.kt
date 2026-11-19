@@ -183,7 +183,7 @@ class SettingsPagesTest {
             }
             return settingsResultGroups(visible, isDefaultBrowser = false)
         }
-        // The Colibri proofs switch covers Gnosis reads too (#329), so its
+        // The Proof check (Colibri) switch covers Gnosis reads too (#329), so its
         // row is found as well.
         assertEquals(
             listOf(SettingsPage.Wallet to listOf(SettingsSection.Chains), SettingsPage.Names to listOf(SettingsSection.Ens)),
@@ -196,6 +196,10 @@ class SettingsPagesTest {
             groups("ipfs"),
         )
         assertEquals(listOf(SettingsPage.Names to listOf(SettingsSection.Ens)), groups("colibri"))
+        // #548: the switch's plain name, and the technical words now only
+        // under its Advanced fold, both still find it.
+        assertEquals(listOf(SettingsPage.Names to listOf(SettingsSection.Ens)), groups("proof check"))
+        assertEquals(listOf(SettingsPage.Names to listOf(SettingsSection.Ens)), groups("sync committee"))
         assertEquals(
             listOf(SettingsPage.Names to listOf(SettingsSection.Ens, SettingsSection.Rpc)),
             groups("name resolution"),
@@ -219,8 +223,8 @@ class SettingsPagesTest {
         assertEquals("2 of 4 blocklists on", adblockPageSummary(2, 4, 0))
         assertEquals("Locked · 1 chain", walletPageSummary("Locked", 1))
         assertEquals("Locked · 3 chains", walletPageSummary("Locked", 3))
-        assertEquals("5 RPC endpoints · Colibri chain-read proofs on", namesPageSummary(true, 5))
-        assertEquals("1 RPC endpoint · Colibri chain-read proofs off", namesPageSummary(false, 1))
+        assertEquals("5 RPC endpoints · Proof check for chain reads on", namesPageSummary(true, 5))
+        assertEquals("1 RPC endpoint · Proof check for chain reads off", namesPageSummary(false, 1))
         assertEquals(
             "Swarm: embedded · IPFS: external · Radicle: Off",
             nodesPageSummary("", "https://gw.example", "Off"),

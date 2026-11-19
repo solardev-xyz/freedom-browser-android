@@ -219,7 +219,7 @@ interface INodeService {
     oneway void clearLogs();
 
     /**
-     * The *Colibri proofs* switch (Settings → Name resolution, #329),
+     * The *Proof check* (Colibri) switch (Settings → Name resolution, #329),
      * which also decides whether the chain-data router's Gnosis reads for
      * the Swarm node go to the Colibri prover. The setting lives in the UI
      * process's DataStore, so the UI relays it on every bind and change

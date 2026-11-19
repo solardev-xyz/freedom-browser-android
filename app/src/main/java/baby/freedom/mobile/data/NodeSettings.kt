@@ -705,7 +705,7 @@ class NodeSettings private constructor(
         }
 
     /**
-     * The *Colibri proofs* switch alone, straight from this file (no
+     * The *Proof check* (Colibri) switch alone, straight from this file (no
      * migration, no key store): what the chain-data router's Colibri tier
      * follows ([baby.freedom.mobile.chains.rpc.ColibriReads], #329).
      */

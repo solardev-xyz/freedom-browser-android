@@ -23,11 +23,11 @@
     <!-- A chain row's status: how its reads are checked. -->
     <string name="names_chain_status_verified">Verified reads</string>
     <string name="names_chain_status_verified_fallback">Verified reads when available</string>
-    <string name="names_chain_status_yours">Reads from your RPC</string>
-    <string name="names_chain_status_yours_fallback">Reads from your RPC first</string>
+    <string name="names_chain_status_yours">Reads from your server</string>
+    <string name="names_chain_status_yours_fallback">Reads from your server first</string>
     <string name="names_chain_status_unchecked">Reads not cross-checked</string>
-    <!-- The chain page's opening line. %1$s: the tier's name (P2P light client, Colibri prover) -->
-    <string name="names_assurance_proof">Reads are proven on this device by the %1$s, and cross-checked across providers when it can\'t answer.</string>
+    <!-- The chain page's opening line. %1$s: the source's name (Local node, Proof check) -->
+    <string name="names_assurance_proof">%1$s: reads are proven on this device, and cross-checked across providers when that can\'t answer.</string>
     <plurals name="names_assurance_cross_checked">
         <item quantity="one">Reads are cross-checked across %d provider.</item>
         <item quantity="other">Reads are cross-checked across %d providers.</item>
@@ -62,20 +62,22 @@
     <string name="names_rpc_add_full">Remove one of your RPCs first: a chain takes at most %1$d of your own.</string>
     <string name="names_rpc_add_no_chain">Go back to the chain list: this chain was removed.</string>
     <string name="names_rpc_add_failed">Try again: the RPC couldn\'t be saved.</string>
-    <!-- Read steps: %1$s is the tier's name (P2P light client, RPC quorum, …). -->
+    <!-- Read steps: %1$s is the source's name (Local node, Several servers must agree, …). -->
     <string name="names_read_step_proof">%1$s: a proof checked on this device</string>
+    <!-- The Proof check (Colibri) step: a server answers with a proof. -->
+    <string name="names_read_step_prover">%1$s: a server answers, and this device checks its proof</string>
     <!-- %2$d: answers that must match, %3$d: RPCs asked (the plural's count) -->
     <plurals name="names_read_step_quorum">
-        <item quantity="one">%1$s: %2$d of the first %3$d RPC (each from a different provider) must give the same answer — verified</item>
-        <item quantity="other">%1$s: %2$d of the first %3$d RPCs (each from a different provider) must give the same answer — verified</item>
+        <item quantity="one">%1$s: %2$d of the first %3$d RPC, each from a different provider — verified</item>
+        <item quantity="other">%1$s: %2$d of the first %3$d RPCs, each from a different provider — verified</item>
     </plurals>
     <plurals name="names_read_step_quorum_yours_among">
-        <item quantity="one">%1$s: %2$d of the first %3$d RPC (each from a different provider, yours among them) must give the same answer — verified</item>
-        <item quantity="other">%1$s: %2$d of the first %3$d RPCs (each from a different provider, yours among them) must give the same answer — verified</item>
+        <item quantity="one">%1$s: %2$d of the first %3$d RPC, each from a different provider, yours among them — verified</item>
+        <item quantity="other">%1$s: %2$d of the first %3$d RPCs, each from a different provider, yours among them — verified</item>
     </plurals>
     <plurals name="names_read_step_quorum_all_yours">
-        <item quantity="one">%1$s: %2$d of the first %3$d RPC (each from a different provider, all of them yours) must give the same answer — verified</item>
-        <item quantity="other">%1$s: %2$d of the first %3$d RPCs (each from a different provider, all of them yours) must give the same answer — verified</item>
+        <item quantity="one">%1$s: %2$d of the first %3$d RPC, each from a different provider, all of them yours — verified</item>
+        <item quantity="other">%1$s: %2$d of the first %3$d RPCs, each from a different provider, all of them yours — verified</item>
     </plurals>
     <!-- %2$d: providers needed (the plural's count), %3$d: providers the chain has -->
     <plurals name="names_read_step_quorum_skipped">
@@ -84,7 +86,7 @@
     </plurals>
     <!-- A numbered read step. %1$d: its number, %2$s: the step -->
     <string name="names_read_step_numbered">%1$d. %2$s</string>
-    <string name="names_read_step_direct">%1$s: otherwise the first RPC that answers — unverified, or marked as yours if it\'s one of your RPCs</string>
+    <string name="names_read_step_direct">%1$s: otherwise the first RPC that answers, marked as yours if it\'s one of your RPCs</string>
     <!-- %1$s: hosts, comma-separated -->
     <string name="names_trust_dissent">%1$s answered differently</string>
     <!-- %1$d: RPCs that agreed, %2$d: RPCs asked (the plural's count), %3$s: their hosts -->
@@ -92,8 +94,8 @@
         <item quantity="one">Verified: %1$d of %2$d RPC agreed (%3$s)</item>
         <item quantity="other">Verified: %1$d of %2$d RPCs agreed (%3$s)</item>
     </plurals>
-    <!-- %1$s: the tier's name (P2P light client, Colibri prover) -->
-    <string name="names_trust_verified_by">Verified by the %1$s</string>
+    <!-- %1$s: the source's name (Local node, Proof check) -->
+    <string name="names_trust_verified_by">Verified: %1$s</string>
     <string name="names_trust_your_rpc">From your RPC %1$s</string>
     <string name="names_trust_unverified">Unverified: only %1$s\'s word</string>
     <string name="names_user_rpcs_note_lead">Your own node or provider for this chain.</string>
@@ -142,15 +144,15 @@
     <string name="names_public_rpcs">Public RPCs</string>
     <string name="names_how_reads_are_checked">How reads are checked</string>
     <!-- %1$s: chain name -->
-    <string name="names_proof_tiers_missing">The P2P light client isn\'t verifying %1$s reads right now: it\'s off for this chain, still syncing, or waiting on a fresh checkpoint. Turn it on and follow its sync under Nodes &amp; networks → Ethereum light client.</string>
+    <string name="names_proof_tiers_missing">The local node isn\'t checking %1$s reads right now: it\'s off for this chain, still syncing, or waiting on a fresh checkpoint. Turn it on and follow its sync under Nodes &amp; networks → Ethereum light client.</string>
     <!-- %1$s: chain name -->
-    <string name="names_light_client_tier_not_in_build">The P2P light client, which verifies %1$s reads with a proof, isn\'t available in this build.</string>
+    <string name="names_light_client_tier_not_in_build">The local node, which checks %1$s reads with a proof, isn\'t available in this build.</string>
     <!-- %1$s: chain name -->
-    <string name="names_colibri_tier_off">The Colibri prover isn\'t checking %1$s reads: Colibri proofs are off under Settings → Name resolution.</string>
+    <string name="names_colibri_tier_off">Proof check isn\'t checking %1$s reads: it\'s off under Settings → Name resolution.</string>
     <!-- %1$s: chain name -->
-    <string name="names_colibri_tier_unreachable">The Colibri prover isn\'t checking %1$s reads right now: it couldn\'t be reached, so reads skip it for a while and try it again after.</string>
+    <string name="names_colibri_tier_unreachable">Proof check isn\'t checking %1$s reads right now: its proof server couldn\'t be reached, so reads skip it for a while and try it again after.</string>
     <!-- %1$s: chain name -->
-    <string name="names_colibri_tier_not_in_build">The Colibri prover, which verifies %1$s reads with a proof, isn\'t available in this build.</string>
+    <string name="names_colibri_tier_not_in_build">Proof check, which verifies %1$s reads with a proof, isn\'t available in this build.</string>
     <!-- Check failed: what to do first. The raw reason (names_check_unknown_chain, …) is behind Show details. -->
     <string name="names_check_failed_unknown_chain">Go back to the chain list: this chain isn\'t set up any more.</string>
     <string name="names_check_failed_refused">Try again in a moment: an RPC refused the read. If it keeps happening, use your own RPC.</string>
@@ -208,9 +210,10 @@
     <!-- browser/NameResolutionSettings.kt -->
     <string name="names_section_ens">Name resolution</string>
     <string name="names_section_rpc">RPC providers</string>
-    <string name="names_ens_about">How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With the P2P light client running, an answer is proven first: checked on this device against Ethereum\'s own consensus. An answer it can\'t give is cross-checked: it\'s only trusted when at least two RPC endpoints return exactly the same one. An answer only one endpoint gave is shown to you before anything loads.</string>
-    <string name="names_colibri_title">Colibri proofs</string>
-    <string name="names_colibri_help">When the P2P light client isn\'t answering them, the wallet\'s and the Swarm node\'s Ethereum and Gnosis reads, and the reads sites make through window.ethereum and web3://, go to corpus.core\'s Colibri prover (colibri-proof.tech), and its proof is checked on this device against each chain\'s own sync committee. The prover learns the addresses and contracts they read. That proves an account\'s balance and nonce at the latest block, a block looked up by number or hash, and a transaction receipt whose proof names the transaction asked for. A contract call (a token balance, most of what a dapp reads) isn\'t sent to it, since Colibri would run it on code it doesn\'t check, and neither is a read at an earlier block, which its proof doesn\'t tie to that block: those are cross-checked on the RPCs. Names aren\'t proven this way either: a name lookup is a contract call, so names are cross-checked on the RPCs instead. Off: nothing goes to the prover; every read is cross-checked on the RPCs.</string>
+    <string name="names_ens_about">How ENS (.eth), WNS (.wei) and GNS (.gwei) names are resolved. With the local node running, an answer is proven first: checked on this device against Ethereum\'s own consensus. An answer it can\'t give is cross-checked: it\'s only trusted when at least two servers return exactly the same one. An answer only one server gave is shown to you before anything loads.</string>
+    <!-- The Proof check switch (its title is names_source_colibri). The help line stays in plain words; the technical detail is under its Advanced fold. -->
+    <string name="names_colibri_help">A server answers; Freedom checks the proof itself. Used for the wallet\'s, the Swarm node\'s and sites\' Ethereum and Gnosis reads of an account\'s balance and nonce, a block and a receipt, when the local node isn\'t answering them. Contract calls (token balances, most of what a site reads), reads at an earlier block and names are never proven this way: they\'re cross-checked across servers. The proof server learns the addresses and contracts they read. Off: every read is cross-checked across servers.</string>
+    <string name="names_colibri_advanced">Colibri — when the local node isn\'t answering them, the wallet\'s and the Swarm node\'s Ethereum and Gnosis reads, and the reads sites make through window.ethereum and web3://, go to corpus.core\'s Colibri prover (colibri-proof.tech), and its proof is checked on this device against each chain\'s own sync committee. The prover learns the addresses and contracts they read. That proves an account\'s balance and nonce at the latest block, a block looked up by number or hash, and a transaction receipt whose proof names the transaction asked for. A contract call (a token balance, most of what a dapp reads) isn\'t sent to it, since Colibri would run it on code it doesn\'t check, and neither is a read at an earlier block, which its proof doesn\'t tie to that block: those are cross-checked on the RPCs. Names aren\'t proven this way either: a name lookup is a contract call, so names are cross-checked on the RPCs instead. Off: nothing goes to the prover; every read is cross-checked on the RPCs.</string>
     <string name="names_order_title">Resolution order</string>
     <string name="names_order_help">The first three providers in this order that are reachable read each name, so the order decides who answers; the rest are asked, in order, when those can\'t agree or don\'t answer. Two endpoints of one provider count once: the first that answers. Change it under RPC providers.</string>
     <string name="names_ccip_title">Off-chain lookups (CCIP-Read)</string>
@@ -237,7 +240,7 @@
     </plurals>
     <string name="names_on">On</string>
     <string name="names_off">Off</string>
-    <!-- Settings search keywords for the Colibri row. -->
+    <!-- Settings search keywords for the Proof check row. -->
     <string name="names_search_proof">proof</string>
     <string name="names_search_verified">verified</string>
     <!-- %1$s: the API key, masked (••••1234) -->
@@ -358,11 +361,16 @@
     <string name="names_conflict_from">from %1$s</string>
     <!-- browser/ExternalEndpoints.kt -->
     <string name="names_ipfs_unverified_warning">Unverified: content from an external gateway isn\'t checked against its CID, so the gateway is trusted for everything it serves. Prefer one you run yourself.</string>
-    <!-- chains/rpc/ChainAccess.kt: the read tiers -->
-    <string name="names_source_myotis">P2P light client</string>
-    <string name="names_source_colibri">Colibri prover</string>
-    <string name="names_source_quorum">RPC quorum</string>
-    <string name="names_source_direct">Direct RPC</string>
+    <!-- chains/rpc/ChainAccess.kt: the network sources in plain words (desktop's NETWORK_SOURCE_COPY labels) -->
+    <string name="names_source_myotis">Local node</string>
+    <string name="names_source_colibri">Proof check</string>
+    <string name="names_source_quorum">Several servers must agree</string>
+    <string name="names_source_direct">One server, unchecked</string>
+    <!-- Each source's technical name and how it works, shown under the chain page's Advanced fold. Leads with the technical name. -->
+    <string name="names_source_myotis_advanced">Myotis — a peer-to-peer Ethereum and Gnosis light client running inside Freedom. It checks answers against the chain itself, with no server involved.</string>
+    <string name="names_source_colibri_advanced">Colibri — a remote prover sends a cryptographic proof with each answer, and Freedom verifies that proof locally against the chain\'s consensus.</string>
+    <string name="names_source_quorum_advanced">RPC quorum — several of the chain\'s RPC endpoints, each from a different provider, are asked the same read, and the answer counts only if enough of them return byte-identical results.</string>
+    <string name="names_source_direct_advanced">Direct RPC — the first working configured RPC endpoint answers and nothing verifies the response.</string>
     <!-- ens/*: errors and answers the error page, the conflict warning and the wallet's send show -->
     <string name="names_error_empty_name">empty name</string>
     <string name="names_error_invalid_name">invalid name</string>

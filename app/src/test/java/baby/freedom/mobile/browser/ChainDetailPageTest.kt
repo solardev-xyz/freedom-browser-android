@@ -23,38 +23,35 @@ class ChainDetailPageTest {
         val eth = readSteps(BuiltInChains.ETHEREUM, ChainAccessPolicy.default(1), wiredRpcsOnly)
         assertEquals(2, eth.size)
         assertEquals(
-            "RPC quorum: 2 of the first 3 RPCs (each from a different provider) " +
-                "must give the same answer — verified",
+            "Several servers must agree: 2 of the first 3 RPCs, each from a different provider — verified",
             eth[0],
         )
         assertEquals(
-            "Direct RPC: otherwise the first RPC that answers — unverified, or marked as yours if it's one of your RPCs",
+            "One server, unchecked: otherwise the first RPC that answers, marked as yours if it's one of your RPCs",
             eth[1],
         )
         val lonely = Chain(id = 5, name = "X", symbol = "X", rpcUrls = listOf("https://a.example"))
         assertEquals(
-            "RPC quorum: skipped, needs RPCs from at least 2 providers (this chain has 1)",
+            "Several servers must agree: skipped, needs RPCs from at least 2 providers (this chain has 1)",
             readSteps(lonely, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
         val withMine = lonely.copy(userRpcUrls = listOf("https://mine.example"))
         assertEquals(
-            "RPC quorum: 2 of the first 2 RPCs (each from a different provider, yours among them) " +
-                "must give the same answer — verified",
+            "Several servers must agree: 2 of the first 2 RPCs, each from a different provider, yours among them — verified",
             readSteps(withMine, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
         val sameProvider = lonely.copy(userRpcUrls = listOf("https://a.example/?key=1"))
         assertEquals(
-            "RPC quorum: skipped, needs RPCs from at least 2 providers (this chain has 1)",
+            "Several servers must agree: skipped, needs RPCs from at least 2 providers (this chain has 1)",
             readSteps(sameProvider, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
         val allMine = lonely.copy(userRpcUrls = listOf("https://m1.example", "https://m2.example", "https://m3.example"))
         assertEquals(
-            "RPC quorum: 2 of the first 3 RPCs (each from a different provider, all of them yours) " +
-                "must give the same answer — verified",
+            "Several servers must agree: 2 of the first 3 RPCs, each from a different provider, all of them yours — verified",
             readSteps(allMine, ChainAccessPolicy.default(5), wiredRpcsOnly)[0],
         )
         assertEquals(
-            "P2P light client: a proof checked on this device",
+            "Local node: a proof checked on this device",
             readSteps(BuiltInChains.ETHEREUM, ChainAccessPolicy.default(1)) { true }[0],
         )
     }
@@ -77,7 +74,7 @@ class ChainDetailPageTest {
             trustSummary(trust(ChainTrust.Level.USER_CONFIGURED, ChainSource.DIRECT, listOf("mine.example"))),
         )
         assertEquals(
-            "Verified by the P2P light client",
+            "Verified: Local node",
             trustSummary(trust(ChainTrust.Level.VERIFIED, ChainSource.MYOTIS, listOf("myotis-p2p"))),
         )
     }
@@ -151,16 +148,16 @@ class ChainDetailPageTest {
         // Light client syncing, Colibri answering: one note, the light client's.
         val syncing = proofTierNotes(gnosis, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY))
         assertEquals(1, syncing.size)
-        assertTrue(syncing[0].contains("P2P light client"))
+        assertTrue(syncing[0].contains("local node"))
         // Colibri missing from the steps is never silent, whatever the cause.
         for ((gap, words) in listOf(
-            ProofTierGap.OFF to "Colibri proofs are off",
+            ProofTierGap.OFF to "it's off under Settings → Name resolution",
             ProofTierGap.UNREACHABLE to "couldn't be reached",
             ProofTierGap.NOT_IN_BUILD to "isn't available in this build",
         )) {
             val notes = proofTierNotes(gnosis, mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY, ChainSource.COLIBRI to gap))
             assertEquals(2, notes.size)
-            assertTrue("$gap: ${notes[1]}", notes[1].contains("Colibri") && notes[1].contains(words) && notes[1].contains("Gnosis"))
+            assertTrue("$gap: ${notes[1]}", notes[1].contains("Proof check") && notes[1].contains(words) && notes[1].contains("Gnosis"))
         }
         // A chain neither covers: no notes.
         val polygon = gnosis.copy(id = 137, name = "Polygon")
@@ -178,7 +175,7 @@ class ChainDetailPageTest {
         val policy = ChainAccessPolicy.default(gnosis.id).sanitized(gnosis.id)
         val syncing = tierAnswers(mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY))
         assertEquals(ReadAssurance.Proof(ChainSource.COLIBRI, fallbackTo = ReadAssurance.Fallback.PUBLIC), readAssurance(gnosis, policy, syncing))
-        assertTrue(readSteps(gnosis, policy, syncing).none { "light client" in it })
+        assertTrue(readSteps(gnosis, policy, syncing).none { "Local node" in it })
         assertEquals(ReadAssurance.Proof(ChainSource.MYOTIS, fallbackTo = ReadAssurance.Fallback.PUBLIC), readAssurance(gnosis, policy, tierAnswers(emptyMap())))
         val neither = tierAnswers(mapOf(ChainSource.MYOTIS to ProofTierGap.NOT_READY, ChainSource.COLIBRI to ProofTierGap.OFF))
         assertTrue(readAssurance(gnosis, policy, neither) is ReadAssurance.CrossChecked)
@@ -239,7 +236,7 @@ class ChainDetailPageTest {
             val chain = lonely.copy(userRpcUrls = listOf(spelling))
             assertEquals(listOf(spelling), ChainDataRouter.endpoints(chain))
             assertEquals(spelling, ReadAssurance.Single(yours = true, fallback = false), assurance(chain))
-            assertEquals("Custom · Reads from your RPC", chainStatus(chain, assurance(chain)))
+            assertEquals("Custom · Reads from your server", chainStatus(chain, assurance(chain)))
         }
         // The same fold for a checked tier's fallback: two of the user's
         // own, one of them the listed public RPC — no public one remains.
@@ -275,9 +272,9 @@ class ChainDetailPageTest {
         val mine = lonely.copy(userRpcUrls = listOf("https://mine.example"))
         assertEquals("Custom · Verified reads when available", chainStatus(mine, assurance(mine)))
         val sameProvider = lonely.copy(userRpcUrls = listOf("https://a.example/?key=1"))
-        assertEquals("Custom · Reads from your RPC first", chainStatus(sameProvider, assurance(sameProvider)))
+        assertEquals("Custom · Reads from your server first", chainStatus(sameProvider, assurance(sameProvider)))
         val onlyMine = sameProvider.copy(rpcUrls = emptyList())
-        assertEquals("Custom · Reads from your RPC", chainStatus(onlyMine, assurance(onlyMine)))
+        assertEquals("Custom · Reads from your server", chainStatus(onlyMine, assurance(onlyMine)))
         val testnet = lonely.copy(isTestnet = true)
         assertEquals("Custom · Reads not cross-checked · Testnet", chainStatus(testnet, assurance(testnet)))
         for (chain in BuiltInChains.ALL) {
@@ -313,8 +310,8 @@ class ChainDetailPageTest {
             readAssuranceLine(ReadAssurance.CrossChecked(3, 2, 3, fallbackTo = ReadAssurance.Fallback.PUBLIC)),
         )
         assertEquals(
-            "Reads are proven on this device by the P2P light client, " +
-                "and cross-checked across providers when it can't answer.$fallback",
+            "Local node: reads are proven on this device, " +
+                "and cross-checked across providers when that can't answer.$fallback",
             readAssuranceLine(ReadAssurance.Proof(ChainSource.MYOTIS, fallbackTo = ReadAssurance.Fallback.PUBLIC)),
         )
         assertEquals(

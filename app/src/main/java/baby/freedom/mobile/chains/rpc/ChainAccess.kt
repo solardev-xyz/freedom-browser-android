@@ -17,24 +17,33 @@ import kotlinx.coroutines.launch
  * A tier [ChainDataRouter] can ask for chain state (#108), in the order
  * a chain's [ChainAccessPolicy] lists them. [key] is desktop's
  * `access.readOrder` entry (`chain-data-router.js`) and iOS's
- * `ChainSource` raw value.
+ * `ChainSource` raw value. [label] and [advanced] are desktop's
+ * `NETWORK_SOURCE_COPY` (#548): the name in plain words, and the
+ * technical name with how it works, for an Advanced fold.
  */
-enum class ChainSource(val key: String, @StringRes private val labelRes: Int) {
+enum class ChainSource(
+    val key: String,
+    @StringRes private val labelRes: Int,
+    @StringRes private val advancedRes: Int,
+) {
     /** Embedded P2P light client (Ethereum, Gnosis), when the user runs it for that chain ([baby.freedom.mobile.chains.rpc.MyotisChainSource]). */
-    MYOTIS("myotis", R.string.names_source_myotis),
+    MYOTIS("myotis", R.string.names_source_myotis, R.string.names_source_myotis_advanced),
 
     /** Remote prover with a sync-committee proof checked on the device (Ethereum, Gnosis; [baby.freedom.mobile.chains.rpc.ColibriChainSource]). */
-    COLIBRI("colibri", R.string.names_source_colibri),
+    COLIBRI("colibri", R.string.names_source_colibri, R.string.names_source_colibri_advanced),
 
     /** [ChainAccessPolicy.quorumM] of the first [ChainAccessPolicy.quorumK] RPCs return the same bytes. */
-    QUORUM("quorum", R.string.names_source_quorum),
+    QUORUM("quorum", R.string.names_source_quorum, R.string.names_source_quorum_advanced),
 
     /** The first RPC that answers, on its own word. */
-    DIRECT("direct", R.string.names_source_direct),
+    DIRECT("direct", R.string.names_source_direct, R.string.names_source_direct_advanced),
     ;
 
-    /** The tier's name, as the chain page and the wallet show it. */
+    /** The tier's name in plain words ("Local node"), as the chain page and the wallet show it. */
     val label: String get() = Strings.get(labelRes)
+
+    /** Its technical name ("Myotis", "RPC quorum") and how it works: the Advanced text. */
+    val advanced: String get() = Strings.get(advancedRes)
 
     /** Whether an answer from this tier carries a proof or an agreement. */
     val verifies: Boolean get() = this != DIRECT
@@ -292,7 +301,7 @@ enum class ProofTierGap {
     /** Not in this build, or its native library didn't load. */
     NOT_IN_BUILD,
 
-    /** Switched off by the user (Colibri: *Colibri proofs*). */
+    /** Switched off by the user (Colibri: *Proof check*). */
     OFF,
 
     /** Backing off after its servers couldn't be reached. */

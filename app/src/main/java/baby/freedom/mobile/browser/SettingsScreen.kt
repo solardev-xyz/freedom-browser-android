@@ -483,6 +483,8 @@ internal fun SettingsScreen(
             visible = visible,
             config = ensRpcConfig,
             settings = settings,
+            // Only among search results, not on the Name resolution page.
+            query = if (searching && page == null) query else "",
         )
         SettingsSection.Rpc -> RpcProvidersSection(
             visible = visible,

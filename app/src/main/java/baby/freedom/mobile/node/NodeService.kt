@@ -808,7 +808,7 @@ class NodeService : Service() {
         // Its light-client tier reads through this process's own
         // binding to `:myotis`, which never starts the light client.
         myotisReads.bind()
-        // The Colibri proofs switch (#329): the UI relays it on bind; till
+        // The Proof check (Colibri) switch (#329): the UI relays it on bind; till
         // then the stored value, read here (off until either lands).
         scope.launch(Dispatchers.IO) {
             runCatching { NodeSettings.get(this@NodeService).ensColibri.first() }
