@@ -30,6 +30,10 @@ import baby.freedom.mobile.l10n.Strings
  * jumps to the line's start or end), so while one of the browser's own
  * fields — the address bar, the find bar — is being edited, it's the
  * field's, not the shortcut's.
+ *
+ * [tabPosition]: a Select-tab shortcut's tab, 1 to 8 — or [LAST_TAB] —
+ * as in desktop's `tab.select1`…`tab.select8` and `tab.selectLast`
+ * (#547); 0 for every other shortcut.
  */
 enum class Shortcut(
     @StringRes private val labelRes: Int,
@@ -37,6 +41,7 @@ enum class Shortcut(
     val reserved: Boolean = false,
     val repeats: Boolean = false,
     val caretKey: Boolean = false,
+    val tabPosition: Int = 0,
 ) {
     NewTab(R.string.settings_shortcut_new_tab, Group.Tabs, reserved = true),
     NewPrivateTab(R.string.settings_shortcut_new_private_tab, Group.Tabs, reserved = true),
@@ -44,6 +49,15 @@ enum class Shortcut(
     ReopenClosedTab(R.string.settings_shortcut_reopen_closed_tab, Group.Tabs, reserved = true),
     NextTab(R.string.settings_shortcut_next_tab, Group.Tabs, reserved = true, repeats = true),
     PreviousTab(R.string.settings_shortcut_previous_tab, Group.Tabs, reserved = true, repeats = true),
+    SelectTab1(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 1),
+    SelectTab2(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 2),
+    SelectTab3(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 3),
+    SelectTab4(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 4),
+    SelectTab5(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 5),
+    SelectTab6(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 6),
+    SelectTab7(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 7),
+    SelectTab8(R.string.settings_shortcut_select_tab, Group.Tabs, reserved = true, tabPosition = 8),
+    SelectLastTab(R.string.settings_shortcut_select_last_tab, Group.Tabs, reserved = true, tabPosition = LAST_TAB),
     FocusAddressBar(R.string.settings_shortcut_focus_address_bar, Group.Page, reserved = true),
     Reload(R.string.settings_shortcut_reload, Group.Page),
     HardReload(R.string.settings_shortcut_hard_reload, Group.Page),
@@ -58,7 +72,8 @@ enum class Shortcut(
     ;
 
     /** The shortcut's name in the system's keyboard-shortcut helper. */
-    val label: String get() = Strings.get(labelRes)
+    val label: String
+        get() = if (tabPosition in 1..8) Strings.get(labelRes, tabPosition) else Strings.get(labelRes)
 
     enum class Group(@StringRes private val labelRes: Int) {
         Tabs(R.string.settings_shortcut_group_tabs),
@@ -68,6 +83,27 @@ enum class Shortcut(
 
         val label: String get() = Strings.get(labelRes)
     }
+}
+
+/** [Shortcut.tabPosition] of Select last tab (Ctrl+9). */
+const val LAST_TAB = 9
+
+/**
+ * The index in [tabs] that [shortcut] — Select tab 1…8, Select last tab
+ * (#547) — selects, or null where it selects nothing: no such position,
+ * or a shortcut that isn't a Select-tab one.
+ *
+ * Positions count within the pane of the tab on screen ([paneTabs]):
+ * the normal tabs, or the private ones (#86) — the order the tab
+ * switcher shows them in, as Chrome counts within one window and its
+ * incognito tabs are another. Ctrl+9 picks the pane's last tab however
+ * many there are; a position past the last does nothing, as on desktop.
+ */
+fun selectTabIndex(shortcut: Shortcut, tabs: List<BrowserState>, activeIndex: Int): Int? {
+    if (shortcut.tabPosition == 0 || tabs.isEmpty()) return null
+    val private = tabs[activeIndex.coerceIn(0, tabs.lastIndex)].private
+    val pane = tabs.indices.filter { tabs[it].private == private }
+    return if (shortcut.tabPosition == LAST_TAB) pane.lastOrNull() else pane.getOrNull(shortcut.tabPosition - 1)
 }
 
 /**
@@ -103,6 +139,15 @@ val SHORTCUT_BINDINGS: Map<Shortcut, List<KeyBinding>> = mapOf(
     Shortcut.ReopenClosedTab to listOf(ctrl(KeyEvent.KEYCODE_T, shift = true)),
     Shortcut.NextTab to listOf(ctrl(KeyEvent.KEYCODE_TAB), ctrl(KeyEvent.KEYCODE_PAGE_DOWN)),
     Shortcut.PreviousTab to listOf(ctrl(KeyEvent.KEYCODE_TAB, shift = true), ctrl(KeyEvent.KEYCODE_PAGE_UP)),
+    Shortcut.SelectTab1 to listOf(ctrl(KeyEvent.KEYCODE_1)),
+    Shortcut.SelectTab2 to listOf(ctrl(KeyEvent.KEYCODE_2)),
+    Shortcut.SelectTab3 to listOf(ctrl(KeyEvent.KEYCODE_3)),
+    Shortcut.SelectTab4 to listOf(ctrl(KeyEvent.KEYCODE_4)),
+    Shortcut.SelectTab5 to listOf(ctrl(KeyEvent.KEYCODE_5)),
+    Shortcut.SelectTab6 to listOf(ctrl(KeyEvent.KEYCODE_6)),
+    Shortcut.SelectTab7 to listOf(ctrl(KeyEvent.KEYCODE_7)),
+    Shortcut.SelectTab8 to listOf(ctrl(KeyEvent.KEYCODE_8)),
+    Shortcut.SelectLastTab to listOf(ctrl(KeyEvent.KEYCODE_9)),
     Shortcut.FocusAddressBar to listOf(ctrl(KeyEvent.KEYCODE_L)),
     Shortcut.Reload to listOf(ctrl(KeyEvent.KEYCODE_R), KeyBinding(KeyEvent.KEYCODE_F5)),
     Shortcut.HardReload to listOf(
@@ -139,17 +184,31 @@ private val BY_BINDING: Map<KeyBinding, Shortcut> = buildMap {
  * Either Ctrl, Shift or Alt key counts; lock states (Caps, Num, Scroll)
  * and Fn don't matter, and Meta (or Sym) held means no shortcut.
  */
-fun shortcutFor(keyCode: Int, metaState: Int): Shortcut? {
+fun shortcutFor(keyCode: Int, metaState: Int): Shortcut? = bindingOf(keyCode, metaState)?.let(BY_BINDING::get)
+
+/** [keyCode] with [metaState] as a [KeyBinding]; null with Meta or Sym held. */
+private fun bindingOf(keyCode: Int, metaState: Int): KeyBinding? {
     if (metaState and (KeyEvent.META_META_MASK or KeyEvent.META_SYM_ON) != 0) return null
-    return BY_BINDING[
-        KeyBinding(
-            keyCode = keyCode,
-            ctrl = metaState and KeyEvent.META_CTRL_MASK != 0,
-            shift = metaState and KeyEvent.META_SHIFT_MASK != 0,
-            alt = metaState and KeyEvent.META_ALT_MASK != 0,
-        ),
-    ]
+    return KeyBinding(
+        keyCode = keyCode,
+        ctrl = metaState and KeyEvent.META_CTRL_MASK != 0,
+        shift = metaState and KeyEvent.META_SHIFT_MASK != 0,
+        alt = metaState and KeyEvent.META_ALT_MASK != 0,
+    )
 }
+
+/**
+ * Ctrl+Enter (the main or the keypad Enter): Publish text on the Publish
+ * page, from its text field (#547, desktop #720). Not a [Shortcut]: it's
+ * that one field's, so the [KeyboardShortcutRouter] never takes it from
+ * a page — a web chat's own Ctrl+Enter still sends. Plain Enter, and
+ * Enter with Shift or Alt too, still edit the text.
+ */
+val PUBLISH_TEXT_BINDINGS: List<KeyBinding> =
+    listOf(ctrl(KeyEvent.KEYCODE_ENTER), ctrl(KeyEvent.KEYCODE_NUMPAD_ENTER))
+
+/** Whether [keyCode] with [metaState] is [PUBLISH_TEXT_BINDINGS]' Ctrl+Enter. */
+fun isPublishTextKey(keyCode: Int, metaState: Int): Boolean = bindingOf(keyCode, metaState) in PUBLISH_TEXT_BINDINGS
 
 /**
  * What the browser does with a shortcut. Returns false when the key is
@@ -272,7 +331,8 @@ class KeyboardShortcutRouter {
 /**
  * The shortcuts as the system's keyboard-shortcut helper lists them
  * (`Activity.onProvideKeyboardShortcuts`, Meta+/), one group per
- * [Shortcut.Group], each shortcut under its first binding.
+ * [Shortcut.Group], each shortcut under its first binding, and last the
+ * Publish page's own Ctrl+Enter ([PUBLISH_TEXT_BINDINGS]).
  * [privateTabs]: whether "New private tab" can run on this WebView.
  */
 fun keyboardShortcutGroups(privateTabs: Boolean): List<KeyboardShortcutGroup> =
@@ -285,6 +345,17 @@ fun keyboardShortcutGroups(privateTabs: Boolean): List<KeyboardShortcutGroup> =
                     val binding = SHORTCUT_BINDINGS.getValue(shortcut).first()
                     KeyboardShortcutInfo(shortcut.label, binding.keyCode, binding.modifiers)
                 },
+        )
+    } + PUBLISH_TEXT_BINDINGS.first().let { binding ->
+        KeyboardShortcutGroup(
+            Strings.get(R.string.settings_shortcut_group_publish),
+            listOf(
+                KeyboardShortcutInfo(
+                    Strings.get(R.string.settings_shortcut_publish_text),
+                    binding.keyCode,
+                    binding.modifiers,
+                ),
+            ),
         )
     }
 

@@ -353,6 +353,9 @@
     <string name="settings_shortcut_reopen_closed_tab">Reopen closed tab</string>
     <string name="settings_shortcut_next_tab">Next tab</string>
     <string name="settings_shortcut_previous_tab">Previous tab</string>
+    <!-- %1$d: the tab's position, 1 to 8 (Ctrl+1 to Ctrl+8). -->
+    <string name="settings_shortcut_select_tab">Select tab %1$d</string>
+    <string name="settings_shortcut_select_last_tab">Select last tab</string>
     <string name="settings_shortcut_focus_address_bar">Focus address bar</string>
     <string name="settings_shortcut_reload">Reload</string>
     <string name="settings_shortcut_hard_reload">Hard reload</string>
@@ -364,6 +367,8 @@
     <string name="settings_shortcut_forward">Forward</string>
     <string name="settings_shortcut_history">History</string>
     <string name="settings_shortcut_downloads">Downloads</string>
+    <string name="settings_shortcut_group_publish">Publish page</string>
+    <string name="settings_shortcut_publish_text">Publish text</string>
 
     <!-- PageZoom.kt. %1$s: the level, already formatted as a number. -->
     <string name="settings_zoom_level">%1$s%%</string>
