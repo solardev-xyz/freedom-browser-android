@@ -93,17 +93,18 @@ const val LAST_TAB = 9
  * (#547) — selects, or null where it selects nothing: no such position,
  * or a shortcut that isn't a Select-tab one.
  *
- * Positions count within the pane of the tab on screen ([paneTabs]):
- * the normal tabs, or the private ones (#86) — the order the tab
- * switcher shows them in, as Chrome counts within one window and its
- * incognito tabs are another. Ctrl+9 picks the pane's last tab however
+ * Positions count within the pane of the tab on screen, taken from the
+ * tab switcher's own [paneTabs] so the N-th tab here is always the N-th
+ * one the switcher shows: the normal tabs, or the private ones (#86),
+ * as Chrome counts within one window and its incognito tabs are
+ * another. Ctrl+9 picks the pane's last tab however
  * many there are; a position past the last does nothing, as on desktop.
  */
 fun selectTabIndex(shortcut: Shortcut, tabs: List<BrowserState>, activeIndex: Int): Int? {
     if (shortcut.tabPosition == 0 || tabs.isEmpty()) return null
-    val private = tabs[activeIndex.coerceIn(0, tabs.lastIndex)].private
-    val pane = tabs.indices.filter { tabs[it].private == private }
-    return if (shortcut.tabPosition == LAST_TAB) pane.lastOrNull() else pane.getOrNull(shortcut.tabPosition - 1)
+    val pane = paneTabs(tabs, privatePane = tabs[activeIndex.coerceIn(0, tabs.lastIndex)].private)
+    val tab = if (shortcut.tabPosition == LAST_TAB) pane.lastOrNull() else pane.getOrNull(shortcut.tabPosition - 1)
+    return tab?.let { picked -> tabs.indexOfFirst { it === picked } }
 }
 
 /**

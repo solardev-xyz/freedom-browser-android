@@ -5,6 +5,7 @@ import baby.freedom.mobile.browser.KeyboardShortcutRouter.Press
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -277,6 +278,20 @@ class KeyboardShortcutsTest {
         // Not a Select-tab shortcut, or no tabs.
         assertNull(selectTabIndex(Shortcut.NextTab, tabs, activeIndex = 0))
         assertNull(selectTabIndex(Shortcut.SelectTab1, emptyList(), activeIndex = 0))
+    }
+
+    @Test
+    fun `Ctrl+N selects the N-th tab the tab switcher shows`() {
+        val tabs = listOf(true, false, false, true, false, true, true).mapIndexed { i, p -> BrowserState(i.toLong(), p) }
+        val positions = Shortcut.entries.filter { it.tabPosition in 1 until LAST_TAB }
+        for (active in tabs.indices) {
+            val shown = paneTabs(tabs, privatePane = tabs[active].private)
+            for (shortcut in positions) {
+                val picked = selectTabIndex(shortcut, tabs, active)?.let { tabs[it] }
+                assertSame(shown.getOrNull(shortcut.tabPosition - 1), picked)
+            }
+            assertSame(shown.last(), tabs[selectTabIndex(Shortcut.SelectLastTab, tabs, active)!!])
+        }
     }
 
     @Test
