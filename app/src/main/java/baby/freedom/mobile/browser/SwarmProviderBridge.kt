@@ -18,6 +18,7 @@ import baby.freedom.mobile.wallet.PublisherIdentityStore
 import baby.freedom.mobile.wallet.PublisherKeys
 import baby.freedom.mobile.wallet.Vault
 import baby.freedom.mobile.wallet.VaultLockedException
+import baby.freedom.mobile.wallet.VaultUnreadableException
 import baby.freedom.mobile.wallet.WalletAccountStore
 import baby.freedom.mobile.wallet.WalletAccounts
 import baby.freedom.swarm.SwarmNode
@@ -266,10 +267,16 @@ object SwarmProviders {
      * (from the seed when the wallet is open, else the node keys kept
      * for booting the node). No wallet: none — the node's own running
      * key is asked for separately. Either missing while a wallet exists
-     * leaves the answer incomplete.
+     * leaves the answer incomplete. An unreadable vault throws
+     * [VaultUnreadableException]: unlocking can't fix that, so it's not
+     * an incomplete ("locked") answer.
      */
     private fun ownAddresses(app: Context, vault: Vault): SwarmProvider.OwnAddresses {
-        if (vault.state.value == Vault.State.Empty) return SwarmProvider.OwnAddresses(emptySet(), complete = true)
+        when (vault.state.value) {
+            Vault.State.Empty -> return SwarmProvider.OwnAddresses(emptySet(), complete = true)
+            Vault.State.Unreadable -> throw VaultUnreadableException()
+            else -> Unit
+        }
         fun bare(address: String) = address.removePrefix("0x").lowercase()
         val addresses = HashSet<String>()
         var complete = true

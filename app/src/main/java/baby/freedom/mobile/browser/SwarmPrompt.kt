@@ -83,7 +83,8 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
         Strings.get(R.string.swarm_publish_request),
         Strings.get(R.string.swarm_publish_warning),
         Strings.get(R.string.swarm_publish_approve),
-        Strings.get(R.string.swarm_publish_always),
+        // A page-signed SOC asks every time (SwarmProvider.publishSignedSoc): no switch.
+        if (ask.kind == SwarmAsk.Publish.Kind.SignedSoc) null else Strings.get(R.string.swarm_publish_always),
     )
     // Its own sheet (SwarmManifestSheet); this is only what it's called.
     is SwarmAsk.Manifest -> SwarmPromptCopy(

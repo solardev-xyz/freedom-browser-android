@@ -540,9 +540,17 @@ class SwarmProvider(
      * only publish a chunk already signed for the network, never get a
      * new signature.
      *
-     * Unlike desktop, the signature is checked before the owner: with
-     * the owner check first, any connected site could ask, sheet-free,
-     * whether an address it names is one of the user's.
+     * Unlike desktop, nothing that depends on whose the owner is reaches
+     * the page before the user has tapped: a SOC of the user's (one of
+     * their public feeds' chunks, read back) would otherwise get an
+     * answer a stranger's doesn't, telling a site, with no one asked,
+     * that this visitor is that identity. So every call asks — the
+     * site's publish "always allow" (or a manifest's Allow all) doesn't
+     * cover this method, as a stranger's SOC answering at upload speed
+     * while one of the user's waits on a sheet would tell it the same —,
+     * and only after Allow is the owner compared ([ownerCheck]): before
+     * the sheet, [ownersKnown] checks only that the comparison can be
+     * made, the same for every owner.
      */
     private suspend fun publishSignedSoc(origin: String, params: JSONObject, calls: Calls): Reply {
         emptyOptions(params)
@@ -555,15 +563,17 @@ class SwarmProvider(
         val soc = SwarmChunks.verifySigned(identifier, signature, owner, SwarmChunks.cac(payload, span))
             ?: fail("The signature does not recover to owner for this identifier and chunk", "invalid_signature")
         preflightOrFail()
-        ownerCheck(soc.owner)
-        approvePublish(
-            origin, calls,
+        ownersKnown()
+        // Always asked: see above. No "always allow" is read or written.
+        val answer = calls.ask(
             SwarmAsk.Publish(
                 origin, SwarmAsk.Publish.Kind.SignedSoc, payload.size.toLong(), null, null, emptyList(),
                 owner = SwarmChunks.checksum(soc.owner),
             ),
         )
-        // Again after the sheet: a wallet or an account may have come since it went up.
+        if (!answer.allowed) throw Invalid(rejected())
+        calls.committed()
+        // Only now, and read afresh: a wallet or an account may have come while the sheet was up.
         ownerCheck(soc.owner)
         val batch = batchFor(SwarmChunks.MAX_PAYLOAD.toLong())
         uploadSoc(soc, batch)
@@ -577,12 +587,39 @@ class SwarmProvider(
     }
 
     /**
+     * Before a `swarm_publishSingleOwnerChunk` sheet: whether this
+     * device's own identities can all be told now, so a sheet isn't
+     * shown for a request [ownerCheck] would then fail. Never looks at
+     * the owner, so its answer is the same whoever signed the chunk.
+     */
+    private suspend fun ownersKnown() {
+        ownIdentities()
+    }
+
+    /**
      * Refuses an [owner] that is one of this device's own identities:
      * the node's running key (`/addresses`) or one of
      * [Publishers.ownAddresses]. Fails closed when they can't all be told.
+     * Only after the user allowed the sheet ([publishSignedSoc]).
      */
     private suspend fun ownerCheck(owner: ByteArray) {
-        val hex = owner.swarmHex()
+        if (owner.swarmHex() in ownIdentities()) {
+            throw Invalid(
+                Reply.Err(
+                    UNAUTHORIZED,
+                    "The owner is one of Freedom's own identities; use swarm_writeSingleOwnerChunk or a feed method",
+                    reason("freedom_identity"),
+                ),
+            )
+        }
+    }
+
+    /**
+     * The node's running key (`/addresses`) and [Publishers.ownAddresses],
+     * all of them, or throws: the node's usual error if it doesn't
+     * answer, `-32603` if they can't all be told.
+     */
+    private suspend fun ownIdentities(): Set<String> {
         val cantCheck = Invalid(Reply.Err(INTERNAL, "Could not check the owner against Freedom identities"))
         // The node not answering is the node's usual error ([request]); an answer without its address fails closed.
         val nodeKey = call("GET", "/addresses", emptyMap(), null, PREFLIGHT_TIMEOUT_MS)
@@ -595,21 +632,12 @@ class SwarmProvider(
         } catch (e: Exception) {
             throw cantCheck
         }
-        val held = OwnAddresses(own.addresses + nodeKey, own.complete)
-        if (hex in held.addresses) {
-            throw Invalid(
-                Reply.Err(
-                    UNAUTHORIZED,
-                    "The owner is one of Freedom's own identities; use swarm_writeSingleOwnerChunk or a feed method",
-                    reason("freedom_identity"),
-                ),
-            )
-        }
-        if (!held.complete) {
+        if (!own.complete) {
             throw Invalid(
                 Reply.Err(INTERNAL, "The wallet is locked: an account address is not known until it's unlocked", reason("vault_locked")),
             )
         }
+        return own.addresses + nodeKey
     }
 
     private suspend fun uploadStatus(origin: String, params: JSONObject): Reply {
@@ -2092,7 +2120,11 @@ sealed interface SwarmAsk {
         val contentType: String?,
         val name: String?,
         val paths: List<String>,
-        /** A [Kind.SignedSoc]'s signer (EIP-55), whose signature was checked: never the node's or a wallet account's. */
+        /**
+         * A [Kind.SignedSoc]'s signer (EIP-55), whose signature was checked.
+         * It may be one of the user's own identities: that is refused only
+         * after the sheet is allowed, so the sheet's showing tells a site nothing.
+         */
         val owner: String? = null,
     ) : SwarmAsk {
         enum class Kind { Data, Files, Chunk, SignedSoc }

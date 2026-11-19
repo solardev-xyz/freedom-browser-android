@@ -580,9 +580,9 @@ class SwarmProviderTest {
     }
 
     @Test
-    fun `publishSingleOwnerChunk refuses a SOC owned by the node or a wallet account, before anything is stamped`() {
+    fun `publishSingleOwnerChunk refuses a SOC owned by the node or a wallet account, only once the sheet is allowed`() {
         connect()
-        // Always allow on: the refusal doesn't lean on the sheet.
+        // Always allow on: it doesn't cover this method, so every call is asked.
         grants.auto += site to SwarmProvider.AutoApprove.Publish
         val accountKey = ByteArray(32) { 0x33 }
         val account = PublisherKeys.address(accountKey)
@@ -590,16 +590,39 @@ class SwarmProviderTest {
         val nodeKey = ByteArray(32) { 0x44 }
         node.ethereum = PublisherKeys.address(nodeKey).uppercase().replace("0X", "0x")
         for ((label, key) in listOf("a wallet account" to accountKey, "the node" to nodeKey)) {
+            asked.clear()
             val e = err(call("swarm_publishSingleOwnerChunk", signedSoc(key)))
             assertEquals(label, 4100, e.code)
             assertEquals(label, "freedom_identity", e.reason)
+            // The sheet came first, naming the user's own address as the signer.
+            assertEquals(label, SwarmChunks.checksum(PublisherKeys.address(key).removePrefix("0x").hexToBytesOrNull()!!), (asked.single() as SwarmAsk.Publish).owner)
         }
-        assertTrue(asked.isEmpty())
         assertTrue(node.uploads().isEmpty())
-        assertEquals(0, commits)
         // The site's own key still goes through.
         ok(call("swarm_publishSingleOwnerChunk", signedSoc()))
         assertEquals(1, node.uploads().size)
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk tells a site nothing about whose SOC it is before the user taps`() {
+        connect()
+        val accountKey = ByteArray(32) { 0x33 }
+        publishers.own = SwarmProvider.OwnAddresses(setOf(PublisherKeys.address(accountKey).removePrefix("0x").lowercase()), complete = true)
+        answer = SwarmProvider.Answer.REJECTED
+        for (always in listOf(false, true)) {
+            if (always) grants.auto += site to SwarmProvider.AutoApprove.Publish
+            asked.clear()
+            // One of the user's and a stranger's: both wait on a sheet, and a refusal reads the same.
+            val mine = err(call("swarm_publishSingleOwnerChunk", signedSoc(accountKey)))
+            val theirs = err(call("swarm_publishSingleOwnerChunk", signedSoc()))
+            assertEquals("always=$always", 2, asked.size)
+            assertEquals("always=$always", theirs.code, mine.code)
+            assertEquals("always=$always", 4001, mine.code)
+            assertEquals("always=$always", theirs.reason, mine.reason)
+            assertEquals("always=$always", theirs.message, mine.message)
+        }
+        assertTrue(node.uploads().isEmpty())
+        assertEquals(0, commits)
     }
 
     @Test
@@ -609,8 +632,11 @@ class SwarmProviderTest {
         val locked = err(call("swarm_publishSingleOwnerChunk", signedSoc()))
         assertEquals(-32603, locked.code)
         assertEquals("vault_locked", locked.reason)
+        // ownAddresses throwing (an unreadable vault, say): a plain -32603, not "locked".
         publishers.own = null
-        assertEquals(-32603, err(call("swarm_publishSingleOwnerChunk", signedSoc())).code)
+        val unreadable = err(call("swarm_publishSingleOwnerChunk", signedSoc()))
+        assertEquals(-32603, unreadable.code)
+        assertEquals(null, unreadable.reason)
         publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = true)
         node.ethereum = ""
         assertEquals(-32603, err(call("swarm_publishSingleOwnerChunk", signedSoc())).code)
@@ -619,6 +645,7 @@ class SwarmProviderTest {
         node.onRequest = { _, path -> if (path == "/addresses") throw java.io.IOException("connection refused") }
         assertEquals("node-stopped", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
         node.onRequest = { _, _ -> }
+        // None of these reached a sheet: they fail alike for every owner.
         assertTrue(asked.isEmpty())
         assertTrue(node.uploads().isEmpty())
         // A node that isn't ready says so first, as for any publish.
@@ -628,31 +655,45 @@ class SwarmProviderTest {
     }
 
     @Test
-    fun `publishSingleOwnerChunk checks the owner again once the sheet is answered`() {
+    fun `publishSingleOwnerChunk reads the device's identities afresh once the sheet is answered`() {
         connect()
         // The page's key becomes a wallet account while its sheet is up (a Ledger added, say).
         onApproved = { publishers.own = SwarmProvider.OwnAddresses(setOf(pageOwner.removePrefix("0x").lowercase()), complete = true) }
         assertEquals("freedom_identity", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
         assertEquals(1, asked.size)
         assertTrue(node.uploads().isEmpty())
+        // The wallet locking while the sheet is up fails closed too.
+        asked.clear()
+        publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = true)
+        onApproved = { publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = false) }
+        assertEquals("vault_locked", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
+        assertEquals(1, asked.size)
+        assertTrue(node.uploads().isEmpty())
     }
 
     @Test
-    fun `publishSingleOwnerChunk asks like any publish, and the site's always-allow covers it`() {
+    fun `publishSingleOwnerChunk asks every time, and neither reads nor sets the site's always-allow`() {
         connect()
         answer = SwarmProvider.Answer.REJECTED
         assertEquals(4001, err(call("swarm_publishSingleOwnerChunk", signedSoc())).code)
         assertTrue(node.uploads().isEmpty())
+        // An "always" coming back (no switch is shown for it) sets nothing.
         answer = SwarmProvider.Answer(true, always = true)
         ok(call("swarm_publishSingleOwnerChunk", signedSoc()))
-        assertTrue(grants.autoApprove(site))
+        assertFalse(grants.autoApprove(site))
+        // The site's publish always-allow, set another way, doesn't skip the sheet either.
+        grants.auto += site to SwarmProvider.AutoApprove.Publish
         asked.clear()
         ok(call("swarm_publishSingleOwnerChunk", signedSoc(identifier = "ef".repeat(32))))
-        assertTrue(asked.isEmpty())
+        assertEquals(1, asked.size)
         assertEquals(2, node.uploads().count { it.second.startsWith("/soc/") })
-        // A publish's always-allow is the one: publishData rides on it too.
+        // ...while publishData still rides on it.
+        asked.clear()
         ok(call("swarm_publishData", JSONObject().put("data", "x").put("contentType", "text/plain")))
         assertTrue(asked.isEmpty())
+        // Its sheet has no "always allow" switch; publishChunk's keeps one.
+        assertEquals(null, swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.SignedSoc, 5, null, null, emptyList(), owner = pageOwner)).always)
+        assertTrue(swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).always != null)
         assertTrue(okJson(call("swarm_getCapabilities")).getJSONObject("extensions").getBoolean("pageSignedSingleOwnerChunks"))
     }
 
