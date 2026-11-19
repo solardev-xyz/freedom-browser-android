@@ -103,9 +103,22 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
      * being torn down with no new one. Unless the navigation's own
      * request already started a new generation, the old document's calls
      * are dropped now.
+     *
+     * [blank]: the document is `about:blank`, which no request is made
+     * for, so it can't be the commit of the one [navigationRequested]
+     * saw: a new tab commits its blank page after the request for the
+     * address it was opened on has already reached the interceptor, and
+     * that address's own commit must still find it.
      */
-    fun documentStarted(tab: Long, gone: Boolean = false) = lock.withLock {
-        if (!requested.remove(tab) || gone) advance(tab)
+    fun documentStarted(tab: Long, gone: Boolean = false, blank: Boolean = false) = lock.withLock {
+        when {
+            gone -> {
+                requested.remove(tab)
+                advance(tab)
+            }
+            blank && tab in requested -> Unit // the old document's calls went at the request
+            !requested.remove(tab) -> advance(tab)
+        }
     }
 
     /** [tab] closed: everything it has queued or running is dropped. */

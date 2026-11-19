@@ -383,7 +383,7 @@ object RadicleProviders {
      * reads still queued or running are dropped ([RadicleClient.documentStarted]).
      */
     fun onDocumentStarted(tab: BrowserState, url: String?) {
-        RadicleClient.documentStarted(tab.id, gone = url == null)
+        RadicleClient.documentStarted(tab.id, url)
         documents[tab.id] = (documents[tab.id] ?: 0) + 1
         committedOrigins[tab.id] = providerOriginKey(url)
         withdraw(tab.id)

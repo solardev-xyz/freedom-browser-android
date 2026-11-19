@@ -120,8 +120,9 @@ object RadicleClient {
     /** [tab]'s main-frame request reached the interceptor (its thread). */
     fun navigationRequested(tab: Long) = admission.navigationRequested(tab)
 
-    /** [tab] committed a document; [gone]: it was torn down with none in its place. */
-    fun documentStarted(tab: Long, gone: Boolean) = admission.documentStarted(tab, gone)
+    /** [tab] committed a document on [url]; null: it was torn down with none in its place. */
+    fun documentStarted(tab: Long, url: String?) =
+        admission.documentStarted(tab, gone = url == null, blank = url == ABOUT_BLANK)
 
     /** [tab] closed. */
     fun tabClosed(tab: Long) = admission.tabClosed(tab)

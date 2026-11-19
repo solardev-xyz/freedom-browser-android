@@ -204,6 +204,26 @@ class RadicleAdmissionTest {
     }
 
     @Test
+    fun `a new tab's blank page committing after the request doesn't take its place`() {
+        // Seen on the emulator: a tab opened on an address asks for it,
+        // then commits about:blank, then the address.
+        val adm = RadicleAdmission()
+        adm.navigationRequested(tabA)
+        adm.documentStarted(tabA, blank = true)
+        val incoming = adm.requester(tabA)
+        adm.documentStarted(tabA)
+        assertTrue(adm.admit(incoming, write = false, waitMs = 1_000) is Admit.Granted)
+    }
+
+    @Test
+    fun `going Home to the blank page drops the page's reads`() {
+        val adm = RadicleAdmission()
+        val page = adm.requester(tabA)
+        adm.documentStarted(tabA, blank = true)
+        assertSame(Admit.Cancelled, adm.admit(page, write = false, waitMs = 1_000))
+    }
+
+    @Test
     fun `calls no tab made are never dropped`() {
         val adm = RadicleAdmission()
         val requester = adm.requester(null)
