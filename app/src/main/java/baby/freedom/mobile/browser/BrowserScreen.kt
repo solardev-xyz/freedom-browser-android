@@ -1127,6 +1127,8 @@ fun BrowserScreen(
         loadUri: String = contentUri,
         namedByUser: Boolean = false,
         bypassCache: Boolean = false,
+        // This load is the error page's own retry of [contentUri] (#536).
+        continuesRetryStreak: Boolean = false,
     ) {
         val generation = target.loadGeneration
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
@@ -1140,7 +1142,7 @@ fun BrowserScreen(
             else -> "swarm"
         }
 
-        fun showError(errorCode: String) {
+        fun showError(errorCode: String, failure: ErrorPage.SwarmFailure? = null) {
             target.clearEnsOverride()
             target.loadUrl(
                 ErrorPage.url(
@@ -1148,6 +1150,8 @@ fun BrowserScreen(
                     displayUrl = displayUrl,
                     protocol = protocolHint,
                     retryUrl = contentUri,
+                    swarmFailure = failure,
+                    continuesRetryStreak = continuesRetryStreak,
                 ),
             )
         }
@@ -1194,8 +1198,10 @@ fun BrowserScreen(
         // but readiness is a question for the node itself. Resolved
         // after the node flips to Running, in case ipfsBase was still
         // empty before.
+        // For Swarm, the very page the WebView will load, so a path the
+        // site's manifest lacks fails here, fast ([GatewayProbe.probeTarget]).
         val resolved = Gateways.toGatewayUrl(contentUri)
-        val headUrl = GatewayUrls.extractBase(resolved)?.prefix ?: resolved
+        val headUrl = GatewayProbe.probeTarget(resolved)
 
         // Open gateway work of this load while the probe's HEADs run —
         // a later submit's IPFS phase line reads it to tell this load is
@@ -1203,7 +1209,12 @@ fun BrowserScreen(
         // itself is blocking, so the probe returns only once it has.
         val probeWork = target.gatewayWork.start(generation)
         val outcome = try {
-            gatewayProbe.probe(headUrl)
+            gatewayProbe.probe(
+                headUrl,
+                // A Swarm node that gave up says how many peers it had,
+                // so the page can blame too few rather than the content.
+                peersUrl = if (isIpfs) null else "${Gateways.swarmBase}/peers",
+            )
         } finally {
             target.gatewayWork.finish(probeWork)
         }
@@ -1217,12 +1228,10 @@ fun BrowserScreen(
                 )
             GatewayProbe.Outcome.Aborted -> { /* superseded by a later submit */ }
             is GatewayProbe.Outcome.Unreachable -> showError("ERR_CONNECTION_REFUSED")
-            GatewayProbe.Outcome.NotFound, is GatewayProbe.Outcome.Other -> {
-                val detail = if (outcome is GatewayProbe.Outcome.Other) {
-                    "swarm_content_not_found_${outcome.status}"
-                } else "swarm_content_not_found"
-                showError(detail)
-            }
+            GatewayProbe.Outcome.PathNotFound,
+            is GatewayProbe.Outcome.NotFound,
+            is GatewayProbe.Outcome.Other,
+            -> showError("swarm_content_not_found", ErrorPage.SwarmFailure.of(outcome))
         }
     }
 
@@ -1356,6 +1365,12 @@ fun BrowserScreen(
         // [submitSupersedesPendingProbe]). Checked before anything else
         // so a looping `location.href` touches no tab state at all.
         if (!submitSupersedesPendingProbe(target.pendingProbeSource, source)) return
+
+        // The error page on screen retrying its own address (its
+        // countdown, or Try Again) goes on counting its automatic
+        // retries; anything else starts the count over (#536). Read
+        // before this submit's own load can move the tab on.
+        val errorPageRetried = if (source == SubmitSource.Renderer) target.errorPageRetry else null
 
         // The editor is the user's, and only their own submit closes it
         // (#35, see [submitEndsAddressEditing]).
@@ -1680,6 +1695,7 @@ fun BrowserScreen(
                         displayUrl = contentUri,
                         namedByUser = namedByUser,
                         bypassCache = bypassCache,
+                        continuesRetryStreak = errorPageRetried == contentUri,
                     )
                 } finally {
                     target.resolving = false

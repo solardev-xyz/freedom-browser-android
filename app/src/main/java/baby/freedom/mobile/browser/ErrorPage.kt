@@ -42,6 +42,15 @@ import java.net.URLEncoder
  *  - `resolved` — `ens_wrong_protocol` only: the transport the name
  *                does resolve to (#97), for "resolves to IPFS, not
  *                Swarm" and a button that opens it there.
+ *  - `reason` / `status` / `peers` — `swarm_content_not_found` only
+ *                (#536, desktop #618): why the [GatewayProbe] gave up
+ *                ([SwarmFailure]), so the page says what happened. A
+ *                page without `reason` (a failed WebView load, an older
+ *                history entry) reads as content not found yet.
+ *  - `streak`  — `1` when this failure follows straight on from the
+ *                page's own retry from an error page for the same
+ *                `retry` URL: the page then goes on counting its
+ *                automatic retries instead of starting over.
  *
  * The page's text comes from string resources (#280). WebView loads
  * `file:///android_asset/` itself, without asking the interceptor, so
@@ -69,6 +78,8 @@ object ErrorPage {
          * button that opens it there.
          */
         resolvedProtocol: String? = null,
+        swarmFailure: SwarmFailure? = null,
+        continuesRetryStreak: Boolean = false,
     ): String {
         val params = buildList {
             add("error=${encode(errorCode)}")
@@ -78,8 +89,41 @@ object ErrorPage {
             if (detail != null) add("detail=${encode(detail)}")
             if (continueUrl != null) add("continue=${encode(continueUrl)}")
             if (resolvedProtocol != null) add("resolved=${encode(resolvedProtocol)}")
+            if (swarmFailure != null) {
+                add("reason=${swarmFailure.reason}")
+                swarmFailure.status?.let { add("status=$it") }
+                swarmFailure.peers?.let { add("peers=$it") }
+            }
+            if (continuesRetryStreak) add("streak=1")
         }
         return "$URL?${params.joinToString("&")}"
+    }
+
+    /**
+     * Why a Swarm (or IPFS) probe gave up, as `error.html` reads it:
+     * [reason] is `path_not_found`, `not_found` (the budget ran out) or
+     * `other` (an unexpected HTTP [status]); for `not_found`, [status] is
+     * the node's last answer (`no_response` when it gave none in time)
+     * and [peers] its connected peer count.
+     */
+    class SwarmFailure private constructor(
+        val reason: String,
+        val status: String? = null,
+        val peers: Int? = null,
+    ) {
+        companion object {
+            /** `null` for an outcome that isn't a content failure. */
+            fun of(outcome: GatewayProbe.Outcome): SwarmFailure? = when (outcome) {
+                GatewayProbe.Outcome.PathNotFound -> SwarmFailure("path_not_found")
+                is GatewayProbe.Outcome.NotFound -> SwarmFailure(
+                    "not_found",
+                    status = outcome.lastStatus?.toString() ?: "no_response",
+                    peers = outcome.peers,
+                )
+                is GatewayProbe.Outcome.Other -> SwarmFailure("other", status = outcome.status.toString())
+                else -> null
+            }
+        }
     }
 
     fun isErrorPage(url: String?): Boolean = url != null && url.startsWith(URL)
@@ -138,9 +182,28 @@ object ErrorPage {
         "cert_description_untrusted" to R.string.errorpage_cert_description_untrusted,
         "cert_description_invalid" to R.string.errorpage_cert_description_invalid,
         "cert_description_risk" to R.string.errorpage_cert_description_risk,
-        "page_swarm_not_ready_title" to R.string.errorpage_page_swarm_not_ready_title,
-        "page_swarm_not_ready" to R.string.errorpage_page_swarm_not_ready,
+        "page_swarm_path_not_found_title" to R.string.errorpage_page_swarm_path_not_found_title,
+        "page_swarm_path_not_found" to R.string.errorpage_page_swarm_path_not_found,
+        "page_swarm_path_not_found_detail" to R.string.errorpage_page_swarm_path_not_found_detail,
+        "page_swarm_other_title" to R.string.errorpage_page_swarm_other_title,
+        "page_swarm_other" to R.string.errorpage_page_swarm_other,
+        "page_swarm_other_detail" to R.string.errorpage_page_swarm_other_detail,
+        "page_swarm_not_found_title" to R.string.errorpage_page_swarm_not_found_title,
+        "page_swarm_not_found" to R.string.errorpage_page_swarm_not_found,
+        "page_swarm_one_peer" to R.string.errorpage_page_swarm_one_peer,
+        "page_swarm_few_peers" to R.string.errorpage_page_swarm_few_peers,
+        "page_ipfs_not_found" to R.string.errorpage_page_ipfs_not_found,
         "page_swarm_not_found_detail" to R.string.errorpage_page_swarm_not_found_detail,
+        "page_swarm_timeout_detail" to R.string.errorpage_page_swarm_timeout_detail,
+        "page_swarm_timeout_peers_detail" to R.string.errorpage_page_swarm_timeout_peers_detail,
+        "page_swarm_timeout_one_peer_detail" to R.string.errorpage_page_swarm_timeout_one_peer_detail,
+        "page_swarm_answer_http" to R.string.errorpage_page_swarm_answer_http,
+        "page_swarm_answer_none" to R.string.errorpage_page_swarm_answer_none,
+        "page_auto_retry_in" to R.string.errorpage_page_auto_retry_in,
+        "page_auto_retry_now" to R.string.errorpage_page_auto_retry_now,
+        "page_auto_retry_stopped" to R.string.errorpage_page_auto_retry_stopped,
+        "page_auto_retry_paused" to R.string.errorpage_page_auto_retry_paused,
+        "page_auto_retry_stop" to R.string.errorpage_page_auto_retry_stop,
         "page_swarm_node_stopped" to R.string.errorpage_page_swarm_node_stopped,
         "page_swarm_gateway_unreachable" to R.string.errorpage_page_swarm_gateway_unreachable,
         "page_unknown_error" to R.string.errorpage_page_unknown_error,

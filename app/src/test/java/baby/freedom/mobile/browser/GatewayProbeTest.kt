@@ -107,7 +107,7 @@ class GatewayProbeTest {
             attemptTimeoutMs = 500L,
             overallTimeoutMs = 300L,
         )
-        assertEquals(GatewayProbe.Outcome.NotFound, outcome)
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = 503, peers = null), outcome)
     }
 
     @Test
@@ -126,7 +126,204 @@ class GatewayProbeTest {
             attemptTimeoutMs = 500L,
             overallTimeoutMs = 300L,
         )
-        assertEquals(GatewayProbe.Outcome.NotFound, outcome)
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = 404, peers = null), outcome)
+    }
+
+    // --- #536: ant's typed 404 and 503 -------------------------------------
+
+    private val missingPath = """{"code":404,"message":"path address not found"}"""
+
+    @Test
+    fun `a quick path-not-found 404 ends the probe at once`() = runBlocking {
+        val heads = AtomicInteger(0)
+        server.respondWith { req ->
+            if (req.method == "HEAD") heads.incrementAndGet()
+            Response(404, body = missingPath)
+        }
+        val started = System.currentTimeMillis()
+        val outcome = GatewayProbe().probe("${server.baseUrl}/bzz/abc/nope.html")
+        assertEquals(GatewayProbe.Outcome.PathNotFound, outcome)
+        assertEquals(1, heads.get())
+        assertTrue(System.currentTimeMillis() - started < 2_000)
+    }
+
+    @Test
+    fun `the message is matched case-insensitively, as Bee's and ant's`() = runBlocking {
+        server.respondWith { _ -> Response(404, body = """{"message":"Path Address Not Found"}""") }
+        assertEquals(
+            GatewayProbe.Outcome.PathNotFound,
+            GatewayProbe().probe("${server.baseUrl}/bzz/abc/nope.html"),
+        )
+    }
+
+    @Test
+    fun `a cold path-not-found ends the probe once the next attempt agrees`() = runBlocking {
+        val heads = AtomicInteger(0)
+        server.respondWith { req ->
+            // Every HEAD slower than the warm window: a fresh lookup each time.
+            if (req.method == "HEAD") {
+                heads.incrementAndGet()
+                Response(404, hangMs = 150L)
+            } else Response(404, body = missingPath)
+        }
+        val outcome = GatewayProbe().probe(
+            "${server.baseUrl}/bzz/abc/nope.html",
+            delaysMs = longArrayOf(0L, 20L),
+            warm404Ms = 100L,
+        )
+        assertEquals(GatewayProbe.Outcome.PathNotFound, outcome)
+        assertEquals(2, heads.get())
+    }
+
+    @Test
+    fun `a cold path-not-found the next attempt contradicts doesn't end the probe`() = runBlocking {
+        // A feed lookup that landed on an older update than the latest:
+        // the page the site just added is there on the next try.
+        val heads = AtomicInteger(0)
+        server.respondWith { req ->
+            if (req.method == "HEAD") {
+                if (heads.incrementAndGet() == 1) Response(404, hangMs = 150L) else Response(200)
+            } else Response(404, body = missingPath)
+        }
+        val outcome = GatewayProbe().probe(
+            "${server.baseUrl}/bzz/abc/new.html",
+            delaysMs = longArrayOf(0L, 20L),
+            warm404Ms = 100L,
+        )
+        assertEquals(GatewayProbe.Outcome.Ok, outcome)
+    }
+
+    @Test
+    fun `a cold path-not-found then a plain Not Found starts the confirmation over`() = runBlocking {
+        val heads = AtomicInteger(0)
+        server.respondWith { req ->
+            val n = if (req.method == "HEAD") heads.incrementAndGet() else heads.get()
+            when {
+                req.method == "HEAD" -> Response(404, hangMs = 150L)
+                n == 2 -> Response(404, body = """{"code":404,"message":"Not Found"}""")
+                else -> Response(404, body = missingPath)
+            }
+        }
+        val outcome = GatewayProbe().probe(
+            "${server.baseUrl}/bzz/abc/nope.html",
+            delaysMs = longArrayOf(0L, 20L),
+            warm404Ms = 100L,
+        )
+        assertEquals(GatewayProbe.Outcome.PathNotFound, outcome)
+        // Cold miss, plain miss, cold miss, cold miss: the last two agree.
+        assertEquals(4, heads.get())
+    }
+
+    @Test
+    fun `a plain Not Found keeps polling - the network may still have it`() = runBlocking {
+        val gets = AtomicInteger(0)
+        server.respondWith { req ->
+            if (req.method == "GET") gets.incrementAndGet()
+            Response(404, body = """{"code":404,"message":"Not Found"}""")
+        }
+        val outcome = GatewayProbe().probe(
+            headUrl = "${server.baseUrl}/bzz/abc",
+            delaysMs = longArrayOf(0L, 50L),
+            overallTimeoutMs = 300L,
+        )
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = 404, peers = null), outcome)
+        assertTrue(gets.get() >= 1)
+    }
+
+    @Test
+    fun `a slow 404 isn't re-read - its retrieval already gave up`() = runBlocking {
+        val gets = AtomicInteger(0)
+        server.respondWith { req ->
+            if (req.method == "GET") {
+                gets.incrementAndGet()
+                Response(404, body = missingPath)
+            } else Response(404, hangMs = 150L)
+        }
+        val outcome = GatewayProbe().probe(
+            headUrl = "${server.baseUrl}/bzz/abc/nope.html",
+            delaysMs = longArrayOf(0L, 20L),
+            overallTimeoutMs = 400L,
+            quick404Ms = 100L,
+        )
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = 404, peers = null), outcome)
+        assertEquals(0, gets.get())
+    }
+
+    @Test
+    fun `a 503 is never read as a missing path`() = runBlocking {
+        server.respondWith { _ -> Response(503, body = missingPath) }
+        val outcome = GatewayProbe().probe(
+            headUrl = "${server.baseUrl}/bzz/abc/nope.html",
+            delaysMs = longArrayOf(0L, 50L),
+            overallTimeoutMs = 300L,
+        )
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = 503, peers = null), outcome)
+    }
+
+    @Test
+    fun `a probe that runs out of time reports the node's peer count`() = runBlocking {
+        server.respondWith { req ->
+            if (req.path == "/peers") Response(200, body = """{"peers":[{"address":"a"},{"address":"b"},{"address":"c"}]}""")
+            else Response(503)
+        }
+        val outcome = GatewayProbe().probe(
+            headUrl = "${server.baseUrl}/bzz/abc",
+            delaysMs = longArrayOf(0L, 50L),
+            overallTimeoutMs = 300L,
+            peersUrl = "${server.baseUrl}/peers",
+        )
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = 503, peers = 3), outcome)
+    }
+
+    @Test
+    fun `a node that never answered in time is reported as such`() = runBlocking {
+        server.respondWith { req ->
+            if (req.path == "/peers") Response(500, body = "oops") else Response(200, hangMs = 2_000L)
+        }
+        val outcome = GatewayProbe().probe(
+            headUrl = "${server.baseUrl}/bzz/abc",
+            delaysMs = longArrayOf(0L),
+            attemptTimeoutMs = 200L,
+            overallTimeoutMs = 100L,
+            peersUrl = "${server.baseUrl}/peers",
+        )
+        assertEquals(GatewayProbe.Outcome.NotFound(lastStatus = null, peers = null), outcome)
+    }
+
+    @Test
+    fun `the probe HEADs the page itself, not the site root`() {
+        val base = "http://127.0.0.1:1633/bzz/$HASH"
+        assertEquals("$base/docs/a.html", GatewayProbe.probeTarget("$base/docs/a.html?x=1#top"))
+        assertEquals("$base/", GatewayProbe.probeTarget("$base/"))
+        assertEquals(base, GatewayProbe.probeTarget(base))
+        assertEquals("$base/a%20b/", GatewayProbe.probeTarget("$base/a%20b/#f"))
+        // A double dot could aim the HEAD outside /bzz/: the root instead.
+        assertEquals(base, GatewayProbe.probeTarget("$base/../../health"))
+        assertEquals(base, GatewayProbe.probeTarget("$base/a/.%2E/b"))
+        assertEquals(base, GatewayProbe.probeTarget("$base/a/%2e%2E"))
+        assertEquals(base, GatewayProbe.probeTarget("$base/a\\..\\health"))
+        // A single dot, or dots inside a name, are just names.
+        assertEquals("$base/a/.well-known/x..y", GatewayProbe.probeTarget("$base/a/.well-known/x..y"))
+        // IPFS keeps probing its root.
+        val cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        assertEquals(
+            "http://127.0.0.1:5001/ipfs/$cid",
+            GatewayProbe.probeTarget("http://127.0.0.1:5001/ipfs/$cid/docs/a.html"),
+        )
+        assertEquals("not a gateway url", GatewayProbe.probeTarget("not a gateway url"))
+    }
+
+    @Test
+    fun `only ant's path miss and a peers list parse`() {
+        assertTrue(GatewayProbe.missingPathBody(missingPath))
+        assertEquals(false, GatewayProbe.missingPathBody("""{"message":"Not Found"}"""))
+        assertEquals(false, GatewayProbe.missingPathBody("path address not found"))
+        assertEquals(false, GatewayProbe.missingPathBody("<html>404</html>"))
+        assertEquals(false, GatewayProbe.missingPathBody("[".repeat(100_000)))
+        assertEquals(0, GatewayProbe.peerCount("""{"peers":[]}"""))
+        assertEquals(2, GatewayProbe.peerCount("""{"peers":[{},{}]}"""))
+        assertEquals(null, GatewayProbe.peerCount("""{"peers":null}"""))
+        assertEquals(null, GatewayProbe.peerCount("""{"peers":[{},{}"""))
     }
 
     @Test
@@ -258,6 +455,10 @@ class GatewayProbeTest {
 
 // --- Test server ----------------------------------------------------------
 
+private const val HASH = "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
+
+private data class Request(val method: String, val path: String)
+
 private data class Response(
     val status: Int = 200,
     val body: String = "",
@@ -275,7 +476,7 @@ private data class Response(
 private class StubHttpServer(private val requestedPort: Int = 0) {
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
-    private val responder = java.util.concurrent.atomic.AtomicReference<((String) -> Response)?>(null)
+    private val responder = java.util.concurrent.atomic.AtomicReference<((Request) -> Response)?>(null)
 
     val port: Int get() = serverSocket?.localPort ?: error("server not started")
     val baseUrl: String get() = "http://127.0.0.1:$port"
@@ -305,7 +506,7 @@ private class StubHttpServer(private val requestedPort: Int = 0) {
         acceptThread = null
     }
 
-    fun respondWith(handler: (String) -> Response) {
+    fun respondWith(handler: (Request) -> Response) {
         responder.set(handler)
     }
 
@@ -321,23 +522,24 @@ private class StubHttpServer(private val requestedPort: Int = 0) {
                     val line = reader.readLine() ?: break
                     if (line.isEmpty()) break
                 }
+                val method = requestLine.split(' ').getOrNull(0) ?: "GET"
                 val path = requestLine.split(' ').getOrNull(1) ?: "/"
 
                 val handler = responder.get() ?: { _ -> Response(200) }
-                val response = handler(path)
+                val response = handler(Request(method, path))
 
                 if (response.hangMs > 0) {
                     try { Thread.sleep(response.hangMs) } catch (_: InterruptedException) { return }
                 }
 
-                writeResponse(client.getOutputStream(), response)
+                writeResponse(client.getOutputStream(), response, isHead = method == "HEAD")
             }
         } catch (_: Throwable) {
             // Swallow — test-only server, no logging needed.
         }
     }
 
-    private fun writeResponse(out: OutputStream, r: Response) {
+    private fun writeResponse(out: OutputStream, r: Response, isHead: Boolean) {
         val bodyBytes = r.body.toByteArray(Charsets.UTF_8)
         val reason = reasonFor(r.status)
         val head = buildString {
@@ -348,7 +550,7 @@ private class StubHttpServer(private val requestedPort: Int = 0) {
             append("\r\n")
         }
         out.write(head.toByteArray(Charsets.UTF_8))
-        if (bodyBytes.isNotEmpty()) out.write(bodyBytes)
+        if (bodyBytes.isNotEmpty() && !isHead) out.write(bodyBytes)
         out.flush()
     }
 
