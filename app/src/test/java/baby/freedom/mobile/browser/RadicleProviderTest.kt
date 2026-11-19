@@ -442,17 +442,61 @@ class RadicleProviderTest {
         val copy = asked.map { radiclePromptCopy(it).allow }
         assertEquals(listOf("Open issue", "Change state", "Post comment", "Post comment", "Post comment"), copy)
         assertTrue(radiclePromptCopy(asked[0]).detail.contains("can't be edited away or taken back"))
-        val lines = radicleWriteLines(asked[0] as RadicleAsk.Write).associate { it.label to it.value }
-        assertEquals("line 1\nline 2", lines["Description"])
-        assertEquals(rid, lines["Repository ID"])
-        assertEquals("aaaaaa", radicleWriteLines(asked[2] as RadicleAsk.Write).single { it.label.startsWith("The page says") }.value)
+        val lines = radicleWriteLines(asked[0] as RadicleAsk.Write).associate { it.label to it.rows.map(::rowText) }
+        assertEquals(listOf("line 1", "line 2"), lines["Description"])
+        assertEquals(listOf(rid), lines["Repository ID"])
+        assertEquals(listOf("bug"), lines["Label (1)"])
+        assertEquals(listOf("aaaaaa"), radicleWriteLines(asked[2] as RadicleAsk.Write).single { it.label.startsWith("The page says") }.rows.map(::rowText))
         // Hidden characters are shown, not obeyed.
         val spoof = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = "ok\u202Eevil"))
-        assertEquals("ok\\u202Eevil", spoof.last().value)
+        assertEquals(listOf(RadicleWriteRow.Text("ok\\u202Eevil")), spoof.last().rows)
         // Nothing is asked about a write that would fail anyway.
         asked.clear()
         req("radicle_commentIssue", comment(" "))
         assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `a write prompt can't pad what's published out of view (#544)`() {
+        fun body(text: String) = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = text)).last().rows
+        // Blank lines, of any kind of space, are counted, not drawn: the hidden text is right under "LGTM".
+        assertEquals(
+            listOf(RadicleWriteRow.Text("LGTM"), RadicleWriteRow.Blank(400), RadicleWriteRow.Text("<malicious text>")),
+            body("LGTM" + "\n".repeat(401) + "<malicious text>"),
+        )
+        for (space in listOf(" ", "\u00A0", "\u2007", "\u202F", "\u3000")) {
+            assertEquals(
+                listOf(RadicleWriteRow.Text("a"), RadicleWriteRow.Blank(3), RadicleWriteRow.Text("b")),
+                body("a\n" + "$space\n\n${space.repeat(9)}\nb"),
+            )
+            // A long run inside one line wraps into blank screen lines of its own.
+            assertEquals(
+                listOf(RadicleWriteRow.Text("LGTM"), RadicleWriteRow.Spaces(5000), RadicleWriteRow.Text("evil")),
+                body("LGTM" + space.repeat(5000) + "evil"),
+            )
+        }
+        // A paragraph break, indentation and an empty line are shown as they are.
+        assertEquals(
+            listOf(RadicleWriteRow.Text("a"), RadicleWriteRow.Text(""), RadicleWriteRow.Text("    code"), RadicleWriteRow.Text("${" ".repeat(16)}x")),
+            body("a\n\n    code\n${" ".repeat(16)}x"),
+        )
+        assertEquals(listOf(RadicleWriteRow.Spaces(17)), body(" ".repeat(17)))
+        assertEquals("400 blank lines", rowText(RadicleWriteRow.Blank(400)))
+        assertEquals("5000 spaces", rowText(RadicleWriteRow.Spaces(5000)))
+        // A one-line field can't open blank lines at all: its line breaks are escapes.
+        val issue = radicleWriteLines(
+            RadicleAsk.Write(site, "radicle_createIssue", rid, title = "Fix" + "\n".repeat(3) + "evil", labels = listOf("bug, wontfix")),
+        ).associate { it.label to it.rows }
+        assertEquals(listOf(RadicleWriteRow.Text("Fix\\n\\n\\nevil")), issue["Title"])
+        // One label with a comma in it is one boxed row under "Label (1)", two labels are two.
+        assertEquals(listOf(RadicleWriteRow.Text("bug, wontfix")), issue["Label (1)"])
+        val two = radicleWriteLines(RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", labels = listOf("bug", "wontfix")))
+            .single { it.boxed }
+        assertEquals("Labels (2)", two.label)
+        assertEquals(listOf(RadicleWriteRow.Text("bug"), RadicleWriteRow.Text("wontfix")), two.rows)
+        // 65,000 lines come back as rows for the lazy box, in well under a frame's worth of work each.
+        assertEquals(3, body("x" + "\n".repeat(65000) + "y").size)
+        assertEquals(32001, body("x\n".repeat(32000)).size)
     }
 
     @Test

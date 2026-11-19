@@ -1,5 +1,13 @@
 package baby.freedom.mobile.browser
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -93,36 +101,142 @@ internal fun radiclePromptCopy(ask: RadicleAsk): RadiclePromptCopy = when (ask) 
 /** The tallest a write prompt's content box gets before it scrolls on its own. */
 private val WRITE_CONTENT_MAX_HEIGHT = 280.dp
 
-/** One labelled value a write prompt shows; [code] for an ID, set in monospace. */
-internal data class RadicleWriteLine(val label: String, val value: String, val code: Boolean = false)
+/**
+ * A run of spaces longer than this, inside one line, is shown as a
+ * [RadicleWriteRow.Spaces] marker: a long run of no-break or ideographic
+ * spaces wraps into blank screen lines of its own, padding what follows
+ * out of view. Shorter runs (code indentation) are shown as they are.
+ */
+internal const val WRITE_MAX_SPACE_RUN = 16
+
+/**
+ * One row of a write prompt's content box. [Text] is what the page wrote,
+ * with hidden characters escaped; [Blank] and [Spaces] stand in for runs
+ * of blank lines and of spaces, which are published too but would only
+ * push the rest of the text out of view, so they're counted rather than drawn.
+ */
+internal sealed interface RadicleWriteRow {
+    data class Text(val text: String) : RadicleWriteRow
+    data class Blank(val lines: Int) : RadicleWriteRow
+    data class Spaces(val count: Int) : RadicleWriteRow
+}
+
+/**
+ * One labelled value a write prompt shows; [code] for an ID, set in
+ * monospace; [boxed] for a list whose items are told apart by a box each
+ * (labels: one can contain ", ").
+ */
+internal data class RadicleWriteLine(
+    val label: String,
+    val rows: List<RadicleWriteRow>,
+    val code: Boolean = false,
+    val boxed: Boolean = false,
+)
+
+/** A space a line can be padded with: any Unicode space separator (NBSP, U+3000 and the like). */
+private fun isPadding(c: Int) = Character.getType(c) == Character.SPACE_SEPARATOR.toInt()
+
+/**
+ * [line] (no line breaks in it) as rows: the text with hidden characters
+ * escaped ([Eip712.visible]), a run of more than [WRITE_MAX_SPACE_RUN]
+ * spaces split out as a [RadicleWriteRow.Spaces].
+ */
+private fun lineRows(line: String, out: MutableList<RadicleWriteRow>) {
+    val start = out.size
+    var from = 0
+    var i = 0
+    while (i < line.length) {
+        val c = line.codePointAt(i)
+        if (!isPadding(c)) {
+            i += Character.charCount(c)
+            continue
+        }
+        var end = i
+        var n = 0
+        while (end < line.length && isPadding(line.codePointAt(end))) {
+            end += Character.charCount(line.codePointAt(end))
+            n++
+        }
+        if (n > WRITE_MAX_SPACE_RUN) {
+            if (i > from) out += RadicleWriteRow.Text(Eip712.visible(line.substring(from, i)))
+            out += RadicleWriteRow.Spaces(n)
+            from = end
+        }
+        i = end
+    }
+    // An empty line is an empty row: one line of space, as published.
+    if (from < line.length || out.size == start) out += RadicleWriteRow.Text(Eip712.visible(line.substring(from)))
+}
+
+/**
+ * A one-line field (a title, a label, an ID the page names) as rows: a
+ * line break in it is escaped (`\n`) like any other hidden character, so
+ * it can't open blank space under the field.
+ */
+internal fun radicleOneLineRows(s: String): List<RadicleWriteRow> = buildList { lineRows(s, this) }
+
+/**
+ * A description or comment as rows, a line each, line breaks kept. Two or
+ * more blank lines (nothing but spaces) in a row are one
+ * [RadicleWriteRow.Blank] with their count, so a page can't pad what it
+ * really publishes below a screenful of nothing (#544).
+ */
+internal fun radicleTextRows(s: String): List<RadicleWriteRow> = buildList {
+    val lines = s.split('\n')
+    var i = 0
+    while (i < lines.size) {
+        var blank = 0
+        while (i + blank < lines.size && lines[i + blank].codePoints().allMatch(::isPadding)) blank++
+        when {
+            blank >= 2 -> { add(RadicleWriteRow.Blank(blank)); i += blank }
+            else -> { lineRows(lines[i], this); i++ }
+        }
+    }
+}
 
 /**
  * Everything a [RadicleAsk.Write] publishes, in full: the page picks every
  * word of it, so a character that could hide or rearrange text around it
  * (a bidi override, a zero-width mark) is shown as an escape, the way the
- * wallet's signing sheets show it ([Eip712.visible]). Line breaks in a
- * description or comment are kept as line breaks.
+ * wallet's signing sheets show it ([Eip712.visible]), and so is a line
+ * break in a one-line field. Line breaks in a description or comment are
+ * kept, padding is counted ([radicleTextRows]).
  */
 internal fun radicleWriteLines(ask: RadicleAsk.Write): List<RadicleWriteLine> = buildList {
-    fun shown(s: String) = s.split('\n').joinToString("\n") { Eip712.visible(it) }
-    add(RadicleWriteLine(Strings.get(R.string.radicle_rid_label), ask.rid, code = true))
+    fun id(s: String) = listOf(RadicleWriteRow.Text(s))
+    add(RadicleWriteLine(Strings.get(R.string.radicle_rid_label), id(ask.rid), code = true))
     if (ask.target.isNotEmpty()) {
         val label = if (ask.kind == "radicle_commentPatch") R.string.radicle_prompt_write_revision else R.string.radicle_prompt_write_issue
-        add(RadicleWriteLine(Strings.get(label), ask.target, code = true))
+        add(RadicleWriteLine(Strings.get(label), id(ask.target), code = true))
     }
     if (ask.claimedPatch.isNotEmpty()) {
-        add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_claimed_patch), shown(ask.claimedPatch), code = true))
+        add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_claimed_patch), radicleOneLineRows(ask.claimedPatch), code = true))
     }
-    if (ask.replyTo.isNotEmpty()) add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_reply_to), ask.replyTo, code = true))
-    if (ask.title.isNotEmpty()) add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_title), shown(ask.title)))
+    if (ask.replyTo.isNotEmpty()) add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_reply_to), id(ask.replyTo), code = true))
+    if (ask.title.isNotEmpty()) add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_title), radicleOneLineRows(ask.title)))
     if (ask.labels.isNotEmpty()) {
-        add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_labels), ask.labels.joinToString(", ") { shown(it) }))
+        // A box and a row each, and their number: "bug, wontfix" is one label, not two.
+        add(
+            RadicleWriteLine(
+                Strings.plural(R.plurals.radicle_prompt_write_labels_count, ask.labels.size, ask.labels.size),
+                // At most 100 bytes each: too short for padding to push anything out of view.
+                ask.labels.map { RadicleWriteRow.Text(Eip712.visible(it)) },
+                boxed = true,
+            ),
+        )
     }
-    if (ask.state.isNotEmpty()) add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_state), ask.state))
+    if (ask.state.isNotEmpty()) add(RadicleWriteLine(Strings.get(R.string.radicle_prompt_write_state), radicleOneLineRows(ask.state)))
     if (ask.body.isNotEmpty()) {
         val label = if (ask.kind == "radicle_createIssue") R.string.radicle_prompt_write_description else R.string.radicle_prompt_write_comment
-        add(RadicleWriteLine(Strings.get(label), shown(ask.body)))
+        add(RadicleWriteLine(Strings.get(label), radicleTextRows(ask.body)))
     }
+}
+
+/** What [row] reads as on screen; a marker in the words the prompt shows it with. */
+internal fun rowText(row: RadicleWriteRow): String = when (row) {
+    is RadicleWriteRow.Text -> row.text
+    is RadicleWriteRow.Blank -> Strings.plural(R.plurals.radicle_prompt_write_blank_lines, row.lines, row.lines)
+    is RadicleWriteRow.Spaces -> Strings.plural(R.plurals.radicle_prompt_write_spaces, row.count, row.count)
 }
 
 /**
@@ -198,23 +312,43 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
                     Text(identity.second, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
                 if (write != null) {
-                    // What's published also scrolls in a box of its own (a
-                    // comment can be 64 KB), so the warning and the switch
-                    // stay close by.
-                    Column(
-                        Modifier
+                    // What's published scrolls in a box of its own (a comment
+                    // can be 64 KB), laid out lazily (it can be 65,000 lines),
+                    // so the warning and the switch stay close by. Whether
+                    // there's more than the box shows is said above it, where
+                    // the first view always has it, not below it.
+                    val content = remember(write) { radicleWriteLines(write) }
+                    val list = remember(request) { LazyListState() }
+                    val more by remember(list) { derivedStateOf { list.canScrollForward || list.canScrollBackward } }
+                    if (more) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            stringResource(R.string.radicle_prompt_write_scroll),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.testTag("radicle-write-more"),
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    LazyColumn(
+                        state = list,
+                        modifier = Modifier
+                            .fillMaxWidth()
                             .heightIn(max = WRITE_CONTENT_MAX_HEIGHT)
-                            .verticalScroll(rememberScrollState())
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                             .testTag("radicle-write-content"),
                     ) {
-                        remember(write) { radicleWriteLines(write) }.forEach { line ->
-                            Spacer(Modifier.height(8.dp))
-                            Text(line.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                line.value,
-                                fontFamily = if (line.code) FontFamily.Monospace else null,
-                                style = if (line.code) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
-                            )
+                        content.forEach { line ->
+                            item {
+                                Text(
+                                    line.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                )
+                            }
+                            items(line.rows) { row -> WriteRow(row, line) }
                         }
                     }
                 }
@@ -259,6 +393,38 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
             TextButton(enabled = armed, onClick = { if (guard.accepts()) answer(false) }) {
                 Text(stringResource(R.string.common_cancel))
             }
+        },
+    )
+}
+
+/** One [RadicleWriteRow] of a write prompt: a marker (not text a page can write) set apart in italics and colour. */
+@Composable
+private fun WriteRow(row: RadicleWriteRow, line: RadicleWriteLine) {
+    val text = rowText(row)
+    if (row !is RadicleWriteRow.Text) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            fontStyle = FontStyle.Italic,
+            color = MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier
+                .padding(vertical = 2.dp)
+                .background(MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f), RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp),
+        )
+        return
+    }
+    Text(
+        text,
+        fontFamily = if (line.code) FontFamily.Monospace else null,
+        style = if (line.code) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
+        modifier = if (line.boxed) {
+            Modifier
+                .padding(vertical = 2.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp, vertical = 2.dp)
+        } else {
+            Modifier
         },
     )
 }

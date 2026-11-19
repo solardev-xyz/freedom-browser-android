@@ -95,7 +95,19 @@
     <string name="radicle_prompt_write_claimed_patch">The page says it belongs to patch</string>
     <string name="radicle_prompt_write_title">Title</string>
     <string name="radicle_prompt_write_description">Description</string>
-    <string name="radicle_prompt_write_labels">Labels</string>
+    <plurals name="radicle_prompt_write_labels_count">
+        <item quantity="one">Label (1)</item>
+        <item quantity="other">Labels (%d)</item>
+    </plurals>
+    <plurals name="radicle_prompt_write_blank_lines">
+        <item quantity="one">%d blank line</item>
+        <item quantity="other">%d blank lines</item>
+    </plurals>
+    <plurals name="radicle_prompt_write_spaces">
+        <item quantity="one">%d space</item>
+        <item quantity="other">%d spaces</item>
+    </plurals>
+    <string name="radicle_prompt_write_scroll">There\'s more than this box shows: scroll it to read everything that\'s published.</string>
     <string name="radicle_prompt_write_comment">Comment</string>
     <string name="radicle_prompt_write_reply_to">In reply to comment</string>
     <string name="radicle_prompt_write_state">New state</string>
