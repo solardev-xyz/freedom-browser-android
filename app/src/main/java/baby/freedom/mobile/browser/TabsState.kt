@@ -839,7 +839,10 @@ class TabsState(
      * So both are rewritten as if the later closes were undone, [group]
      * put back, and the later closes done again — tabs a, b, c, d with
      * any of them closed one after another come back a, b, c, d
-     * whichever is reopened first, and the rest by Reopen.
+     * whichever is reopened first, and the rest by Reopen. The blank
+     * tab a later close left in place of the last tabs counts as
+     * [reopen] counts it: gone while that close is undone, back once
+     * it is done again.
      */
     private fun takeFromStack(group: ClosedGroup): Boolean {
         val at = closedTabs.indexOfFirst { it === group }
@@ -852,8 +855,20 @@ class TabsState(
                 tabs.firstOrNull { it.id == id && it.isUntouched() }?.id
             }
             val list: MutableList<Any> = tabs.filter { it.id != placeholderId }.toMutableList()
-            // Undo the later closes, newest first, as reopening them would.
+            // Undo the later closes, newest first, as reopening them
+            // would — which drops each one's own untouched placeholder
+            // before putting its tabs back. Where it stood (after which
+            // element, null: first) is kept so closing that entry again
+            // puts it back for the closes after it to count.
+            val placeholders = HashMap<ClosedGroup, Pair<BrowserState, Any?>>()
             for (entry in later.asReversed()) {
+                val p = entry.placeholderId?.let { id ->
+                    list.indexOfFirst { it is BrowserState && it.id == id && it.isUntouched() }
+                } ?: -1
+                if (p >= 0) {
+                    placeholders[entry] = (list[p] as BrowserState) to list.getOrNull(p - 1)
+                    list.removeAt(p)
+                }
                 for (closed in entry.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
             }
             // Put [group] back where it closed from.
@@ -865,6 +880,9 @@ class TabsState(
             for (entry in later) {
                 entry.tabs.forEach { closed -> closed.index = list.indexOf(closed) }
                 list.removeAll(entry.tabs.toSet())
+                placeholders[entry]?.let { (placeholder, after) ->
+                    list.add(if (after == null) 0 else list.indexOf(after) + 1, placeholder)
+                }
             }
             group.tabs.forEach { closed -> closed.index = list.indexOf(closed) }
         }
