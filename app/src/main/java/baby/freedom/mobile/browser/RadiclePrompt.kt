@@ -311,17 +311,18 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
             val list = remember(request) { LazyListState() }
             val more by remember(request) { derivedStateOf { write != null && radicleWriteHasMore(list, scroll) } }
             Column {
-                // Pinned above what scrolls, so the first view always has it,
-                // however little of the prompt fits.
-                if (more) {
-                    Text(
-                        stringResource(R.string.radicle_prompt_write_scroll),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(bottom = 8.dp).testTag("radicle-write-more"),
-                    )
-                }
                 Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)) {
+                    // First in what scrolls, which opens at the top, so the
+                    // first view has it. Not pinned above it: in landscape at
+                    // a large font the note alone would take all the room.
+                    if (more) {
+                        Text(
+                            stringResource(R.string.radicle_prompt_write_scroll),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(bottom = 8.dp).testTag("radicle-write-more"),
+                        )
+                    }
                     Text(copy.request)
                     if (rid != null) {
                         Spacer(Modifier.height(8.dp))
