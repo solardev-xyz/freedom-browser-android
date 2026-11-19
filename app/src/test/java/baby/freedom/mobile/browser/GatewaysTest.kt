@@ -7,6 +7,7 @@ import baby.freedom.mobile.ens.EnsTrust
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -330,6 +331,46 @@ class GatewaysTest {
             val path = "/" + probe.substringAfter("://").substringAfter('/')
             assertTrue(uri, DwebPath.isContainedTarget(path, encodedSeparators = !uri.startsWith("bzz:")))
         }
+    }
+
+    @Test
+    fun `a refused path is known from the address alone, before any node is up`() {
+        // The submit flow asks this before it waits for, or lazily starts,
+        // a node (R5-F1), so it must not depend on a gateway base: same
+        // answer with no IPFS node yet, with one, and behind an external
+        // endpoint, and exactly where the probe has nothing to HEAD.
+        val refused = listOf(
+            "bzz://%2e%2e/stamps",
+            "ipns://..",
+            "bzz://$ref64%2f..%2f..%2fstamps",
+            "ipfs://bafy%2f..%2f..%2fapi/v0/id",
+            "ipns://a%2f..%2f..%2fapi",
+            "bzz://zz/../../stamps",
+        )
+        val sound = listOf(
+            "bzz://$ref64",
+            "bzz://$ref64/a%2Fb",
+            "ipfs://bafy/..%2f..%2fapi/v0/id",
+            "ipns://docs.eth/x",
+            "bzz://zz/docs/index.html",
+            "https://example.com/",
+        )
+        listOf<() -> Unit>(
+            { Gateways.setIpfsBase("") },
+            { Gateways.setIpfsBase("http://127.0.0.1:58312") },
+            { Gateways.setExternalEndpoints("http://192.168.1.10:1633", "https://gw.example/sub") },
+        ).forEach { setUp ->
+            setUp()
+            refused.forEach {
+                assertTrue(it, Gateways.pathRefused(it))
+                assertNull(it, Gateways.probeUrlFor(it))
+            }
+            sound.forEach { assertFalse(it, Gateways.pathRefused(it)) }
+        }
+        // With a gateway base in place, every address not refused has a probe.
+        Gateways.setExternalEndpoints("", "")
+        Gateways.setIpfsBase("http://127.0.0.1:58312")
+        sound.filter { !it.startsWith("https:") }.forEach { assertNotNull(it, Gateways.probeUrlFor(it)) }
     }
 
     private val otherRef = "1111111111111111111111111111111111111111111111111111111111111111"

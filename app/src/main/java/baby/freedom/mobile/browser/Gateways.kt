@@ -445,6 +445,36 @@ object Gateways {
     }
 
     /**
+     * Is [contentUri] (`bzz://` / `ipfs://` / `ipns://`) an address
+     * [probeUrlFor] has nothing to probe for: its root — the whole first
+     * segment — leaves `/<namespace>/<id>/`, or it falls back to the
+     * gateway URL itself and its whole path does (#534). A question about
+     * the address alone, never about a node or its gateway base, so the
+     * submit flow asks it before waiting for (or starting) a node. `false`
+     * for any other scheme.
+     */
+    fun pathRefused(contentUri: String): Boolean {
+        val namespace = dwebNamespace(contentUri) ?: return false
+        val encodedSeparators = namespace != "bzz"
+        val rest = contentUri.substringAfter("://")
+        if (!DwebPath.isContainedTarget("/$namespace/${idOf(rest)}", encodedSeparators)) return true
+        return !VirtualOrigin.isVirtualUrl(toLoadable(contentUri)) &&
+            !DwebPath.isContainedTarget("/$namespace/$rest", encodedSeparators)
+    }
+
+    private fun dwebNamespace(contentUri: String): String? = when {
+        contentUri.startsWith("bzz://") -> "bzz"
+        contentUri.startsWith("ipfs://") -> "ipfs"
+        contentUri.startsWith("ipns://") -> "ipns"
+        else -> null
+    }
+
+    private fun idOf(rest: String): String {
+        val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
+        return if (end >= 0) rest.substring(0, end) else rest
+    }
+
+    /**
      * The URL the submit flow's readiness probe ([GatewayProbe]) HEADs for
      * [contentUri] (`bzz://` / `ipfs://` / `ipns://`): the gateway's
      * `/<namespace>/<id>` root, where `<id>` is the URL's whole first
@@ -466,20 +496,10 @@ object Gateways {
      * to probe and nothing to load.
      */
     fun probeUrlFor(contentUri: String): String? {
-        val namespace = when {
-            contentUri.startsWith("bzz://") -> "bzz"
-            contentUri.startsWith("ipfs://") -> "ipfs"
-            contentUri.startsWith("ipns://") -> "ipns"
-            else -> return null
-        }
-        val encodedSeparators = namespace != "bzz"
+        val namespace = dwebNamespace(contentUri) ?: return null
+        if (pathRefused(contentUri)) return null
         val rest = contentUri.substringAfter("://")
-        val end = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
-        val id = if (end >= 0) rest.substring(0, end) else rest
-        if (!DwebPath.isContainedTarget("/$namespace/$id", encodedSeparators)) return null
-        if (!VirtualOrigin.isVirtualUrl(toLoadable(contentUri)) &&
-            !DwebPath.isContainedTarget("/$namespace/$rest", encodedSeparators)
-        ) return null
+        val id = idOf(rest)
         val root = "$namespace://$id"
         val resolved = toGatewayUrl(root)
         val base = GatewayUrls.extractBase(resolved)
