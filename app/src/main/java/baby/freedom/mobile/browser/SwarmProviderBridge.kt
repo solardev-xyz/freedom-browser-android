@@ -475,10 +475,15 @@ object SwarmProviders {
                 }
                 val id = request.id
                 val method = request.method
-                // A read waiting for a join slot (or joining) is dropped once
-                // its document goes: nobody is left to answer, and its
-                // slot and reserved bytes go back to the pages still open.
-                if (method == "swarm_readData") reads.add(coroutineContext.job, tab.id, doc)
+                // A read still waiting for a join slot is dropped once its
+                // document goes: nobody is left to answer, and its place and
+                // reserved bytes go back to the pages still open. (One already
+                // joining keeps its slot until bee answers; its bytes stand.)
+                // A document that went while this was parsed was swept already.
+                if (method == "swarm_readData") {
+                    if (doc != STALE_DOCUMENT && (documents[tab.id] ?: 0) != doc) return@launch
+                    reads.add(coroutineContext.job, tab.id, doc)
+                }
                 val result = try {
                     val p = provider ?: throw IllegalStateException("provider not ready")
                     val approved = { approved(reply, id) }

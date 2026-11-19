@@ -1196,7 +1196,12 @@ class SwarmProvider(
             // page gone — had nothing joined, so its reservation is handed back.
             var slot = false
             try {
-                slot = withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) { acquireJoin(origin); true } ?: false
+                // Flagged inside the block: a timeout landing just as it
+                // returns must not leave the slot taken but never given back.
+                withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) {
+                    acquireJoin(origin)
+                    slot = true
+                }
             } finally {
                 if (!slot && window != null) unreserveBudget(origin, window, reserved)
             }
