@@ -132,26 +132,46 @@ class RadicleAdmissionTest {
     }
 
     @Test
-    fun `navigating drops the tab's queued reads before they reach the node`() {
+    fun `a navigation's commit drops the old page's queued reads before they reach the node`() {
         val adm = RadicleAdmission()
         val slots = fill(adm, tabB)
         val old = waitFor(adm, adm.requester(tabA))
         val otherTab = waitFor(adm, adm.requester(tabB))
         awaitWaiting(adm, 2)
         adm.navigationRequested(tabA)
+        // The page is still on screen until the commit: its read waits on.
+        Thread.sleep(50)
+        assertTrue(old.second.isEmpty())
+        // The incoming document's reads, made before the commit reaches
+        // the UI thread, are its own: the commit doesn't drop them.
+        val fresh = waitFor(adm, adm.requester(tabA))
+        awaitWaiting(adm, 3)
+        adm.documentStarted(tabA)
         old.first.join(5_000)
         assertSame(Admit.Cancelled, old.second.single())
-        assertEquals(1, adm.stats().second)
-        // The incoming document's reads are its own, and the commit that
-        // follows the request doesn't drop them.
-        val fresh = waitFor(adm, adm.requester(tabA))
-        awaitWaiting(adm, 2)
-        adm.documentStarted(tabA)
+        assertEquals(2, adm.stats().second)
         slots.forEach { it.release() }
         fresh.first.join(5_000)
         otherTab.first.join(5_000)
         assertTrue(fresh.second.single() is Admit.Granted)
         assertTrue(otherTab.second.single() is Admit.Granted)
+    }
+
+    @Test
+    fun `a navigation that never commits leaves the page's reads alone`() {
+        // A download link, a 204, Stop: the page stays on screen.
+        val adm = RadicleAdmission()
+        val page = adm.requester(tabA)
+        val running = granted(adm.admit(page, write = false, waitMs = 1_000))
+        adm.navigationRequested(tabA)
+        assertFalse(running.cancelled)
+        val next = granted(adm.admit(page, write = false, waitMs = 1_000))
+        // Going Home later drops what the page had from before the download.
+        adm.documentStarted(tabA, blank = true)
+        assertTrue(running.cancelled)
+        assertTrue(next.cancelled)
+        running.release()
+        next.release()
     }
 
     @Test
@@ -192,6 +212,15 @@ class RadicleAdmissionTest {
         adm.documentStarted(tabA, gone = true)
         assertSame(Admit.Cancelled, adm.admit(requester, write = false, waitMs = 1_000))
         assertTrue(adm.admit(requester, write = true, waitMs = 1_000) is Admit.Granted)
+    }
+
+    @Test
+    fun `a closed tab's later calls are refused`() {
+        val adm = RadicleAdmission()
+        val requester = adm.requester(tabA)
+        granted(adm.admit(requester, write = false, waitMs = 1_000)).release()
+        adm.tabClosed(tabA)
+        assertSame(Admit.Cancelled, adm.admit(requester, write = false, waitMs = 1_000))
     }
 
     @Test

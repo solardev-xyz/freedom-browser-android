@@ -473,6 +473,12 @@ object RadApi {
         "not_found_title" to R.string.radicle_viewer_not_found_title,
         "nothing_here" to R.string.radicle_viewer_nothing_here,
         "load_failed_title" to R.string.radicle_viewer_load_failed_title,
+        "busy_title" to R.string.radicle_viewer_busy_title,
+        "busy_body" to R.string.radicle_viewer_busy_body,
+        "timed_out_title" to R.string.radicle_viewer_timed_out_title,
+        "timed_out_body" to R.string.radicle_viewer_timed_out_body,
+        "too_large_title" to R.string.radicle_viewer_too_large_title,
+        "too_large_body" to R.string.radicle_viewer_too_large_body,
         "repository" to R.string.radicle_viewer_repository,
         "page_title" to R.string.radicle_viewer_page_title,
         "tab_code" to R.string.radicle_viewer_tab_code,
@@ -605,9 +611,9 @@ object RadApi {
     private fun failed(a: RadicleClient.Answer.Failed): Reply = when {
         a.reason == RadicleClient.REASON_DISABLED || a.reason == RadicleClient.REASON_STOPPED ||
             a.reason == RadicleClient.REASON_NOT_READY -> unavailable(a.reason)
-        a.reason == RadicleClient.REASON_BUSY || a.reason == RadicleClient.REASON_CANCELLED -> apiError(503, a.message)
-        a.reason == RadicleClient.REASON_TIMEOUT -> apiError(504, a.message)
-        a.reason == RadicleClient.REASON_TOO_LARGE -> apiError(502, a.message)
+        a.reason == RadicleClient.REASON_BUSY || a.reason == RadicleClient.REASON_CANCELLED -> limitError(503, a)
+        a.reason == RadicleClient.REASON_TIMEOUT -> limitError(504, a)
+        a.reason == RadicleClient.REASON_TOO_LARGE -> limitError(502, a)
         NOT_FOUND.containsMatchIn(a.message) -> apiError(404, a.message)
         else -> apiError(500, a.message)
     }
@@ -618,6 +624,10 @@ object RadApi {
         if (reason == RadicleClient.REASON_DISABLED) 403 else 503,
         error(RadicleClient.unavailableMessage(reason)).put("reason", reason),
     )
+
+    /** With its reason, which the viewer words in the app's language. */
+    private fun limitError(status: Int, a: RadicleClient.Answer.Failed): Reply =
+        json(status, error(a.message).put("reason", a.reason))
 
     private fun ok(value: Any): Reply = json(200, value)
 

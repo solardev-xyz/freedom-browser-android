@@ -160,6 +160,12 @@ class RadBrowserTest {
         assertEquals(503, status(RadicleClient.REASON_CANCELLED))
         assertEquals(504, status(RadicleClient.REASON_TIMEOUT))
         assertEquals(502, status(RadicleClient.REASON_TOO_LARGE))
+        // With its reason, which the viewer words in the app's language.
+        val busy = RadApi.serveApiWith(
+            "$bare/issues/abcdef",
+            FakeNode(answers = mapOf("issue" to RadicleClient.Answer.Failed("busy", RadicleClient.REASON_BUSY))),
+        )
+        assertEquals(RadicleClient.REASON_BUSY, JSONObject(body(busy)).getString("reason"))
     }
 
     @Test

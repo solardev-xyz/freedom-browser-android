@@ -129,6 +129,12 @@
     <string name="radicle_viewer_not_found_title">Not found</string>
     <string name="radicle_viewer_nothing_here">Nothing here.</string>
     <string name="radicle_viewer_load_failed_title">Couldn’t load this</string>
+    <string name="radicle_viewer_busy_title">The Radicle node is busy</string>
+    <string name="radicle_viewer_busy_body">Too many repository reads are waiting. Reload this page in a moment.</string>
+    <string name="radicle_viewer_timed_out_title">The Radicle node didn’t answer in time</string>
+    <string name="radicle_viewer_timed_out_body">Reload this page to try again.</string>
+    <string name="radicle_viewer_too_large_title">Too large to show</string>
+    <string name="radicle_viewer_too_large_body">This is more than 16 MiB, the most the repository browser shows.</string>
     <!-- Heading for a repository with no name. -->
     <string name="radicle_viewer_repository">Repository</string>
     <!-- The tab title: the repository's name. -->

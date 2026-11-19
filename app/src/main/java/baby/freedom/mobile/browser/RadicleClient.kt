@@ -113,6 +113,9 @@ object RadicleClient {
     /** The requester [tab]'s document is now, captured when its request arrives. */
     internal fun requesterFor(tab: Long?): RadicleAdmission.Requester = admission.requester(tab)
 
+    /** Who [call] runs for by default on this thread (tests). */
+    internal fun currentRequester(): RadicleAdmission.Requester? = currentRequester.get()
+
     /** A coroutine context in which [call] runs for [requester]. */
     internal fun requesterContext(requester: RadicleAdmission.Requester): CoroutineContext =
         currentRequester.asContextElement(requester)
@@ -128,6 +131,7 @@ object RadicleClient {
     fun tabClosed(tab: Long) = admission.tabClosed(tab)
 
     private fun callNow(method: String, args: JSONObject, timeoutMs: Long, slot: RadicleAdmission.Slot): Answer {
+        if (slot.cancelled) return Answer.Failed("request cancelled", REASON_CANCELLED)
         val binder = service ?: return Answer.Failed(unavailableMessage(REASON_STOPPED), REASON_STOPPED)
         val pipe = try {
             binder.radicleCall(method, args.toString())

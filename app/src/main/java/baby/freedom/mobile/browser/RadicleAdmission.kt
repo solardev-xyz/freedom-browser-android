@@ -19,21 +19,30 @@ import kotlin.concurrent.withLock
  *    behind at most one read per requester ahead of it;
  *  - a read that waits longer than [Limits.waitMs] for a slot is refused
  *    ([Admit.Busy]);
- *  - a read whose document goes away — the tab navigates or closes
- *    ([navigationRequested], [documentStarted], [tabClosed]) — leaves the
- *    queue without reaching the node ([Admit.Cancelled]); a running one is
- *    told so ([Slot.cancelled]) and its caller stops waiting for it.
+ *  - a read whose document goes away — the tab commits another or closes
+ *    ([documentStarted], [tabClosed]) — leaves the queue without reaching
+ *    the node, and a later call it makes is refused ([Admit.Cancelled]);
+ *    a running one is told so ([Slot.cancelled]) and its caller stops
+ *    waiting for it.
  *
  * A write (a COB write the user allowed) is neither capped nor cancelled:
  * dropping the answer of a write that went through invites the page to
  * make it again. It waits for a slot in its tab's turn like a read.
  *
- * Which document a request is from is its tab's [generation] when it
- * arrived. A new one starts when the tab's main-frame request reaches the
- * interceptor ([navigationRequested], on its thread, before any of the new
- * document's own requests can), or, for a document no request was seen for
- * (a service worker's answer, `about:blank`, a history entry), when it
- * commits ([documentStarted]).
+ * Which document a request is from is its tab's [Requester.generation]
+ * when it arrived. A new one starts when the tab's main-frame request
+ * reaches the interceptor ([navigationRequested], on its thread, before
+ * any of the new document's own requests can), or, for a document no
+ * request was seen for (a service worker's answer, `about:blank`, a
+ * history entry), when it commits ([documentStarted]). Calls from older
+ * generations are dropped at the commit, not at the request: the page on
+ * screen stays live until then, and a navigation may never commit.
+ *
+ * Known gap: a request the page on screen makes between the next
+ * navigation's request and its commit counts as the incoming document's,
+ * and so does one made after a navigation that never committed, until
+ * the tab's next commit after another request. Such a call only ends at
+ * its own deadline.
  */
 internal class RadicleAdmission(private val limits: Limits = Limits()) {
     data class Limits(
@@ -81,6 +90,9 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
     private val runningEntries = HashSet<Entry>()
     private val generations = HashMap<Long, Long>()
 
+    /** Per tab, the generation its calls from before were last dropped at. */
+    private val droppedBelow = HashMap<Long, Long>()
+
     /** Tabs whose current generation began at a main-frame request, not yet committed. */
     private val requested = HashSet<Long>()
 
@@ -89,20 +101,22 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
         if (tab == null) Requester(NO_TAB, 0) else lock.withLock { Requester(tab, generations[tab] ?: 0) }
 
     /**
-     * [tab]'s main-frame request reached the interceptor: what the
-     * document on screen still has queued or running is dropped, and
-     * requests from here on are the incoming document's.
+     * [tab]'s main-frame request reached the interceptor: requests from
+     * here on are the incoming document's. The page on screen keeps what
+     * it has queued or running until the navigation commits
+     * ([documentStarted]) — it may never (a download, a 204, Stop).
      */
     fun navigationRequested(tab: Long) = lock.withLock {
         requested += tab
-        advance(tab)
+        generations[tab] = (generations[tab] ?: 0) + 1
     }
 
     /**
      * [tab] committed a new document (UI thread); [gone]: its document is
-     * being torn down with no new one. Unless the navigation's own
-     * request already started a new generation, the old document's calls
-     * are dropped now.
+     * being torn down with no new one. What earlier documents still have
+     * queued or running is dropped. If the navigation's own request
+     * already started a new generation ([navigationRequested]), that
+     * generation is the committed document's; otherwise one starts now.
      *
      * [blank]: the document is `about:blank`, which no request is made
      * for, so it can't be the commit of the one [navigationRequested]
@@ -116,16 +130,21 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
                 requested.remove(tab)
                 advance(tab)
             }
-            blank && tab in requested -> Unit // the old document's calls went at the request
-            !requested.remove(tab) -> advance(tab)
+            blank && tab in requested -> cancel(tab, generations[tab] ?: 0)
+            requested.remove(tab) -> cancel(tab, generations[tab] ?: 0)
+            else -> advance(tab)
         }
     }
 
-    /** [tab] closed: everything it has queued or running is dropped. */
+    /**
+     * [tab] closed: everything it has queued or running is dropped, and
+     * a call its documents make later is refused. Its generations stay
+     * (two numbers per closed tab), so a request captured before the
+     * close stays out of date.
+     */
     fun tabClosed(tab: Long) = lock.withLock {
-        cancel(tab, Long.MAX_VALUE)
-        generations.remove(tab)
         requested.remove(tab)
+        advance(tab)
     }
 
     private fun advance(tab: Long) {
@@ -136,6 +155,7 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
 
     /** Drop [tab]'s cancellable calls from generations before [below]; under [lock]. */
     private fun cancel(tab: Long, below: Long) {
+        if (below > (droppedBelow[tab] ?: 0)) droppedBelow[tab] = below
         var any = false
         queues[tab]?.let { queue ->
             val dropped = queue.filter { it.cancellable && it.requester.generation < below }
@@ -161,7 +181,7 @@ internal class RadicleAdmission(private val limits: Limits = Limits()) {
      */
     fun admit(requester: Requester, write: Boolean, waitMs: Long): Admit = lock.withLock {
         val cancellable = !write && requester.tab != NO_TAB
-        if (cancellable && requester.generation < (generations[requester.tab] ?: 0)) return Admit.Cancelled
+        if (cancellable && requester.generation < (droppedBelow[requester.tab] ?: 0)) return Admit.Cancelled
         val entry = Entry(requester, cancellable)
         if (running < limits.inFlight && waitingTotal == 0) {
             start(entry)
