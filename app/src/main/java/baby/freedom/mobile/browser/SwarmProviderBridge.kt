@@ -1083,14 +1083,11 @@ internal fun fetchManifest(url: String, timeoutMs: Int = MANIFEST_TIMEOUT_MS): M
     } catch (e: SwarmProvider.Http.AnswerTooLarge) {
         return ManifestDiscovery.Invalid("manifest exceeds 8 KiB")
     } catch (e: IOException) {
-        // A body that started and died is the transport's failure, not an invalid manifest.
+        // A body that started and died — including one that ended short
+        // of its Content-Length, which [GatewayHttp.requestAt] throws as
+        // AnswerCutShort — is the transport's failure, not an invalid manifest.
         return ManifestDiscovery.Unresolved(e.javaClass.simpleName)
     }
-    // HttpURLConnection ends a fixed-length body that the connection
-    // dropped part-way without an error: short of its length, it's the
-    // transport's failure too, not bytes to judge.
-    val length = answer.headers["content-length"]?.trim()?.toLongOrNull()
-    if (length != null && answer.body.size < length) return ManifestDiscovery.Unresolved("the answer was cut short")
     return manifestFromAnswer(answer.status, answer.body)
 }
 

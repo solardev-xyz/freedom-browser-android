@@ -102,6 +102,8 @@ class SwarmProviderTest {
         val blobFailures = HashMap<String, SwarmProvider.Http.Answer>()
         /** `GET /bytes` joins whose body breaks off after the 200, as Android's stack throws it, by root reference. */
         val blobsCutShort = HashSet<String>()
+        /** The node stops as it breaks off a [blobsCutShort] join (switched off mid-body). */
+        var stopOnCut = false
         /** Each capped request's path and cap. */
         val caps: MutableList<Pair<String, Int>> = java.util.Collections.synchronizedList(mutableListOf())
 
@@ -168,8 +170,10 @@ class SwarmProviderTest {
                     chunks[address.swarmHex()] = wire
                     json(JSONObject().put("reference", address.swarmHex()), 201)
                 }
-                method == "GET" && bare.startsWith("/bytes/") && bare.removePrefix("/bytes/") in blobsCutShort ->
+                method == "GET" && bare.startsWith("/bytes/") && bare.removePrefix("/bytes/") in blobsCutShort -> {
+                    if (stopOnCut) up = false
                     throw SwarmProvider.Http.AnswerCutShort(java.net.ProtocolException("unexpected end of stream"))
+                }
                 method == "GET" && bare.startsWith("/bytes/") && blobFailures.containsKey(bare.removePrefix("/bytes/")) ->
                     blobFailures.getValue(bare.removePrefix("/bytes/"))
                 method == "GET" && bare.startsWith("/bytes/") -> blobs[bare.removePrefix("/bytes/")]
@@ -730,6 +734,16 @@ class SwarmProviderTest {
         // The node is still there: the next read joins it whole.
         node.blobsCutShort.clear()
         ok(call("swarm_readData", dataParams(ref), origin = other))
+    }
+
+    @Test
+    fun `a join cut short by the node stopping part-way is node-stopped`() {
+        val ref = plantBlob(ByteArray(8000) { 4 })
+        node.blobsCutShort += ref
+        node.stopOnCut = true
+        val e = err(call("swarm_readData", dataParams(ref), origin = other))
+        assertEquals(4900, e.code)
+        assertEquals("node-stopped", e.reason)
     }
 
     @Test

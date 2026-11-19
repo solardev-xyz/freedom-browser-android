@@ -170,10 +170,11 @@ class SwarmProvider(
         class AnswerTooLarge : IOException("the node's answer is too large")
 
         /**
-         * The node answered, then its body broke off short of its length:
-         * the node is up (it sent the status line), so this is a failed
-         * answer, not `node-stopped` (bee does it when a chunk of a join
-         * can't be found after the 200 went out).
+         * The node answered, then its body broke off short of its length.
+         * It was up when it sent the status line, but this alone doesn't
+         * say why: bee does it when a chunk of a join can't be found after
+         * the 200 went out, and a node stopped or restarted mid-body does
+         * it too — [request] re-checks the node to tell the two apart.
          */
         class AnswerCutShort(cause: Throwable?) : IOException("the node's answer was cut short", cause)
 
@@ -273,8 +274,8 @@ class SwarmProvider(
     } catch (e: VaultLockedException) {
         Reply.Err(INTERNAL, VAULT_LOCKED)
     } catch (e: Http.AnswerCutShort) {
-        // The node is up and answered; its body ended early.
-        Reply.Err(INTERNAL, "The Swarm node's answer was cut short")
+        // The node answered; its body ended early.
+        cutShort("The Swarm node's answer was cut short")
     } catch (e: SocketTimeoutException) {
         // The node is up but slow (a big upload over the whole-call
         // deadline): not "stopped" — it may even have stored the data.
@@ -1153,8 +1154,9 @@ class SwarmProvider(
             } catch (e: Http.AnswerTooLarge) {
                 return Reply.Err(INTERNAL, "Node returned more than $expected bytes for a $expected-byte blob")
             } catch (e: Http.AnswerCutShort) {
-                // bee has sent its 200 and the length, then hit a chunk it can't retrieve.
-                return Reply.Err(INTERNAL, "Data can't be read: the node's answer broke off before the $expected-byte blob was complete")
+                // bee has sent its 200 and the length, then hit a chunk it
+                // can't retrieve — or was stopped part-way through.
+                return cutShort("Data can't be read: the node's answer broke off before the $expected-byte blob was complete")
             }
             // As [chunk]: bee says "read chunk failed" with a 500 for a chunk it can't find.
             if (answer.status == 404 || (answer.status == 500 && answer.message().trim().equals("read chunk failed", ignoreCase = true))) {
@@ -1400,16 +1402,30 @@ class SwarmProvider(
         throw Invalid(Reply.Err(UNAVAILABLE, "Node not available: $reason", reason(reason)))
     }
 
-    private suspend fun reachableOrFail() {
-        val ok = withContext(io) {
-            try {
-                node.request("GET", "/node", emptyMap(), null, PREFLIGHT_TIMEOUT_MS).ok
-            } catch (e: IOException) {
-                false
-            }
+    private suspend fun reachable(): Boolean = withContext(io) {
+        try {
+            node.request("GET", "/node", emptyMap(), null, PREFLIGHT_TIMEOUT_MS).ok
+        } catch (e: IOException) {
+            false
         }
-        if (!ok) throw Invalid(Reply.Err(UNAVAILABLE, "Node not available: node-stopped", reason("node-stopped")))
     }
+
+    private suspend fun reachableOrFail() {
+        if (!reachable()) throw Invalid(Reply.Err(UNAVAILABLE, "Node not available: node-stopped", reason("node-stopped")))
+    }
+
+    /**
+     * An [Http.AnswerCutShort]: [message] while the node is still there
+     * (bee broke off a join it couldn't finish), `node-stopped` if the
+     * node went away part-way through the answer (switched off, or
+     * `:node` restarting) — the cut was the node stopping, not a failed read.
+     */
+    private suspend fun cutShort(message: String): Reply =
+        if (reachable()) {
+            Reply.Err(INTERNAL, message)
+        } else {
+            Reply.Err(UNAVAILABLE, "Node not available: node-stopped", reason("node-stopped"))
+        }
 
     private fun usableBatches(): List<PostageBatch> {
         val answer = node.request("GET", "/stamps", emptyMap(), null, PREFLIGHT_TIMEOUT_MS)
