@@ -107,7 +107,8 @@ internal object ActPublicKey {
 
     /**
      * One read's answer: the node's [key], or null when the node answered
-     * and has none (a 4xx, or a body with no key, or another overlay's).
+     * and has none (a 3xx, a 4xx, a 501/505, or a body with no key, or
+     * another overlay's).
      * [fetch] returns no [Answer] at all when the node gave no answer.
      */
     data class Answer(val key: String?)
@@ -123,10 +124,10 @@ internal object ActPublicKey {
 
     /**
      * One read of [source]'s `/addresses`: the node's [Answer] (its key, or
-     * none when it answers a 4xx or a body without one), or null when it
-     * gave no answer — it couldn't be reached or didn't answer in time,
-     * answered a 5xx, 408 or 429 (a passing outage or load), or answered
-     * more than [MAX_ANSWER_BYTES].
+     * none when it answers a 3xx, a 4xx, a 501/505 or a body without
+     * one), or null when it gave no answer — it couldn't be reached or
+     * didn't answer in time, answered another 5xx, a 408 or a 429 (a
+     * passing outage or load), or answered more than [MAX_ANSWER_BYTES].
      */
     suspend fun fetch(source: Source): Answer? = withContext(Dispatchers.IO) {
         try {
@@ -150,12 +151,21 @@ internal object ActPublicKey {
         }
     }
 
-    /** [fetch]'s verdict on an HTTP answer of [status] with [body]. */
+    /**
+     * [fetch]'s verdict on an HTTP answer of [status] with [body]. Only a
+     * passing condition is no answer: a 5xx other than 501/505, a 408 or
+     * a 429 (or a status line that couldn't be read). Anything else the
+     * node says the same way each time it's asked, so it's an answer with
+     * no key: a 4xx, a 501 or 505, and a 3xx too, since [fetch] follows no
+     * redirect (an endpoint put behind a proxy that redirects to https or
+     * a login page shows Unknown rather than the key read before).
+     */
     internal fun answerOf(status: Int, body: ByteArray, overlay: String?): Answer? = when {
         status in 200..299 -> Answer(from(String(body, Charsets.UTF_8), overlay))
-        status == 408 || status == 429 -> null
-        status in 400..499 -> Answer(null)
-        else -> null
+        status < 100 || status == 408 || status == 429 -> null
+        status == 501 || status == 505 -> Answer(null)
+        status in 500..599 -> null
+        else -> Answer(null)
     }
 
     /**
@@ -166,8 +176,8 @@ internal object ActPublicKey {
      * An external endpoint is known only by its URL, so the node behind
      * it can be replaced or re-keyed while the page stays open; that
      * read on return shows and copies the new node's key rather than
-     * the old one. A node that answers with no key (a 4xx, or a body
-     * without one) blanks the key already read, as desktop shows Unknown
+     * the old one. A node that answers with no key (a 3xx, a 4xx, a
+     * 501/505, or a body without one) blanks the key already read, as desktop shows Unknown
      * when its read fails, and is asked again, backing off. A re-read
      * that gets no answer at all keeps the key already read (a passing
      * outage shouldn't blank it) and asks again, backing off, until the

@@ -157,12 +157,21 @@ class ActPublicKeyTest {
         // Answered, with no key: the page shows Unknown rather than keeping a key read before.
         assertEquals(ActPublicKey.Answer(null), answered("404 Not Found", key))
         assertEquals(ActPublicKey.Answer(null), answered("403 Forbidden", key))
+        // A redirect isn't followed, and says the same each time: an endpoint
+        // put behind a proxy to https or a login page reads Unknown.
+        assertEquals(ActPublicKey.Answer(null), answered("301 Moved Permanently", key))
+        assertEquals(ActPublicKey.Answer(null), answered("302 Found", key))
+        assertEquals(ActPublicKey.Answer(null), answered("307 Temporary Redirect", key))
+        assertEquals(ActPublicKey.Answer(null), answered("501 Not Implemented", key))
+        assertEquals(ActPublicKey.Answer(null), answered("505 HTTP Version Not Supported", key))
         assertEquals(ActPublicKey.Answer(null), answered("200 OK", """{"overlay":"aa"}"""))
         assertEquals(ActPublicKey.Answer(null), answered("200 OK", "{"))
         val other = """{"overlay":"${"aa".repeat(32)}","publicKey":"$compressed"}"""
         assertEquals(ActPublicKey.Answer(null), answered("200 OK", other, external = false, node = "bb".repeat(32)))
         // No answer: a passing outage or load, which keeps a key read before.
+        assertNull(answered("500 Internal Server Error", key))
         assertNull(answered("502 Bad Gateway", key))
+        assertNull(answered("504 Gateway Timeout", key))
         assertNull(answered("503 Service Unavailable", key))
         assertNull(answered("429 Too Many Requests", key))
         assertNull(answered("408 Request Timeout", key))
