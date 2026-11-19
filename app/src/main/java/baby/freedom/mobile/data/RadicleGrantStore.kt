@@ -11,10 +11,12 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.IOException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 /**
  * Which sites may use the `window.radicle` provider (#124), and how far:
@@ -151,10 +153,16 @@ class RadicleGrantStore internal constructor(private val store: DataStore<Prefer
         return written && signing
     }
 
-    /** Turn [origin]'s rule off, keeping its grant; `false` if the store couldn't be written. */
-    suspend fun stopAutoWrites(origin: String): Boolean = write {
-        val tier = it[keyOf(origin)]
-        if (tier != null && tier.startsWith(WRITES_AS)) it[keyOf(origin)] = SIGNING_AS + tier.removePrefix(WRITES_AS)
+    /**
+     * Turn [origin]'s rule off, keeping its grant; `false` if the store
+     * couldn't be written. Not cancellable: the user may leave the page
+     * the moment they tap Ask each time.
+     */
+    suspend fun stopAutoWrites(origin: String): Boolean = withContext(NonCancellable) {
+        write {
+            val tier = it[keyOf(origin)]
+            if (tier != null && tier.startsWith(WRITES_AS)) it[keyOf(origin)] = SIGNING_AS + tier.removePrefix(WRITES_AS)
+        }
     }
 
     /**

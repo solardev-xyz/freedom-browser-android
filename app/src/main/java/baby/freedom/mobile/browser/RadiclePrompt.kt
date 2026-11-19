@@ -139,7 +139,9 @@ internal fun radiclePromptIdentity(ask: RadicleAsk): Pair<String, String>? {
 /**
  * The `window.radicle` consent prompt (#124): the site in full (it wraps
  * rather than ellipsising — the tail of a host is what a spoof hides),
- * what it asks, the repository ID when there is one, Cancel / Allow.
+ * what it asks, the repository ID when there is one, Cancel / Allow. A
+ * write's prompt (#544) shows everything it publishes ([radicleWriteLines])
+ * and the "always allow" switch, answered with the button it goes with.
  * Back or a tap outside is a Cancel. Like the site-permission prompt,
  * the buttons and the dismissal ignore taps for the first
  * [PromptTapGuard.PROTECTION_MS] it is on screen, counted from its first
@@ -205,7 +207,7 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
                             .verticalScroll(rememberScrollState())
                             .testTag("radicle-write-content"),
                     ) {
-                        radicleWriteLines(write).forEach { line ->
+                        remember(write) { radicleWriteLines(write) }.forEach { line ->
                             Spacer(Modifier.height(8.dp))
                             Text(line.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                             Text(
