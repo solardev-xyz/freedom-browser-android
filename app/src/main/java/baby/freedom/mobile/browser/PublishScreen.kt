@@ -54,6 +54,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -257,16 +260,19 @@ internal fun PublishScreen(
                     }
                     if (writingText) {
                         Spacer(Modifier.height(8.dp))
+                        // The Publish text button, and Ctrl+Enter from the field (#547).
+                        val canPublishText = canStart && text.isNotEmpty() && plan == null
+                        val publishText = { if (canPublishText) prepare(PublishSource.Text(text)) }
                         OutlinedTextField(
                             value = text,
                             onValueChange = { text = it },
                             placeholder = { Text(stringResource(R.string.publish_text_placeholder)) },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp).onPublishTextKey(publishText),
                         )
                         Row {
                             Button(
-                                onClick = { prepare(PublishSource.Text(text)) },
-                                enabled = canStart && text.isNotEmpty(),
+                                onClick = publishText,
+                                enabled = canPublishText,
                             ) { Text(stringResource(R.string.publish_text_button)) }
                             Spacer(Modifier.width(8.dp))
                             TextButton(onClick = { writingText = false }) { Text(stringResource(R.string.common_cancel)) }
@@ -351,6 +357,18 @@ internal fun PublishScreen(
             },
             dismissButton = { TextButton(onClick = { clearing = false }) { Text(stringResource(R.string.common_cancel)) } },
         )
+    }
+}
+
+/**
+ * Ctrl+Enter in the Publish page's text field runs [publish], as the
+ * Publish text button does (#547, desktop #720). Its press and release
+ * are both kept from the field, so no newline lands; a held key publishes
+ * once. Plain Enter, and Enter with Shift or Alt, still type a newline.
+ */
+internal fun Modifier.onPublishTextKey(publish: () -> Unit): Modifier = onPreviewKeyEvent { e ->
+    isPublishTextKey(e.nativeKeyEvent.keyCode, e.nativeKeyEvent.metaState).also {
+        if (it && e.type == KeyEventType.KeyDown && e.nativeKeyEvent.repeatCount == 0) publish()
     }
 }
 

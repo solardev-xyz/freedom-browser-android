@@ -1882,6 +1882,16 @@ fun BrowserScreen(
             } else {
                 null
             }
+            Shortcut.SelectTab1, Shortcut.SelectTab2, Shortcut.SelectTab3, Shortcut.SelectTab4,
+            Shortcut.SelectTab5, Shortcut.SelectTab6, Shortcut.SelectTab7, Shortcut.SelectTab8,
+            Shortcut.SelectLastTab -> selectTabIndex(shortcut, tabs.tabs, tabs.activeIndex)
+                ?.takeIf { it != tabs.activeIndex }
+                ?.let { index ->
+                    {
+                        focusManager.clearFocus()
+                        tabs.switchTo(index)
+                    }
+                }
             Shortcut.FocusAddressBar -> {
                 {
                     if (findOpen) closeFind()

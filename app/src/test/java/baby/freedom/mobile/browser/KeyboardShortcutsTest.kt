@@ -5,6 +5,7 @@ import baby.freedom.mobile.browser.KeyboardShortcutRouter.Press
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -78,6 +79,9 @@ class KeyboardShortcutsTest {
             setOf(
                 Shortcut.NewTab, Shortcut.NewPrivateTab, Shortcut.CloseTab, Shortcut.ReopenClosedTab,
                 Shortcut.NextTab, Shortcut.PreviousTab, Shortcut.FocusAddressBar,
+                Shortcut.SelectTab1, Shortcut.SelectTab2, Shortcut.SelectTab3, Shortcut.SelectTab4,
+                Shortcut.SelectTab5, Shortcut.SelectTab6, Shortcut.SelectTab7, Shortcut.SelectTab8,
+                Shortcut.SelectLastTab,
             ),
             reserved,
         )
@@ -221,5 +225,96 @@ class KeyboardShortcutsTest {
         assertTrue(router.beforeViews(down(KeyEvent.KEYCODE_TAB, ctrl), pageEditing = false, fieldEditing = true))
         assertEquals(listOf(Shortcut.FindInPage to false, Shortcut.NextTab to false), target.seen)
         assertEquals(setOf(Shortcut.Back, Shortcut.Forward), Shortcut.entries.filter { it.caretKey }.toSet())
+    }
+
+    @Test
+    fun `Ctrl+1 to Ctrl+8 select a tab by position, Ctrl+9 the last (#547)`() {
+        val digits = listOf(
+            KeyEvent.KEYCODE_1, KeyEvent.KEYCODE_2, KeyEvent.KEYCODE_3, KeyEvent.KEYCODE_4,
+            KeyEvent.KEYCODE_5, KeyEvent.KEYCODE_6, KeyEvent.KEYCODE_7, KeyEvent.KEYCODE_8,
+        )
+        digits.forEachIndexed { i, key ->
+            val shortcut = shortcutFor(key, ctrl)
+            assertEquals(i + 1, shortcut?.tabPosition)
+            assertTrue(shortcut!!.reserved)
+            assertFalse(shortcut.repeats)
+        }
+        assertEquals(Shortcut.SelectLastTab, shortcutFor(KeyEvent.KEYCODE_9, ctrl))
+        // Ctrl+0 stays Reset zoom; plain, Shift and Alt digits are typing.
+        assertEquals(Shortcut.ZoomReset, shortcutFor(KeyEvent.KEYCODE_0, ctrl))
+        assertNull(shortcutFor(KeyEvent.KEYCODE_1, 0))
+        assertNull(shortcutFor(KeyEvent.KEYCODE_1, shift))
+        assertNull(shortcutFor(KeyEvent.KEYCODE_1, alt))
+        assertNull(shortcutFor(KeyEvent.KEYCODE_1, ctrl or shift))
+        assertNull(shortcutFor(KeyEvent.KEYCODE_NUMPAD_1, ctrl))
+        assertEquals("Select tab 3", Shortcut.SelectTab3.label)
+        assertEquals("Select last tab", Shortcut.SelectLastTab.label)
+    }
+
+    @Test
+    fun `a page's text field never sees Ctrl+digit`() {
+        val target = Recorder()
+        val router = KeyboardShortcutRouter().apply { this.target = target }
+        assertTrue(router.beforeViews(down(KeyEvent.KEYCODE_2, ctrl), pageEditing = true))
+        assertEquals(listOf(Shortcut.SelectTab2 to false), target.seen)
+    }
+
+    @Test
+    fun `tab positions count within the pane on screen`() {
+        // normal 0, private 1, normal 2, private 3, normal 4
+        val tabs = listOf(false, true, false, true, false).mapIndexed { i, p -> BrowserState(i.toLong(), p) }
+        assertEquals(0, selectTabIndex(Shortcut.SelectTab1, tabs, activeIndex = 4))
+        assertEquals(2, selectTabIndex(Shortcut.SelectTab2, tabs, activeIndex = 4))
+        assertEquals(4, selectTabIndex(Shortcut.SelectTab3, tabs, activeIndex = 0))
+        assertEquals(4, selectTabIndex(Shortcut.SelectLastTab, tabs, activeIndex = 0))
+        // Past the pane's last tab: nothing.
+        assertNull(selectTabIndex(Shortcut.SelectTab4, tabs, activeIndex = 0))
+        assertNull(selectTabIndex(Shortcut.SelectTab8, tabs, activeIndex = 0))
+        // From a private tab, its own pane.
+        assertEquals(1, selectTabIndex(Shortcut.SelectTab1, tabs, activeIndex = 3))
+        assertEquals(3, selectTabIndex(Shortcut.SelectTab2, tabs, activeIndex = 1))
+        assertEquals(3, selectTabIndex(Shortcut.SelectLastTab, tabs, activeIndex = 1))
+        assertNull(selectTabIndex(Shortcut.SelectTab3, tabs, activeIndex = 1))
+        // Not a Select-tab shortcut, or no tabs.
+        assertNull(selectTabIndex(Shortcut.NextTab, tabs, activeIndex = 0))
+        assertNull(selectTabIndex(Shortcut.SelectTab1, emptyList(), activeIndex = 0))
+    }
+
+    @Test
+    fun `Ctrl+N selects the N-th tab the tab switcher shows`() {
+        val tabs = listOf(true, false, false, true, false, true, true).mapIndexed { i, p -> BrowserState(i.toLong(), p) }
+        val positions = Shortcut.entries.filter { it.tabPosition in 1 until LAST_TAB }
+        for (active in tabs.indices) {
+            val shown = paneTabs(tabs, privatePane = tabs[active].private)
+            for (shortcut in positions) {
+                val picked = selectTabIndex(shortcut, tabs, active)?.let { tabs[it] }
+                assertSame(shown.getOrNull(shortcut.tabPosition - 1), picked)
+            }
+            assertSame(shown.last(), tabs[selectTabIndex(Shortcut.SelectLastTab, tabs, active)!!])
+        }
+    }
+
+    @Test
+    fun `Ctrl+Enter publishes text, and is no browser shortcut (#547)`() {
+        assertTrue(isPublishTextKey(KeyEvent.KEYCODE_ENTER, ctrl))
+        assertTrue(isPublishTextKey(KeyEvent.KEYCODE_NUMPAD_ENTER, ctrl))
+        assertTrue(isPublishTextKey(KeyEvent.KEYCODE_ENTER, KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_RIGHT_ON))
+        assertTrue(isPublishTextKey(KeyEvent.KEYCODE_ENTER, ctrl or KeyEvent.META_CAPS_LOCK_ON))
+        // Plain Enter, and Enter with anything else, still edit the text.
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_ENTER, 0))
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_ENTER, shift))
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_ENTER, alt))
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_ENTER, ctrl or shift))
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_ENTER, ctrl or alt))
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_ENTER, ctrl or KeyEvent.META_META_ON))
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_ENTER, KeyEvent.META_META_ON or KeyEvent.META_META_LEFT_ON))
+        assertFalse(isPublishTextKey(KeyEvent.KEYCODE_M, ctrl))
+        // The router leaves it to whatever has focus: a page's own Ctrl+Enter still works.
+        assertNull(shortcutFor(KeyEvent.KEYCODE_ENTER, ctrl))
+        val target = Recorder()
+        val router = KeyboardShortcutRouter().apply { this.target = target }
+        assertFalse(router.beforeViews(down(KeyEvent.KEYCODE_ENTER, ctrl), pageEditing = false))
+        assertFalse(router.unhandledInPage(down(KeyEvent.KEYCODE_ENTER, ctrl)))
+        assertTrue(target.seen.isEmpty())
     }
 }
