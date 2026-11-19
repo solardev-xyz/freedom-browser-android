@@ -82,6 +82,47 @@ class TabsRecentlyClosedTest {
     }
 
     @Test
+    fun `an older entry reopened first leaves the later ones their places`() {
+        // d, then c, then b closed; d reopened from the list, then the
+        // others by Reopen: c's place still counts b, open when c closed.
+        val tabs = fourTabs()
+        tabs.closeTab(3) // d
+        tabs.closeTab(2) // c
+        tabs.closeTab(1) // b
+        assertEquals("d", tabs.reopenClosedTab(tabs.recentlyClosed[2])?.title)
+        assertEquals(listOf("a", "d"), tabs.titles)
+        assertEquals("b", tabs.reopenClosedTab()?.title)
+        assertEquals("c", tabs.reopenClosedTab()?.title)
+        assertEquals(listOf("a", "b", "c", "d"), tabs.titles)
+    }
+
+    @Test
+    fun `any closes reopened in any order come back in their old order`() {
+        for (seed in 0 until 2_000) {
+            val random = kotlin.random.Random(seed)
+            val tabs = TabsState(homepage = HOME_URL)
+            val pages = (0 until 3 + random.nextInt(5)).map { "p$it" }
+            tabs.tabs[0].visit(pages[0])
+            for (page in pages.drop(1)) tabs.newTab().visit(page)
+            // Close some, one or several at a time, never the last tab.
+            repeat(1 + random.nextInt(pages.size)) {
+                if (tabs.tabs.size < 2) return@repeat
+                if (random.nextInt(4) == 0) {
+                    tabs.closeOtherTabs(tabs.tabs[random.nextInt(tabs.tabs.size)])
+                } else {
+                    tabs.closeTab(random.nextInt(tabs.tabs.size))
+                }
+            }
+            // Reopen entries from the list at random, then the rest by Reopen.
+            repeat(random.nextInt(tabs.recentlyClosed.size + 1)) {
+                tabs.reopenClosedTab(tabs.recentlyClosed[random.nextInt(tabs.recentlyClosed.size)])
+            }
+            while (tabs.reopenClosedTab() != null) Unit
+            assertEquals("seed=$seed", pages, tabs.titles)
+        }
+    }
+
+    @Test
     fun `an undo of an older close lands where it was too`() {
         val tabs = fourTabs()
         val b = tabs.closeTab(1, offerUndo = true).undo!!

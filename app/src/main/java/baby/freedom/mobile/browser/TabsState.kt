@@ -838,7 +838,8 @@ class TabsState(
      * tabs those later closes took, and theirs don't count its tabs.
      * So both are rewritten as if the later closes were undone, [group]
      * put back, and the later closes done again — tabs a, b, c, d with
-     * b then c closed come back a, b, c, d whichever is reopened first.
+     * any of them closed one after another come back a, b, c, d
+     * whichever is reopened first, and the rest by Reopen.
      */
     private fun takeFromStack(group: ClosedGroup): Boolean {
         val at = closedTabs.indexOfFirst { it === group }
@@ -857,14 +858,12 @@ class TabsState(
             }
             // Put [group] back where it closed from.
             for (closed in group.tabs) list.add(closed.index.coerceIn(0, list.size), closed)
-            // Close the later ones again, oldest first: each tab's place
-            // counts the list without the entries closed after its own.
-            for ((n, entry) in later.withIndex()) {
-                val after = later.subList(n + 1, later.size).flatMapTo(HashSet()) { it.tabs }
-                val places = entry.tabs.map { closed ->
-                    list.subList(0, list.indexOf(closed)).count { it !in after }
-                }
-                entry.tabs.forEachIndexed { i, closed -> closed.index = places[i] }
+            // Close the later ones again, oldest first. Each tab's place
+            // is its place in the list as it stands at its own close:
+            // the tabs of entries closed after it are still open then,
+            // and reopening newest first puts them back before it.
+            for (entry in later) {
+                entry.tabs.forEach { closed -> closed.index = list.indexOf(closed) }
                 list.removeAll(entry.tabs.toSet())
             }
             group.tabs.forEach { closed -> closed.index = list.indexOf(closed) }
