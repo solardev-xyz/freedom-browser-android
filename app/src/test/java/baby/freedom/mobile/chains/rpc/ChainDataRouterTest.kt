@@ -670,7 +670,7 @@ class ChainDataRouterTest {
         // #530: a receipt for another transaction (a successful one, for a
         // send that failed) isn't Colibri's answer: the RPCs' is shown,
         // labelled as theirs, not a "verified" foreign receipt. The pinned
-        // core (v3.0.0) can't produce this: it already checks the proven
+        // core (v3.0.3) can't produce this: it already checks the proven
         // transaction against the hash asked for (`c4_tx_verify_tx_hash`).
         // The fake engine stages it to cover the router's defence-in-depth
         // re-check, in case a later core stops doing so.

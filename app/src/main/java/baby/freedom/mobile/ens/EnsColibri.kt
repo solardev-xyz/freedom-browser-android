@@ -390,7 +390,7 @@ internal class EnsColibri(
         const val MAX_LATEST_AGE_SECONDS = 60L
 
         /**
-         * The core's error (v3.0.0, `eth_check_latest_freshness`) for a
+         * The core's error (v3.0.3, `eth_check_latest_freshness`) for a
          * `latest` proof older than the floor [request] sets.
          */
         internal const val STALE_LATEST = "proof for latest too old"

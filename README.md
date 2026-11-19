@@ -77,7 +77,7 @@ git clone https://github.com/solardev-xyz/freedom-mobile-ffi.git /tmp/freedom-mo
 #    reads (#329), at the COLIBRI_REF pinned in release.yml. Without it
 #    the app builds and runs, and those reads go to the RPCs.
 #    See "Colibri" below.
-git clone --branch v3.0.0 https://github.com/corpus-core/colibri-stateless.git /tmp/colibri-stateless &&
+git clone --branch v3.0.3 https://github.com/corpus-core/colibri-stateless.git /tmp/colibri-stateless &&
   scripts/build-colibri.sh /tmp/colibri-stateless
 
 # 4. Build the debug APK.
