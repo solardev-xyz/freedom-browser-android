@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -105,7 +106,32 @@ class HomeIntroTest {
     }
 
     @Test
-    fun `explore lists iOS's curated site`() {
-        assertEquals(listOf("app.swarmit.eth"), EXPLORE_CURATED.map { it.address })
+    fun `explore lists desktop's default bookmarks in its order`() {
+        // freedom-browser config/default-bookmarks.json (#120), as ens:// targets there.
+        assertEquals(
+            listOf(
+                "freemap.eth",
+                "swarm.eth",
+                "app.swarmit.eth",
+                "volumemanager.eth",
+                "https://vibing.at/waggle/",
+                "vitalik.eth",
+                "meinhard.eth",
+                "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+            ),
+            EXPLORE_CURATED.map { it.address },
+        )
+    }
+
+    @Test
+    fun `every explore address goes through the address bar as a site, not a search`() {
+        for (entry in EXPLORE_CURATED) {
+            assertNotEquals(entry.address, AddressInput.Kind.Search, AddressInput.classify(entry.address))
+        }
+    }
+
+    @Test
+    fun `the intro card still offers Swarmit`() {
+        assertEquals("app.swarmit.eth", EXPLORE_TRY.address)
     }
 }

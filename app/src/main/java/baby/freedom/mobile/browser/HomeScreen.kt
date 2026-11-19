@@ -206,7 +206,7 @@ internal fun HomeScreen(
             if (showIntro) {
                 Spacer(Modifier.height(if (update != null) 12.dp else 24.dp))
                 IntroCard(
-                    onTry = { onOpen(EXPLORE_CURATED.first().address) },
+                    onTry = { onOpen(EXPLORE_TRY.address) },
                     onDismiss = {
                         introClosed = true
                         scope.launch {
@@ -284,14 +284,27 @@ internal data class ExploreEntry(
     val subtitle: String get() = Strings.get(subtitleRes)
 }
 
-/** iOS's `ExploreEntry.mainnetCurated`, the same list on both platforms. */
+/**
+ * Desktop's default bookmarks (`config/default-bookmarks.json`, freedom-browser
+ * #120), in its order, so the two platforms feature the same sites (#545).
+ */
 internal val EXPLORE_CURATED: List<ExploreEntry> = listOf(
+    ExploreEntry("FreeMap", R.string.browser_explore_freemap_subtitle, "freemap.eth"),
+    ExploreEntry("Swarm", R.string.browser_explore_swarm_subtitle, "swarm.eth"),
+    ExploreEntry("Swarmit", R.string.browser_explore_swarmit_subtitle, "app.swarmit.eth"),
+    ExploreEntry("Volume Manager", R.string.browser_explore_volumemanager_subtitle, "volumemanager.eth"),
+    ExploreEntry("Waggle", R.string.browser_explore_waggle_subtitle, "https://vibing.at/waggle/"),
+    ExploreEntry("vitalik.eth", R.string.browser_explore_vitalik_subtitle, "vitalik.eth"),
+    ExploreEntry("meinhard.eth", R.string.browser_explore_meinhard_subtitle, "meinhard.eth"),
     ExploreEntry(
-        title = "Swarmit",
-        subtitleRes = R.string.browser_explore_swarmit_subtitle,
-        address = "app.swarmit.eth",
+        "Radicle Heartwood",
+        R.string.browser_explore_heartwood_subtitle,
+        "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
     ),
 )
+
+/** The first-run card's "Try …" site: Swarmit, as on iOS (`ExploreEntry.mainnetCurated`). */
+internal val EXPLORE_TRY: ExploreEntry = EXPLORE_CURATED.first { it.address == "app.swarmit.eth" }
 
 /** What the home page says about the Swarm node while it has no peers yet (#278). */
 internal enum class SwarmWarmUp { Starting, Connecting, Failed }
@@ -357,7 +370,7 @@ private fun IntroCard(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_intro_got_it)) }
-                Button(onClick = onTry) { Text(stringResource(R.string.browser_intro_try, EXPLORE_CURATED.first().title)) }
+                Button(onClick = onTry) { Text(stringResource(R.string.browser_intro_try, EXPLORE_TRY.title)) }
             }
         }
     }

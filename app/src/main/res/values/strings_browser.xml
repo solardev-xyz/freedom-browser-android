@@ -173,7 +173,14 @@
     <string name="browser_home_bookmarks">Bookmarks</string>
     <string name="browser_home_recent">Recent</string>
     <string name="browser_home_explore">Explore</string>
+    <string name="browser_explore_freemap_subtitle">OpenStreetMap map on Swarm</string>
+    <string name="browser_explore_swarm_subtitle">The Swarm network\'s own site</string>
     <string name="browser_explore_swarmit_subtitle">Decentralized social feed on Swarm</string>
+    <string name="browser_explore_volumemanager_subtitle">Manage storage on Swarm</string>
+    <string name="browser_explore_waggle_subtitle">Search the Swarm web</string>
+    <string name="browser_explore_vitalik_subtitle">Vitalik Buterin\'s website, on IPFS</string>
+    <string name="browser_explore_meinhard_subtitle">Meinhard Benn\'s site, on Swarm</string>
+    <string name="browser_explore_heartwood_subtitle">Radicle\'s own code. Needs the Radicle node</string>
     <string name="browser_intro_title">Welcome to Freedom</string>
     <string name="browser_intro_body_web">Freedom opens the web you know and the decentralized web: sites stored on Swarm (bzz://) and IPFS (ipfs://), and ENS names such as app.swarmit.eth.</string>
     <string name="browser_intro_body_nodes">It reaches them through its own nodes, running on this phone and talking straight to peers. The nodes use data and battery while they run; Nodes &amp; networks in the menu shows how they\'re doing and can switch them off.</string>
