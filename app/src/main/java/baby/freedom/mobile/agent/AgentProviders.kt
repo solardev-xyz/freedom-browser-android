@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -57,6 +58,10 @@ internal class AgentProviders(
     private val hostedBase: (ProviderDefinition) -> String? = { it.baseUrl },
     /** The subscription sign-ins (#576); tests point it at a fake server. */
     private val auth: SubscriptionAuth = SubscriptionAuth(),
+    /** Sign in with ChatGPT (#602); tests point it at a fake server and their own port. */
+    private val chatgpt: ChatGptLogin = ChatGptLogin(::chatGptPageCopy),
+    /** Keeps the process running while a Sign in with ChatGPT waits for the browser ([SignInService]). */
+    private val processHold: ProcessHold = ProcessHold.None,
     /** Wall clock, for a credential's expiry. */
     private val wallClock: () -> Long = System::currentTimeMillis,
     /** Where a sign-in runs: outliving the page that started it, while the user is in the browser. */
@@ -73,6 +78,19 @@ internal class AgentProviders(
     val login: StateFlow<LoginState?> = _login.asStateFlow()
     private val loginLock = Any()
     private var loginJob: Job? = null
+
+    /**
+     * The last sign-in job started, kept after it's cancelled: the next
+     * one waits for it to end, so a Sign in with ChatGPT's listener has
+     * let go of its port before the next binds it.
+     */
+    private var lastLoginJob: Job? = null
+
+    /** The Sign in with ChatGPT under way, for a pasted callback address ([submitCallback]). */
+    private var chatSession: ChatGptLogin.Session? = null
+
+    /** The last [LoginState.Browser.attempt] whose page was opened by itself ([claimOpen]). */
+    private var openedAttempt = 0L
 
     /** Bumped by every start and cancel: only the current sign-in may publish or save. */
     private var loginGeneration = 0L
@@ -672,7 +690,12 @@ internal class AgentProviders(
 
         /** Still the same sign-in, with the credential this renewal started from. */
         fun AgentState.unchanged() = connection(connectionId)?.revision == connection.revision && keys[connectionId] == saved
-        return when (val r = auth.refresh(connection.providerId, credential)) {
+        val outcome = if (connection.providerId == ChatGptLogin.PROVIDER) {
+            chatgpt.refresh(credential)
+        } else {
+            auth.refresh(connection.providerId, credential)
+        }
+        return when (val r = outcome) {
             is RefreshOutcome.Fresh -> locked { cur ->
                 // Kept even if AI went off meanwhile: a ChatGPT refresh token
                 // is used up by the refresh, so dropping the new one would
@@ -718,7 +741,8 @@ internal class AgentProviders(
     }
 
     /**
-     * Starts signing in to subscription [providerId] by device code,
+     * Starts signing in to subscription [providerId], by device code or
+     * (ChatGPT, #602) in the browser ([runChatGpt]),
      * ending any other sign-in under way. Its progress is [login]; it
      * runs on its own, so the user can go to the browser and back. Only
      * while AI is on. Under [lock], like every other end of a sign-in
@@ -732,7 +756,12 @@ internal class AgentProviders(
                 loginJob?.cancel()
                 val generation = ++loginGeneration
                 _login.value = LoginState.Starting(providerId)
-                loginJob = loginScope.launch { runLogin(definition, generation) }
+                val previous = lastLoginJob
+                loginJob = loginScope.launch {
+                    previous?.cancelAndJoin()
+                    if (providerId == ChatGptLogin.PROVIDER) runChatGpt(definition, generation) else runLogin(definition, generation)
+                }
+                lastLoginJob = loginJob
             }
         }
         return true
@@ -772,6 +801,25 @@ internal class AgentProviders(
             _login.value = null
         }
     }
+
+    /**
+     * Whether the page should open [state]'s sign-in page by itself now:
+     * once per sign-in, while it's still the one under way, so coming
+     * back to Settings doesn't open it again.
+     */
+    fun claimOpen(state: LoginState.Browser): Boolean = synchronized(loginLock) {
+        if (_login.value != state || openedAttempt == state.attempt) return false
+        openedAttempt = state.attempt
+        true
+    }
+
+    /**
+     * The address the browser ended on, pasted for the Sign in with
+     * ChatGPT under way when the browser couldn't reach the phone; null if
+     * none is waiting. Checked exactly as the listener checks a callback.
+     */
+    fun submitCallback(pasted: String): ChatGptLogin.Submitted? =
+        synchronized(loginLock) { chatSession }?.submit(pasted)
 
     private fun publish(generation: Long, state: LoginState?) {
         synchronized(loginLock) { if (generation == loginGeneration) _login.value = state }
@@ -815,7 +863,56 @@ internal class AgentProviders(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            publish(generation, LoginState.Failed(providerId, LoginFailure.BadReply))
+            publish(generation, LoginState.Failed(providerId, LoginFailure.Unexpected))
+        }
+    }
+
+    /**
+     * Sign in with ChatGPT (#602): listens for the browser's return, shows
+     * the page to open ([LoginState.Browser]), and saves what comes back.
+     * The listener is closed however this ends: done, failed, cancelled.
+     */
+    private suspend fun runChatGpt(definition: ProviderDefinition, generation: Long) {
+        val providerId = definition.id
+        try {
+            if (!locked { it.enabled }) return publish(generation, null)
+            val deviceId = store.deviceId() ?: return publish(generation, LoginState.Failed(providerId, LoginFailure.NoDeviceId))
+            val session = when (val opened = chatgpt.open(deviceId)) {
+                is ChatGptLogin.Opened.Failed -> return publish(generation, LoginState.Failed(providerId, opened.failure))
+                is ChatGptLogin.Opened.Listening -> opened.session
+            }
+            processHold.hold()
+            try {
+                // Freedom built this page itself: failing its own check isn't OpenAI's doing.
+                if (!ChatGptLogin.isAuthorizeUrl(session.authorizeUrl)) {
+                    return publish(generation, LoginState.Failed(providerId, LoginFailure.Unexpected))
+                }
+                synchronized(loginLock) {
+                    if (generation != loginGeneration) return
+                    chatSession = session
+                    _login.value = LoginState.Browser(providerId, session.authorizeUrl, generation)
+                }
+                val finished = chatgpt.finish(session) { publish(generation, LoginState.Finishing(providerId)) }
+                val credential = when (finished) {
+                    is SubscriptionAuth.Finished.Failed ->
+                        return publish(generation, LoginState.Failed(providerId, finished.failure))
+                    is SubscriptionAuth.Finished.Done -> finished.credential
+                }
+                // Done is shown by the save itself, under the same lock.
+                val saved = saveSubscription(definition, credential, generation)
+                session.answer(if (saved) CallbackPage.Success else CallbackPage.Failed)
+                if (!saved) {
+                    publish(generation, if (isCurrent(generation)) LoginState.Failed(providerId, LoginFailure.SaveFailed) else null)
+                }
+            } finally {
+                synchronized(loginLock) { if (chatSession === session) chatSession = null }
+                session.close()
+                processHold.release()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            publish(generation, LoginState.Failed(providerId, LoginFailure.Unexpected))
         }
     }
 
@@ -880,7 +977,10 @@ internal class AgentProviders(
         private var instance: AgentProviders? = null
 
         fun get(context: Context): AgentProviders = instance ?: synchronized(this) {
-            instance ?: AgentProviders(AgentStore.create(context)).also { instance = it }
+            instance ?: AgentProviders(
+                AgentStore.create(context),
+                processHold = SignInService.Hold(context.applicationContext),
+            ).also { instance = it }
         }
     }
 }

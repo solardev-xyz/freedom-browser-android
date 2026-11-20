@@ -89,7 +89,9 @@ internal interface AgentBrowserHost {
     suspend fun evaluate(id: Long, script: String, timeoutMs: Long = 5_000): String?
 
     /**
-     * Puts [id] on screen for an input the user just approved: makes it
+     * Puts [id] on screen for an input the user just approved (or, for
+     * one a relaxed mode let run, only after [onScreen] said it's already
+     * there, in the same main-thread turn, so this switches nothing): makes it
      * the active tab and closes the agent's chat and the other plain
      * panels over the page. True once the page is on screen, uncovered,
      * with the app in front; false if it can't be (a wallet page, say).
@@ -98,6 +100,12 @@ internal interface AgentBrowserHost {
      * ([AgentBrowser.chatTookScreen]); otherwise nothing is remembered.
      */
     suspend fun bringToFront(id: Long, chat: String? = null): Boolean
+
+    /**
+     * [id] is the active tab, on screen, uncovered, with the app in front:
+     * an input could land on it without anything switching.
+     */
+    fun onScreen(id: Long): Boolean
 
     /**
      * A tap at ([x], [y]) in the WebView's own pixels. [proceed] is asked
@@ -251,7 +259,7 @@ private class BrowserTabsHost(
         }
     }
 
-    private fun onScreen(id: Long): Boolean {
+    override fun onScreen(id: Long): Boolean {
         val wv = webViewFor(id) ?: return false
         return tabs.active.id == id && !covered() && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
             wv.isAttachedToWindow && wv.isShown && wv.width > 0 && wv.height > 0

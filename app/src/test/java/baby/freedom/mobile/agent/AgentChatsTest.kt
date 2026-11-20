@@ -115,8 +115,8 @@ class AgentChatsTest {
         return ModelRef(providerId, model)
     }
 
-    private suspend fun awaitDone(sessionId: String): ChatTurn = withTimeout(10_000) {
-        while (sessionId in chats.live.value) delay(10)
+    private suspend fun awaitDone(sessionId: String, on: AgentChats = chats): ChatTurn = withTimeout(10_000) {
+        while (sessionId in on.live.value) delay(10)
         dao.turns(sessionId).last()
     }
 
@@ -149,6 +149,55 @@ class AgentChatsTest {
         assertEquals("tool", toolResult.getString("role"))
         assertEquals("call_0", toolResult.getString("tool_call_id"))
         assertTrue(toolResult.getString("content").contains("localDate"))
+    }
+
+    @Test
+    fun `a chat keeps its approval mode, tells the model each request, and classifies on the turn's own model`() = runBlocking {
+        val model = connectOllama()
+        lateinit var withTools: AgentChats
+        val seen = ArrayList<InteractionClassification>()
+        val probe = object : AgentTool {
+            override val spec = ToolSpec("probe", "test", JSONObject().put("type", "object"))
+            override suspend fun run(arguments: JSONObject): ToolOutcome {
+                val sessionId = dao.sessions().first().single().id
+                val approvals = withTools.approvalsOf(sessionId)
+                // The user switches mode mid-turn: the next request says so.
+                assertTrue(withTools.setMode(sessionId, ApprovalMode.AllowWebsiteInteractions))
+                assertEquals(ApprovalMode.AllowWebsiteInteractions, approvals.mode)
+                seen += approvals.classifyInteraction(InteractionInput("browser_click", "Open it", "example.com", label = "Result"))
+                return ToolOutcome("{}")
+            }
+        }
+        withTools = AgentChats(dao, providers, "You are Freedom Agent. {{identity}}", toolsFor = { ToolRegistry(listOf(probe)) }, scope = scope, zone = { ZoneId.of("UTC") })
+        route(
+            "/v1/chat/completions",
+            { sse(data("""{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"probe","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"""), "data: [DONE]") },
+            { sse(chatText("""{"kind":"ordinary","confidence":0.9,"summary":"Opens the result.","uncertainties":[]}"""), chatStop, "data: [DONE]") },
+            { sse(chatText("Done."), chatStop, "data: [DONE]") },
+        )
+        val id = withTools.send(null, "open the first result", model, ApprovalMode.SensitiveActions)!!
+        assertEquals(ApprovalMode.SensitiveActions.wire, dao.session(id)!!.approvalMode)
+        assertEquals("Done.", awaitDone(id, withTools).assistantText)
+        assertEquals(ApprovalMode.AllowWebsiteInteractions.wire, dao.session(id)!!.approvalMode)
+        fun systemOf(body: JSONObject) = body.getJSONArray("messages").getJSONObject(0).getString("content")
+        assertTrue(systemOf(bodies[0]).contains("approval mode is sensitive_actions"))
+        // The classifier: the same model, its own system prompt, no tools, no history.
+        val check = bodies[1]
+        assertEquals("llama3", check.getString("model"))
+        assertFalse(check.has("tools"))
+        assertTrue(systemOf(check).startsWith(InteractionIntentClassifier.PROTOCOL))
+        assertEquals(2, check.getJSONArray("messages").length())
+        assertTrue(check.getJSONArray("messages").getJSONObject(1).getString("content").contains("\"userRequest\":\"open the first result\""))
+        assertEquals(InteractionKind.ORDINARY, seen.single().kind)
+        assertTrue(systemOf(bodies[2]).contains("approval mode is allow_website_interactions"))
+        // No turn running: the classifier has no model, and says it's uncertain.
+        assertEquals(InteractionKind.UNCERTAIN, withTools.approvalsOf(id).classifyInteraction(InteractionInput("browser_click", "", "example.com")).kind)
+        // A new chat without a mode asks every time.
+        route("/v1/chat/completions", { sse(chatText("Hi"), chatStop) })
+        val plain = withTools.send(null, "hi", model)!!
+        awaitDone(plain, withTools)
+        assertEquals(ApprovalMode.EveryInteraction.wire, dao.session(plain)!!.approvalMode)
+        assertFalse(withTools.setMode("gone", ApprovalMode.SensitiveActions))
     }
 
     @Test
@@ -667,6 +716,11 @@ internal class MemoryChatDao : ChatDao {
     }
     override suspend fun touchSession(id: String, connectionId: String, modelId: String, at: Long) = edit(id) {
         it.copy(connectionId = connectionId, modelId = modelId, updatedAt = at)
+    }
+    override suspend fun setApprovalMode(id: String, mode: String): Int = synchronized(this) {
+        val s = sessions.value[id] ?: return@synchronized 0
+        sessions.value = sessions.value + (id to s.copy(approvalMode = mode))
+        1
     }
     override suspend fun setSummary(id: String, summary: String, through: Int) = edit(id) {
         it.copy(summary = summary, summaryThrough = through)

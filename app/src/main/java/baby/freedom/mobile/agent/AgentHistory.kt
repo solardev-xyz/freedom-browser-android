@@ -1,6 +1,7 @@
 package baby.freedom.mobile.agent
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -11,6 +12,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
@@ -47,6 +50,9 @@ internal data class ChatSession(
     /** The conversation before turn [summaryThrough], compacted (#574); null until it first is. */
     val summary: String? = null,
     val summaryThrough: Int = 0,
+    /** Its [ApprovalMode] (#595), as stored; read through [ApprovalMode.of], so anything unknown asks every time. */
+    @ColumnInfo(defaultValue = "every_interaction")
+    val approvalMode: String = ApprovalMode.DEFAULT.wire,
 )
 
 @Entity(
@@ -98,6 +104,9 @@ internal interface ChatDao {
     @Query("UPDATE agent_sessions SET connectionId = :connectionId, modelId = :modelId, updatedAt = :at WHERE id = :id")
     suspend fun touchSession(id: String, connectionId: String, modelId: String, at: Long)
 
+    @Query("UPDATE agent_sessions SET approvalMode = :mode WHERE id = :id")
+    suspend fun setApprovalMode(id: String, mode: String): Int
+
     @Query("UPDATE agent_sessions SET summary = :summary, summaryThrough = :through WHERE id = :id")
     suspend fun setSummary(id: String, summary: String, through: Int)
 
@@ -132,17 +141,25 @@ internal interface ChatDao {
     }
 }
 
-@Database(entities = [ChatSession::class, ChatTurn::class], version = 1, exportSchema = true)
+@Database(entities = [ChatSession::class, ChatTurn::class], version = 2, exportSchema = true)
 internal abstract class AgentDatabase : RoomDatabase() {
     abstract fun chats(): ChatDao
 
     companion object {
         const val FILE_NAME = "freedom_agent.db"
 
+        /** A chat's approval mode (#595); every chat from before asks every time, as it did. */
+        internal val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE agent_sessions ADD COLUMN approvalMode TEXT NOT NULL DEFAULT 'every_interaction'")
+            }
+        }
+
         @Volatile private var instance: AgentDatabase? = null
 
         fun get(context: Context): AgentDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AgentDatabase::class.java, FILE_NAME)
+                .addMigrations(MIGRATION_1_2)
                 .build()
                 .also { instance = it }
         }

@@ -486,6 +486,8 @@ internal class SwarmPublishTools(
             document = 0,
             action = action,
             intent = null,
+            // A publication always asks, on its own card, whatever the chat's mode (#595).
+            byUser = true,
         )
         val acknowledged = when (val answer = ask(approval)) {
             is ApprovalOutcome.Publish -> answer.acknowledged

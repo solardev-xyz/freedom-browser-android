@@ -9,7 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 
 /**
- * Opens a subscription's sign-in page (#576) in a Custom Tab: the
+ * Opens a subscription's sign-in page (#576, #602) in a Custom Tab: the
  * provider's own page in the user's browser, with its own cookies and
  * password manager, never in a Freedom tab (whose pages can't see where
  * a sign-in came from, and must not hold the provider session).
@@ -27,7 +27,11 @@ internal object SignInPage {
     private const val EXTRA_SESSION = "android.support.customtabs.extra.SESSION"
     private const val SERVICE_ACTION = "android.support.customtabs.action.CustomTabsService"
 
-    /** Opens [url], already checked by [SubscriptionAuth.verificationUrl]. False if nothing could. */
+    /**
+     * Opens [url], already checked by [SubscriptionAuth.verificationUrl]
+     * (device code) or [ChatGptLogin.isAuthorizeUrl] (Sign in with
+     * ChatGPT, #602). False if nothing could.
+     */
     fun open(context: Context, url: String): Boolean {
         val pm = context.packageManager
         val view = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)

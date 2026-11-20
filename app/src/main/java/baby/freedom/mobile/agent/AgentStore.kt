@@ -99,6 +99,8 @@ internal data class AgentState(
  *    Keystore key ([KEY_ALIAS], [KeystoreAesKey]) and Base64-encoded as
  *    one blob, like the RPC keys (`RpcKeyStore`). The Keystore key never
  *    leaves the phone, so a copied file could never be read anyway.
+ *    It also keeps this installation's id ([deviceId]) for Sign in
+ *    with ChatGPT (#602).
  *  - [MODELS_FILE_NAME]: each connection's discovered model list, apart
  *    so a list of up to 2000 models isn't rewritten on every favourite.
  *
@@ -194,6 +196,23 @@ internal class AgentStore(
             // Outside the write, so other changes aren't held up meanwhile.
             delay(wait)
         }
+    }
+
+    /**
+     * This installation's id (a random UUID), which Sign in with ChatGPT
+     * (#602) gives OpenAI as its `ext_agent_host_id`, as desktop does:
+     * made on first use and kept. Sent nowhere else. Null if it couldn't
+     * be read or saved.
+     */
+    suspend fun deviceId(): String? {
+        var id: String? = null
+        val ok = guarded("installation id") {
+            store.edit { prefs ->
+                val saved = prefs[DEVICE_ID]?.takeIf { UUID_TEXT.matches(it) }
+                id = saved ?: java.util.UUID.randomUUID().toString().also { prefs[DEVICE_ID] = it }
+            }
+        }
+        return id.takeIf { ok }
     }
 
     /** Stores [models] for [connectionId], or forgets its list (`null`). */
@@ -340,6 +359,8 @@ internal class AgentStore(
         private val DEFAULT = stringPreferencesKey("default_model_v1")
         private val KEYS = stringPreferencesKey("keys_v1")
         private val NEXT_REVISION = longPreferencesKey("next_revision")
+        private val DEVICE_ID = stringPreferencesKey("device_id")
+        private val UUID_TEXT = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
         private const val MODELS_PREFIX = "models:"
         private const val KEY_RETRY_MS = 2_000L
         private const val KEY_RETRY_MAX_MS = 60_000L
@@ -384,12 +405,16 @@ internal class AgentStore(
             return (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val provider = o.optString("provider")
-                if (ProviderCatalog.definition(provider) == null) return@mapNotNull null
+                val definition = ProviderCatalog.definition(provider) ?: return@mapNotNull null
                 val favorites = o.optJSONArray("favorites")
                 AgentConnection(
                     id = o.optString("id").takeIf { it.isNotEmpty() } ?: return@mapNotNull null,
                     providerId = provider,
-                    name = o.optString("name"),
+                    // A hosted provider or subscription is named by the app,
+                    // not the user: its current name, so one renamed since
+                    // (#602: ChatGPT's device-code sign-in is now "ChatGPT
+                    // (device code)") isn't shown under its old one.
+                    name = if (definition.kind == ProviderKind.Lan) o.optString("name") else definition.name,
                     baseUrl = o.optString("baseUrl").takeIf { it.isNotEmpty() },
                     favorites = if (favorites == null) emptyList() else (0 until favorites.length()).map { favorites.getString(it) },
                     revision = o.optLong("revision"),

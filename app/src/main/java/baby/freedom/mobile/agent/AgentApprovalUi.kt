@@ -193,6 +193,20 @@ private fun ApprovalBody(approval: AgentApproval) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+    approval.check?.let { check ->
+        Spacer(Modifier.height(8.dp))
+        Text(
+            when (check) {
+                is ApprovalCheck.Judged -> stringResource(R.string.agent_approve_check, check.summary)
+                ApprovalCheck.SendsForm -> stringResource(R.string.agent_approve_check_form)
+                ApprovalCheck.Credential -> stringResource(R.string.agent_approve_check_credential)
+                ApprovalCheck.NoAnswer -> stringResource(R.string.agent_approve_check_none)
+                ApprovalCheck.NeedsScreen -> stringResource(R.string.agent_approve_check_screen)
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
     Spacer(Modifier.height(8.dp))
     if (action !is AgentAction.Navigate) {
         Text(

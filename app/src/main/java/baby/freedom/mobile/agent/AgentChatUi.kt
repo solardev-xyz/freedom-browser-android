@@ -16,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,6 +32,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Mic
@@ -79,6 +81,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -233,6 +236,14 @@ private fun ChatView(
     var draft by rememberSaveable(saver = ComposerSaver) { mutableStateOf("") }
     var picked by rememberSaveable(sessionId, saver = ModelRefSaver) { mutableStateOf(null) }
     var sendFailed by remember { mutableStateOf(false) }
+    // The approval mode (#595): the chat's own, else the one last picked or sent for this chat
+    // (a new chat's pick, which holds once its first send has started it until its row loads,
+    // so the picker never shows a mode the chat isn't under). Not keyed to [sessionId], which
+    // changes when the first send starts the chat; [pickedFor] names the chat the pick is for.
+    var pickedMode by rememberSaveable { mutableStateOf(ApprovalMode.DEFAULT.wire) }
+    var pickedFor by rememberSaveable { mutableStateOf<String?>(null) }
+    val mode = shownMode(session?.approvalMode, loaded = session != null, sessionId, pickedMode, pickedFor)
+    var modeFailed by remember(sessionId) { mutableStateOf(false) }
     // When the last send came back: its turn's Stop can show a frame later.
     val sentAt = remember { mutableLongStateOf(Long.MIN_VALUE / 2) }
     // The chat's own model, else the one picked, else the default; only one still offered.
@@ -390,7 +401,40 @@ private fun ChatView(
         }
         HorizontalDivider()
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-            ModelPicker(choices, model, onPick = { picked = it })
+            FlowRow {
+                ModelPicker(choices, model, onPick = { picked = it })
+                // Not while a send is in flight: a new chat is created under the
+                // mode its Send tap read, so a pick landing before it returns would
+                // show for a moment, then be put back while the first steps run.
+                ApprovalModePicker(mode, enabled = !sending.value) { m ->
+                    // Checked here too: a tap can land before the picker redraws disabled.
+                    if (sending.value) return@ApprovalModePicker
+                    modeFailed = false
+                    if (sessionId == null) {
+                        pickedMode = m.wire
+                        pickedFor = null
+                    } else {
+                        val id = sessionId
+                        scope.launch {
+                            if (chats.setMode(id, m)) {
+                                // Shown until the chat's row reads it back.
+                                pickedMode = m.wire
+                                pickedFor = id
+                            } else {
+                                modeFailed = true
+                            }
+                        }
+                    }
+                }
+            }
+            if (modeFailed) {
+                Text(
+                    stringResource(R.string.agent_mode_save_failed),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
             if (sendFailed) {
                 Text(
                     stringResource(R.string.agent_send_failed),
@@ -473,7 +517,7 @@ private fun ChatView(
                             sending.value = true
                             scope.launch {
                                 try {
-                                    val id = chats.send(sessionId, text, m)
+                                    val id = chats.send(sessionId, text, m, mode)
                                     if (id == null) {
                                         sendFailed = true
                                     } else {
@@ -484,6 +528,9 @@ private fun ChatView(
                                             draft = ""
                                             dictation?.edited("")
                                         }
+                                        // The mode it was sent with stays shown once it's started.
+                                        pickedMode = mode.wire
+                                        pickedFor = id
                                         onStarted(id)
                                     }
                                 } finally {
@@ -660,6 +707,91 @@ private fun ModelPicker(choices: List<ModelChoice>, model: ModelRef?, onPick: (M
                     },
                 )
             }
+        }
+    }
+}
+
+@Composable
+internal fun modeLabel(mode: ApprovalMode): String = stringResource(
+    when (mode) {
+        ApprovalMode.EveryInteraction -> R.string.agent_mode_every
+        ApprovalMode.SensitiveActions -> R.string.agent_mode_sensitive
+        ApprovalMode.AllowWebsiteInteractions -> R.string.agent_mode_allow
+    },
+)
+
+@Composable
+private fun modeHint(mode: ApprovalMode): String = stringResource(
+    when (mode) {
+        ApprovalMode.EveryInteraction -> R.string.agent_mode_every_hint
+        ApprovalMode.SensitiveActions -> R.string.agent_mode_sensitive_hint
+        ApprovalMode.AllowWebsiteInteractions -> R.string.agent_mode_allow_hint
+    },
+)
+
+/**
+ * The approval mode the composer shows (#595): the chat's own once its
+ * row is [loaded], else the one last picked or sent if it was for this
+ * chat ([pickedFor] null: a chat not started yet), else the default.
+ */
+internal fun shownMode(stored: String?, loaded: Boolean, sessionId: String?, picked: String, pickedFor: String?): ApprovalMode =
+    when {
+        loaded -> ApprovalMode.of(stored)
+        pickedFor == sessionId -> ApprovalMode.of(picked)
+        else -> ApprovalMode.DEFAULT
+    }
+
+/**
+ * The chat's approval mode (#595), next to its model: each mode with
+ * what it does, and what asks whatever the mode.
+ */
+@Composable
+internal fun ApprovalModePicker(mode: ApprovalMode, enabled: Boolean = true, onPick: (ApprovalMode) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    // A menu left open when it's disabled closes: its items would still pick.
+    LaunchedEffect(enabled) { if (!enabled) open = false }
+    val label = stringResource(R.string.agent_mode_label, modeLabel(mode))
+    Box {
+        TextButton(
+            onClick = { open = true },
+            enabled = enabled,
+            modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = label },
+        ) {
+            Text(modeLabel(mode), style = MaterialTheme.typography.labelLarge)
+            Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
+        }
+        DropdownMenu(expanded = open && enabled, onDismissRequest = { open = false }, modifier = Modifier.widthIn(max = 340.dp)) {
+            for (m in ApprovalMode.entries) {
+                DropdownMenuItem(
+                    text = {
+                        Column(Modifier.padding(vertical = 6.dp)) {
+                            Text(modeLabel(m))
+                            Text(
+                                modeHint(m),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    leadingIcon = {
+                        if (m == mode) Icon(Icons.Filled.Check, contentDescription = null) else Box(Modifier.widthIn(min = 24.dp))
+                    },
+                    onClick = {
+                        open = false
+                        // Even the mode shown: until an opened chat's row loads it shows
+                        // the default, and picking that must still be saved.
+                        onPick(m)
+                    },
+                    modifier = Modifier.semantics { selected = m == mode },
+                )
+            }
+            HorizontalDivider()
+            Text(
+                stringResource(R.string.agent_mode_always),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            )
         }
     }
 }

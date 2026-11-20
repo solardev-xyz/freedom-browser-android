@@ -26,7 +26,7 @@ class AgentApprovalsTest {
     private val button = PageTarget("button", "button", "Search")
 
     private fun approval(id: Long = AgentApprovals.nextId(), session: String = "s", tab: Long = 1, action: AgentAction = AgentAction.Click(button)) =
-        AgentApproval(id, session, "call", tab, "example.com", 3, action, intent = null)
+        AgentApproval(id, session, "call", tab, "example.com", 3, action, intent = null, byUser = true)
 
     // ---- custody ----
 
