@@ -1,9 +1,16 @@
 package baby.freedom.mobile.agent
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.os.SystemClock
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +31,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.EditNote
@@ -42,6 +51,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
@@ -60,6 +70,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -70,11 +81,16 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.EmptyState
 import baby.freedom.mobile.browser.FullScreenScaffold
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -217,6 +233,35 @@ private fun ChatView(
     val model = listOfNotNull(picked, sessionModel, defaultModel).firstOrNull { ref -> choices.any { it.ref == ref } }
         ?: choices.firstOrNull()?.ref
 
+    // Voice dictation (#578): only when the phone has a recognizer.
+    val context = LocalContext.current
+    val recognizer = remember(context) { DictationRecognizers.pick(context) }
+    val languagePick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
+    val language = dictationLanguage(languagePick, LocalConfiguration.current.locales[0])
+    val dictation = remember(recognizer) {
+        recognizer?.let { kind -> Dictation(kind, { AndroidRecognizer(context, it) }, setDraft = { draft = it }) }
+    }
+    val dictationStatus by remember(dictation) {
+        dictation?.status ?: MutableStateFlow(DictationStatus.Idle)
+    }.collectAsState()
+    val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) dictation?.start(draft, language) else dictation?.refused()
+    }
+    val approval by AgentApprovals.shown.collectAsState()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(dictation, lifecycle) {
+        // The microphone is let go of once the app is out of sight.
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) dictation?.cancel() }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            dictation?.destroy()
+        }
+    }
+    // Another chat, an approval card over the chat, or a new language:
+    // dictation stops, keeping what the draft shows.
+    LaunchedEffect(sessionId, approval != null, language) { dictation?.cancel() }
+
     if (choices.isEmpty() && turns.isEmpty()) {
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -317,14 +362,33 @@ private fun ChatView(
                     modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
+            DictationLine(dictationStatus, language, onOpenAndroidSettings = { openAppSettings(context) })
             Row(verticalAlignment = Alignment.Bottom) {
                 OutlinedTextField(
                     value = draft,
                     onValueChange = {
                         draft = it
                         sendFailed = false
+                        dictation?.edited(it)
                     },
                     placeholder = { Text(stringResource(R.string.agent_composer_hint)) },
+                    trailingIcon = dictation?.let { d ->
+                        {
+                            MicButton(d.kind, dictationStatus) {
+                                if (d.listening) {
+                                    d.finish()
+                                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                                    PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    d.start(draft, language)
+                                } else {
+                                    // Asked only now, on the first tap.
+                                    d.dismiss()
+                                    askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            }
+                        }
+                    },
                     modifier = Modifier.weight(1f),
                     maxLines = 6,
                 )
@@ -356,6 +420,9 @@ private fun ChatView(
                             // can land before the button redraws disabled.
                             if (sending.value) return@FilledIconButton
                             val m = model ?: return@FilledIconButton
+                            // What's shown is what's sent: a result still
+                            // to come mustn't change the draft mid-send.
+                            dictation?.cancel()
                             val text = draft
                             if (text.isBlank()) return@FilledIconButton
                             sending.value = true
@@ -384,6 +451,90 @@ private fun ChatView(
                 }
             }
         }
+    }
+}
+
+/**
+ * The composer's microphone (#578): starts dictating, or while listening
+ * finishes. Its label says where the audio goes before the first tap.
+ */
+@Composable
+private fun MicButton(kind: RecognizerKind, status: DictationStatus, onClick: () -> Unit) {
+    if (status is DictationStatus.Listening) {
+        FilledIconButton(onClick = onClick) {
+            Icon(Icons.Filled.Mic, contentDescription = stringResource(R.string.agent_dictate_stop))
+        }
+    } else {
+        IconButton(onClick = onClick) {
+            Icon(
+                Icons.Outlined.Mic,
+                contentDescription = stringResource(
+                    if (kind == RecognizerKind.OnDevice) R.string.agent_dictate_on_device else R.string.agent_dictate_service,
+                ),
+            )
+        }
+    }
+}
+
+/** The line over the composer while dictating, or after dictation failed. */
+@Composable
+private fun DictationLine(status: DictationStatus, language: String, onOpenAndroidSettings: () -> Unit) {
+    when (status) {
+        DictationStatus.Idle -> Unit
+        is DictationStatus.Listening -> Text(
+            stringResource(
+                when {
+                    !status.hearing -> R.string.agent_dictation_starting
+                    status.kind == RecognizerKind.OnDevice -> R.string.agent_dictation_listening_on_device
+                    else -> R.string.agent_dictation_listening_service
+                },
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            // Not a live region: TalkBack reading it out would be dictated.
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+        is DictationStatus.Failed -> Row(verticalAlignment = Alignment.CenterVertically) {
+            val locale = LocalConfiguration.current.locales[0]
+            Text(
+                when (status.failure) {
+                    DictationFailure.NoSpeech -> stringResource(R.string.agent_dictation_no_speech)
+                    DictationFailure.Permission -> stringResource(R.string.agent_dictation_permission)
+                    DictationFailure.Language -> stringResource(
+                        R.string.agent_dictation_language,
+                        java.util.Locale.forLanguageTag(language).getDisplayName(locale),
+                    )
+                    DictationFailure.Network -> stringResource(R.string.agent_dictation_network)
+                    DictationFailure.Busy -> stringResource(R.string.agent_dictation_busy)
+                    DictationFailure.Audio -> stringResource(R.string.agent_dictation_audio)
+                    DictationFailure.Other -> stringResource(R.string.agent_dictation_failed)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status.failure == DictationFailure.NoSpeech) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+                modifier = Modifier.weight(1f).padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            )
+            if (status.failure == DictationFailure.Permission) {
+                TextButton(onClick = onOpenAndroidSettings, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text(stringResource(R.string.agent_dictation_android_settings))
+                }
+            }
+        }
+    }
+}
+
+/** Android's own page for this app, where a refused permission is turned on. */
+private fun openAppSettings(context: Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    } catch (e: android.content.ActivityNotFoundException) {
+        // No settings app to open: the line still says what to do.
     }
 }
 

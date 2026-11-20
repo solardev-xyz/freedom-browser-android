@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Tune
@@ -115,6 +116,14 @@ internal fun aiSectionRows(state: AgentState): List<SettingsRow> = listOfNotNull
     } else {
         null
     },
+    if (state.enabled) {
+        settingsRow(
+            "ai-dictation", Strings.get(R.string.agent_dictation),
+            *searchKeywords(R.string.agent_dictation_keywords),
+        )
+    } else {
+        null
+    },
 )
 
 private fun modelName(state: AgentState, discovered: Map<String, List<AgentModel>>, ref: ModelRef): String {
@@ -135,6 +144,7 @@ private fun defaultLine(state: AgentState, discovered: Map<String, List<AgentMod
 internal fun AiSection(
     visible: Set<Any>,
     onOpenProviders: () -> Unit,
+    onOpenDictation: () -> Unit,
 ) {
     val context = LocalContext.current
     val providers = remember(context) { AgentProviders.get(context) }
@@ -171,6 +181,17 @@ internal fun AiSection(
             leadingIcon = Icons.Filled.Tune,
             onClick = onOpenProviders,
         )
+        if (state.enabled && "ai-dictation" in visible) {
+            val pick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
+            val kind = remember(context) { DictationRecognizers.pick(context) }
+            PageRow(
+                title = stringResource(R.string.agent_dictation),
+                subtitle = dictationSummary(kind, pick),
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Mic,
+                onClick = onOpenDictation,
+            )
+        }
     }
 }
 
