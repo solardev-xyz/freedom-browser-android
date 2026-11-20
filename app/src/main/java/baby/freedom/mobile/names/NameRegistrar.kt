@@ -585,6 +585,14 @@ class NameRegistrar internal constructor(
     }
 
     /**
+     * A [wipe] left the journal on disk: the list here is already empty, so
+     * this is what says another try is due (the wallet page, with no wallet).
+     */
+    @Volatile
+    var eraseOwed = false
+        private set
+
+    /**
      * Forgets every operation, the sealed secrets with them: Remove wallet
      * does this, since each names the wallet's addresses and the names
      * they were registering (as the wallet's history is wiped). An
@@ -593,14 +601,6 @@ class NameRegistrar internal constructor(
      * [NameException.Code.SECURE_STORAGE] says the file couldn't be
      * emptied or deleted ([NameJournal.erase]), for Remove wallet to say so.
      */
-    /**
-     * A [wipe] left the journal on disk: the list here is already empty, so
-     * this is what says another try is due (the wallet page, with no wallet).
-     */
-    @Volatile
-    var eraseOwed = false
-        private set
-
     suspend fun wipe() {
         loaded.await()
         writing.withLock {

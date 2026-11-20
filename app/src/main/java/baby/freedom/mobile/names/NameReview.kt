@@ -133,10 +133,12 @@ internal fun operationStatus(op: NameOperation, nowSeconds: Long): String {
  * What Register or Renew says when it hands back [op], an open operation of
  * the same choice that can't be reviewed now (waiting for its commitment,
  * pending, an unknown outcome): the check makes way for it, so the line says
- * why and where it stands. Null when it's ready, since its review opens instead.
+ * why and where it stands. Null when it's ready, since its review opens
+ * instead, and once it has ended (completed, reverted, expired, stale): it no
+ * longer carries on, and its card below says how it ended.
  */
 internal fun carriedOnNotice(op: NameOperation, nowSeconds: Long): String? {
-    if (op.state == State.READY) return null
+    if (op.state == State.READY || op.state.terminal) return null
     val text = if (op.registering) R.string.namereg_open_registration_continues else R.string.namereg_open_renewal_continues
     return Strings.get(text, op.name, operationStatus(op, nowSeconds))
 }
@@ -144,7 +146,8 @@ internal fun carriedOnNotice(op: NameOperation, nowSeconds: Long): String? {
 /**
  * The line for the operation [id] that Register or Renew handed back, from
  * [operations] as they are now and the phone's clock: null once it's ready
- * (its card offers the review) or gone, or when nothing was handed back.
+ * (its card offers the review), ended (its card says how) or gone, or when
+ * nothing was handed back.
  */
 internal fun carriedOnLine(id: String?, operations: List<NameOperation>?, nowSeconds: Long): String? {
     val op = id?.let { operations?.firstOrNull { o -> o.id == it } } ?: return null

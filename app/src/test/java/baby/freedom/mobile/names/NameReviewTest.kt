@@ -144,6 +144,13 @@ class NameReviewTest {
         assertTrue(carriedOnLine(waiting.id, listOf(waiting), 999)!!.contains("in a moment"))
         assertNull("ready: its card offers the review", carriedOnLine(waiting.id, listOf(waiting.copy(state = State.READY)), 1_015))
         assertNull("dismissed", carriedOnLine(waiting.id, emptyList(), 1_015))
+        // Ended: it no longer carries on, so no "already has this open … carries on below".
+        for (ended in listOf(State.COMPLETED, State.FAILED, State.EXPIRED, State.STALE)) {
+            assertNull("$ended", carriedOnLine(waiting.id, listOf(waiting.copy(state = ended)), 1_015))
+            assertNull("$ended", carriedOnNotice(waiting.copy(state = ended), 1_015))
+        }
+        val renewing = op(intent = Intent.RENEW, step = Step.RENEW).copy(state = State.PENDING)
+        assertNull("renewed", carriedOnLine(renewing.id, listOf(renewing.copy(state = State.COMPLETED)), 0))
         assertNull("nothing handed back", carriedOnLine(null, listOf(waiting), 955))
     }
 
