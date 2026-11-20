@@ -399,6 +399,22 @@ class AgentAttachmentsTest {
     }
 
     @Test
+    fun `a failed save's file that fits but can't be moved back is named as such, not as over the caps`() = runBlocking {
+        val s = store()
+        val sent = s.consume(chat, listOf(s.stageOk("a.txt", open = text("a")).id))!!
+        // The composer has room, but staged/ can't take the file: a plain file stands where the folder goes.
+        val staged = File(tmp.root, "staged")
+        staged.deleteRecursively()
+        staged.writeText("in the way")
+        val refused = s.unconsume(chat, sent)
+        assertEquals(listOf(StageResult.Refused(StageRefusal.NotMovedBack, "a.txt")), refused)
+        assertEquals(refused, s.notPutBack.value)
+        assertTrue(s.staged.value.isEmpty())
+        // Its copy is gone, and so is the chat's folder.
+        assertFalse(chatDir(chat).exists())
+    }
+
+    @Test
     fun `an image over 8000 pixels on a side is refused`() = runBlocking {
         val sizes = mapOf("PNG" to (8001 to 600), "JPG" to (8000 to 8000))
         val s = AgentAttachments(tmp.root, imageSize = { f -> sizes[f.inputStream().use { String(it.readNBytes(3)) }] }, imageType = ::fakeImageType)

@@ -184,6 +184,7 @@ private fun refusalText(r: StageResult.Refused): String = when (r.reason) {
     StageRefusal.ImageTooLarge -> stringResource(R.string.agent_attachment_image_too_large, r.name)
     StageRefusal.ImageTooWide -> stringResource(R.string.agent_attachment_image_too_wide, r.name)
     StageRefusal.NotPutBack -> stringResource(R.string.agent_attachment_not_put_back, r.name)
+    StageRefusal.NotMovedBack -> stringResource(R.string.agent_attachment_not_moved_back, r.name)
     StageRefusal.Unreadable -> stringResource(R.string.agent_attachment_unreadable, r.name)
 }
 

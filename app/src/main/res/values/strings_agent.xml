@@ -183,6 +183,7 @@
     <string name="agent_attachment_image_too_large">%1$s is larger than 7.5 MB, the most a model is sent.</string>
     <string name="agent_attachment_image_too_wide">%1$s is over 8000 pixels wide or high, the most a model takes.</string>
     <string name="agent_attachment_not_put_back">%1$s couldn\'t go back under the message: it would make more than 10 files or 50 MB. Attach it again.</string>
+    <string name="agent_attachment_not_moved_back">%1$s couldn\'t go back under the message: the phone couldn\'t move its copy. Attach it again.</string>
     <string name="agent_attachment_unreadable">Couldn\'t read %1$s.</string>
     <string name="agent_attachment_no_vision">This model can\'t see images: it gets only their names. Pick a model that takes images to have it look at them.</string>
     <string name="agent_attachment_where">The model you pick gets images with your message if it takes them, and reads other files when it needs them. The files stay on this phone with the chat and are deleted with it.</string>

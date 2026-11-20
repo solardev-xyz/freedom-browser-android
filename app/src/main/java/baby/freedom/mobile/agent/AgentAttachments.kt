@@ -133,6 +133,13 @@ internal enum class StageRefusal {
      */
     NotPutBack,
 
+    /**
+     * A file of a message that couldn't be saved, which had room under the
+     * composer but whose copy couldn't be moved back there: it's gone, and
+     * must be picked again.
+     */
+    NotMovedBack,
+
     /** It couldn't be read, or the phone couldn't keep a copy. */
     Unreadable,
 }
@@ -326,8 +333,8 @@ internal class AgentAttachments(
     private val _notPutBack = MutableStateFlow<List<StageResult.Refused>>(emptyList())
 
     /**
-     * Files of an unsaved message that didn't fit back under the composer
-     * ([unconsume]), for the composer to say so; cleared by [dismissNotPutBack].
+     * Files of an unsaved message that didn't go back under the composer
+     * ([unconsume]): no room, or their copy couldn't be moved, for the composer to say so; cleared by [dismissNotPutBack].
      */
     val notPutBack: StateFlow<List<StageResult.Refused>> = _notPutBack.asStateFlow()
 
@@ -508,7 +515,9 @@ internal class AgentAttachments(
      * meanwhile) is dropped. Files picked meanwhile stay; one that would
      * take the composer past [AttachmentRules.MAX_SELECTIONS] files or
      * [AttachmentRules.MAX_TOTAL_BYTES] isn't put back: its copy goes, and
-     * it's named in [notPutBack]. Returns those.
+     * it's named in [notPutBack] as [StageRefusal.NotPutBack]. One that
+     * fits but whose copy can't be moved back goes too, named as
+     * [StageRefusal.NotMovedBack]. Returns those.
      */
     suspend fun unconsume(sessionId: String, attachments: List<Attachment>): List<StageResult.Refused> = withContext(Dispatchers.IO) {
         if (attachments.isEmpty()) return@withContext emptyList()
@@ -534,7 +543,7 @@ internal class AgentAttachments(
                     total += a.bytes
                 } else {
                     file.delete()
-                    refused += StageResult.Refused(StageRefusal.NotPutBack, a.name)
+                    refused += StageResult.Refused(StageRefusal.NotMovedBack, a.name)
                 }
             }
             val ids = attachments.map { it.id }.toSet()
