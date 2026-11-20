@@ -220,6 +220,40 @@ class PublicationScanTest {
     }
 
     @Test
+    fun `a second secret on a credential's line is its own finding, the same value is reported once`() {
+        val token = join("ghp_", "a8Fh2kL9mQ3rT6vW1yZ4bC7dE0gJ5n")
+        val json = "{\"token\":\"$token\",\"password\":\"Tr0ub4dor&3horse\"}"
+        val found = PublicationScan.scanText("Text", json)
+        assertEquals(listOf("github-token", "credential-assignment"), found.map { it.rule })
+        assertTrue(found.all { it.blocking && it.line == 1 })
+        val aws = join("AKIA", "Q3EGRZ7NKVB2XJ4M")
+        assertEquals(
+            setOf("aws-access-key", "credential-assignment"),
+            rulesIn("key=$aws password=\"Tr0ub4dor&3horse\"").toSet(),
+        )
+        // The token assigned to a credential name is one value: one finding.
+        assertEquals(listOf("github-token"), rulesIn("token = \"$token\""))
+        assertEquals(listOf("ethereum-private-key"), rulesIn("const PRIVATE_KEY = '0x$hexKey';"))
+    }
+
+    @Test
+    fun `inline text gets every rule even with a NUL in it`() {
+        val nbsp = phrase(12).joinToString("\u00A0")
+        assertTrue("bip39-seed-phrase" in PublicationScan.scanPublication("Text", "\u0000$nbsp".toByteArray(), null).map { it.rule })
+        assertTrue("email-address" in PublicationScan.scanPublication("Text", "\u0000 mail alice.smith@proton.me".toByteArray(), null).map { it.rule })
+    }
+
+    @Test
+    fun `svg and xhtml published as text get the third-party check`() {
+        val svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script src=\"https://tracker.example.net/t.js\"></script></svg>"
+        for (type in listOf("image/svg+xml", "application/xhtml+xml; charset=utf-8")) {
+            val found = PublicationScan.scanPublication("Text", svg.toByteArray(), type).filter { it.kind == Kind.ThirdParty }
+            assertEquals(type, listOf("third-party-script" to "https://tracker.example.net"), found.map { it.rule to it.excerpt })
+        }
+        assertTrue(PublicationScan.scanPublication("Text", svg.toByteArray(), "text/plain").none { it.kind == Kind.ThirdParty })
+    }
+
+    @Test
     fun `binary content is scanned for secrets but not personal data`() {
         val key = join("sk-proj-", "Ab3dEf6hIj9kLm2nOp5qRs8tUv")
         val db = byteArrayOf(0, 1, 2, 3) + key.toByteArray() + byteArrayOf(0xc3.toByte(), 0) + " alice.smith@proton.me ".toByteArray()

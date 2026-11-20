@@ -145,13 +145,14 @@ internal data class AgentPublication(
 
 /** Where the journal lives; a write that returns true is on flash. */
 internal interface PublicationJournalStore {
-    fun load(): List<AgentPublication>
+    /** The records; empty when there is no journal yet, null when one exists but couldn't be read. */
+    fun load(): List<AgentPublication>?
 
     fun save(records: List<AgentPublication>): Boolean
 }
 
 internal class FilePublicationJournalStore(private val file: File) : PublicationJournalStore {
-    override fun load(): List<AgentPublication> = try {
+    override fun load(): List<AgentPublication>? = try {
         if (!file.exists()) {
             emptyList()
         } else {
@@ -160,7 +161,9 @@ internal class FilePublicationJournalStore(private val file: File) : Publication
             (0 until list.length()).mapNotNull { list.optJSONObject(it)?.let(AgentPublication::fromJson) }
         }
     } catch (e: Exception) {
-        emptyList()
+        // Not "no records": the file is left as it is, and nothing is written over it.
+        Log.w("AgentPublications", "reading the journal failed (${e.javaClass.simpleName})")
+        null
     }
 
     override fun save(records: List<AgentPublication>): Boolean = try {
@@ -199,11 +202,19 @@ internal class AgentPublications(
     private var loaded = false
     private val lock = Any()
 
+    /**
+     * Whether the journal has been read. A journal that exists but can't be
+     * read is never treated as empty: nothing is written over it (that would
+     * drop its receipts, an `outcome_unknown` one included), nothing new may
+     * begin, and the next call reads it again.
+     */
+    val readable: Boolean get() = synchronized(lock) { loaded }
+
     /** Reads the journal once; blocking, so call it off the main thread. */
     fun ensureLoaded() = synchronized(lock) {
         if (loaded) return@synchronized
         val now = clock()
-        val recovered = store.load().map { r ->
+        val recovered = (store.load() ?: return@synchronized).map { r ->
             if (r.state != AgentPublication.UPLOADING) {
                 r
             } else if (r.dispatched) {
@@ -220,6 +231,7 @@ internal class AgentPublications(
     /** Records [record] before anything is uploaded; false if that couldn't be written, and then nothing may upload. */
     fun begin(record: AgentPublication): Boolean = synchronized(lock) {
         ensureLoaded()
+        if (!loaded) return@synchronized false
         val next = pruned(_records.value + (record.publicationId to record))
         if (!store.save(next.values.toList())) return@synchronized false
         _records.value = next
@@ -228,6 +240,7 @@ internal class AgentPublications(
 
     /** Changes [id]'s record; false if it's gone or the change couldn't be written (it still shows in memory). */
     fun update(id: String, change: (AgentPublication) -> AgentPublication): Boolean = synchronized(lock) {
+        if (!loaded) return@synchronized false
         val current = _records.value[id] ?: return@synchronized false
         val next = _records.value + (id to change(current).copy(updatedAt = clock()))
         _records.value = next
@@ -254,14 +267,14 @@ internal class AgentPublications(
     /** A deleted chat's receipts go with it. */
     fun deleteSession(sessionId: String) = synchronized(lock) {
         ensureLoaded()
-        if (_records.value.values.none { it.sessionId == sessionId }) return@synchronized
+        if (!loaded || _records.value.values.none { it.sessionId == sessionId }) return@synchronized
         _records.value = _records.value.filterValues { it.sessionId != sessionId }
         store.save(_records.value.values.toList())
     }
 
     fun deleteAll() = synchronized(lock) {
         ensureLoaded()
-        if (_records.value.isEmpty()) return@synchronized
+        if (!loaded || _records.value.isEmpty()) return@synchronized
         _records.value = emptyMap()
         store.save(emptyList())
     }
@@ -408,6 +421,13 @@ internal class SwarmPublishTools(
 
         val journal = journal()
         journal.ensureLoaded()
+        if (!journal.readable) {
+            throw ToolError(
+                ToolError.CAPABILITY_UNAVAILABLE,
+                "Freedom couldn't read its record of earlier publications, so it can't tell whether one may already be " +
+                    "on Swarm. Nothing was uploaded.",
+            )
+        }
         // One upload at a time per chat: an earlier one still going is reported, not repeated.
         journal.forSession(sessionId).firstOrNull { !it.terminal }?.let { pending ->
             return ok(

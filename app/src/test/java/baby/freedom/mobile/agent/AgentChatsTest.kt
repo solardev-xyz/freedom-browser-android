@@ -563,6 +563,20 @@ class AgentChatsTest {
     }
 
     @Test
+    fun `publication receipts are forgotten only once the chats are really deleted`() = runBlocking {
+        val forgotten = ArrayList<String?>()
+        val c = AgentChats(dao, providers, "{{identity}}", scope = scope, forgetPublications = { forgotten += it })
+        dao.failDeletes = true
+        assertFalse(c.deleteAll())
+        assertFalse(c.delete("chat"))
+        assertTrue(forgotten.isEmpty())
+        dao.failDeletes = false
+        assertTrue(c.delete("chat"))
+        assertTrue(c.deleteAll())
+        assertEquals(listOf("chat", null), forgotten)
+    }
+
+    @Test
     fun `a provider that's gone is said before anything is sent`() = runBlocking {
         connectOllama()
         val turn = awaitDone(chats.send(null, "hi", ModelRef("nope", "m"))!!)
@@ -682,11 +696,16 @@ internal class MemoryChatDao : ChatDao {
     }
     override suspend fun markRunningInterrupted(): Int =
         editTurn({ it.status == ChatStatus.RUNNING }) { it.copy(status = ChatStatus.INTERRUPTED) }
+    /** Set: deleting throws, as a database that can't be written would. */
+    @Volatile var failDeletes = false
+
     override suspend fun deleteSession(id: String) = synchronized(this) {
+        if (failDeletes) throw java.io.IOException("disk")
         sessions.value = sessions.value - id
         turns.value = turns.value.filter { it.sessionId != id }
     }
     override suspend fun deleteAll() = synchronized(this) {
+        if (failDeletes) throw java.io.IOException("disk")
         sessions.value = emptyMap()
         turns.value = emptyList()
     }

@@ -19,8 +19,9 @@ import org.junit.Test
 class SwarmPublishToolTest {
     private class MemoryStore(var saved: List<AgentPublication> = emptyList(), var failSaves: Boolean = false) : PublicationJournalStore {
         var saves = 0
+        var unreadable = false
 
-        override fun load() = saved
+        override fun load(): List<AgentPublication>? = if (unreadable) null else saved
 
         override fun save(records: List<AgentPublication>): Boolean {
             if (failSaves) return false
@@ -225,6 +226,49 @@ class SwarmPublishToolTest {
     }
 
     @Test
+    fun `a journal that cannot be read is never written over, and nothing is asked or uploaded`() {
+        val earlier = AgentPublication(
+            publicationId = AgentPublication.newId(), sessionId = "chat", state = AgentPublication.OUTCOME_UNKNOWN, dispatched = true,
+            bytes = 5, contentType = "text/plain", batchId = batch.id, createdAt = 1,
+        )
+        store.saved = listOf(earlier)
+        store.unreadable = true
+        val out = publish("hello")
+        assertEquals(ToolError.CAPABILITY_UNAVAILABLE, out.code())
+        assertTrue(asked.isEmpty())
+        assertTrue(backend.started.isEmpty())
+        assertFalse(journal.begin(earlier.copy(publicationId = AgentPublication.newId(), state = AgentPublication.UPLOADING)))
+        journal.deleteAll()
+        journal.deleteSession("chat")
+        assertEquals(0, store.saves)
+        assertEquals(listOf(earlier), store.saved)
+        // Once it reads again, the earlier record is there and named on the card.
+        store.unreadable = false
+        publish("hello")
+        assertEquals(1, (asked.single().action as AgentAction.Publish).earlierUnknown)
+        assertTrue(store.saved.any { it.publicationId == earlier.publicationId })
+    }
+
+    @Test
+    fun `a journal file that can't be read or parsed reads as unreadable, not empty`() {
+        val dir = Files.createTempDirectory("journal").toFile()
+        try {
+            val file = File(dir, "agent-publications.json")
+            assertEquals(emptyList<AgentPublication>(), FilePublicationJournalStore(file).load())
+            file.writeText("{\"publications\": [")
+            assertNull(FilePublicationJournalStore(file).load())
+            val j = AgentPublications(FilePublicationJournalStore(file))
+            assertFalse(j.begin(AgentPublication(
+                publicationId = AgentPublication.newId(), sessionId = "chat", state = AgentPublication.UPLOADING, dispatched = false,
+                bytes = 5, contentType = "text/plain", batchId = batch.id, createdAt = 1,
+            )))
+            assertEquals("{\"publications\": [", file.readText())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `the record is on disk before the upload starts`() {
         backend.outcome = { _ ->
             val saved = store.saved.single()
@@ -305,7 +349,7 @@ class SwarmPublishToolTest {
             val j = AgentPublications(fileStore)
             val pending = records[0].copy(publicationId = AgentPublication.newId(), state = AgentPublication.UPLOADING, createdAt = 10_000)
             assertTrue(j.begin(pending))
-            val back = FilePublicationJournalStore(file).load()
+            val back = FilePublicationJournalStore(file).load()!!
             assertEquals(AgentPublications.MAX_RECORDS, back.size)
             assertTrue(back.none { it.publicationId == records[0].publicationId })
             assertTrue(back.any { it.publicationId == pending.publicationId })
@@ -355,6 +399,19 @@ class SwarmPublishToolTest {
         assertEquals("third-party-script", finding.rule)
         assertEquals("https://cdn.example.net", finding.excerpt)
         assertFalse(finding.blocking)
+    }
+
+    @Test
+    fun `a finding past the preview shows the text around it on the card`() {
+        val filler = "x".repeat(PUBLISH_PREVIEW_CHARS + 500) + "\n"
+        val text = filler + "deploy with " + github + " today"
+        publish(text)
+        val action = asked.single().action as AgentAction.Publish
+        val f = action.findings.single { it.rule == "github-token" }
+        val context = findingContext(action.text, f)!!
+        assertTrue(context, context.contains(github) && context.contains("deploy with") && context.startsWith("…"))
+        // One inside the preview needs none: the preview shows it.
+        assertNull(findingContext(github + " " + filler, PublicationScan.scanText("Text", github).single()))
     }
 
     @Test

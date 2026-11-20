@@ -54,6 +54,8 @@ internal object PublicationScan {
         val shown: String = excerpt,
         val words: Int? = null,
         val chars: Int? = null,
+        /** Where the value starts in the scanned text (a UTF-16 index), for the card's context past its preview. */
+        val at: Int? = null,
     )
 
     /** A redacted value: what may be [shown], and how many [words] or [chars] the whole had. */
@@ -546,6 +548,8 @@ internal object PublicationScan {
      */
     fun scanText(path: String, text: String, secretsOnly: Boolean = false, rules: List<Rule> = RULES): List<Finding> {
         val findings = mutableListOf<Finding>()
+        // Where each finding's value sits in [text], for telling one value apart from another on the same line.
+        val spans = java.util.IdentityHashMap<Finding, IntRange>()
         val seen = HashSet<String>()
         val lines = LineCounter(text)
         var warnings = 0
@@ -559,11 +563,13 @@ internal object PublicationScan {
                         warnings++
                     }
                     val r = redactParts(rule.id, match.value)
-                    findings += Finding(
+                    val finding = Finding(
                         path = path, kind = rule.kind, rule = rule.id, label = rule.label, line = lines.of(match.index),
                         excerpt = redact(rule.id, match.value), blocking = rule.kind == Kind.Secret,
-                        shown = r.shown, words = r.words, chars = r.chars,
+                        shown = r.shown, words = r.words, chars = r.chars, at = match.index,
                     )
+                    findings += finding
+                    spans[finding] = match.index until match.index + match.value.length
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -572,9 +578,13 @@ internal object PublicationScan {
                 if (findings.none { it.rule == "scan-incomplete" }) findings += incomplete(path)
             }
         }
-        // A key assigned to PRIVATE_KEY = '…' is one value: report the specific rule.
-        val specific = findings.filter { it.kind == Kind.Secret && it.rule != "credential-assignment" }.mapNotNull { it.line }.toSet()
-        findings.removeAll { it.rule == "credential-assignment" && it.line in specific }
+        // A key assigned to PRIVATE_KEY = '…' is one value: report the specific
+        // rule. Only the same value, though: a second secret on that line (a
+        // password next to a token in one-line JSON) is its own finding.
+        val specific = findings.filter { it.kind == Kind.Secret && it.rule != "credential-assignment" }.mapNotNull { spans[it] }
+        findings.removeAll { f ->
+            f.rule == "credential-assignment" && spans[f]?.let { s -> specific.any { it.first <= s.last && s.first <= it.last } } == true
+        }
         // The broader credential check stays the backstop: text it refuses is
         // reported even when no named rule recognised the value.
         if (findings.none { it.kind == Kind.Secret }) {
@@ -604,6 +614,9 @@ internal object PublicationScan {
     // elsewhere sends what visitors type to that host.
 
     private val MARKUP_FILE = Regex("\\.(?:html?|xhtml|svg)$", RegexOption.IGNORE_CASE)
+
+    /** The media types a browser renders as markup, loading what its tags name, as the file extensions above. */
+    private val MARKUP_TYPE = Regex("^(?:text/html|application/xhtml\\+xml|image/svg\\+xml)(?![A-Za-z0-9_])")
     private val SCRIPT_FILE = Regex("\\.(?:m?js|cjs)$", RegexOption.IGNORE_CASE)
     private val HYGIENE_TAG = p("<(script|link|img|form)(?=[$S/>])", ci = true)
     private val HYGIENE_FETCH = p("${B}fetch[ \\t]{0,16}\\([ \\t\\r\\n]{0,16}([\"'`])")
@@ -671,7 +684,7 @@ internal object PublicationScan {
             // The excerpt is the origin only: a URL's path or query can carry a key.
             findings += Finding(
                 path = path, kind = Kind.ThirdParty, rule = spec.rule, label = spec.label, line = lines.of(index),
-                excerpt = origin, blocking = false,
+                excerpt = origin, blocking = false, at = index,
             )
         }
         if (markup) {
@@ -719,11 +732,16 @@ internal object PublicationScan {
         return if (binary) String(bytes, Charsets.ISO_8859_1) to true else String(bytes, Charsets.UTF_8) to false
     }
 
-    fun scanBytes(path: String, bytes: ByteArray, contentType: String? = null): List<Finding> {
-        val (text, binary) = textOf(bytes)
+    /**
+     * [inlineText] is text the agent wrote, not a file: it is always read as
+     * UTF-8 and gets every rule, NUL or not (a NUL in it says nothing about
+     * the rest being binary).
+     */
+    fun scanBytes(path: String, bytes: ByteArray, contentType: String? = null, inlineText: Boolean = false): List<Finding> {
+        val (text, binary) = if (inlineText) String(bytes, Charsets.UTF_8) to false else textOf(bytes)
         val findings = scanText(path, text, secretsOnly = binary).toMutableList()
         val type = contentType.orEmpty().trimStart { isJsSpace(it) }.lowercase()
-        val markup = MARKUP_FILE.containsMatchIn(path) || Regex("^text/html(?![A-Za-z0-9_])").containsMatchIn(type)
+        val markup = MARKUP_FILE.containsMatchIn(path) || MARKUP_TYPE.containsMatchIn(type)
         val script = SCRIPT_FILE.containsMatchIn(path) || Regex("^(?:text|application)/javascript(?![A-Za-z0-9_])").containsMatchIn(type)
         if (!binary && (markup || script)) {
             try {
@@ -747,7 +765,7 @@ internal object PublicationScan {
 
     /** The findings for a text publication of [bytes] (the frozen snapshot), capped and numbered. */
     fun scanPublication(name: String, bytes: ByteArray, contentType: String?): List<Finding> =
-        capFindings(scanBytes(name, bytes, contentType))
+        capFindings(scanBytes(name, bytes, contentType, inlineText = true))
 
     /** The only scan detail that may reach the model: counts and rule names. */
     fun summary(findings: List<Finding>): org.json.JSONObject = org.json.JSONObject()

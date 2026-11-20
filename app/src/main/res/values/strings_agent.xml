@@ -325,6 +325,8 @@
     <string name="agent_publish_findings_none">The check found no keys, passwords or personal data. It can\'t catch everything, so read the text.</string>
     <string name="agent_publish_findings_blocking">Keys, passwords and recovery phrases block publishing. Tick each one to publish it anyway, or ask the agent to fix them.</string>
     <string name="agent_publish_finding_line">%1$s · line %2$d</string>
+    <!-- A finding past the part of the text the card shows: the text around it. -->
+    <string name="agent_publish_finding_context">Past the preview: %1$s</string>
     <string name="agent_publish_kind_secret">Secret</string>
     <string name="agent_publish_kind_personal">Personal data</string>
     <string name="agent_publish_kind_third_party">Loads from another site</string>

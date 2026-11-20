@@ -95,7 +95,7 @@ internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction
             if (action.findings.any { it.blocking }) {
                 Text(stringResource(R.string.agent_publish_findings_blocking), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
             }
-            for (f in action.findings) FindingRow(f, f.id in acknowledged) { on -> if (on) acknowledged.add(f.id) else acknowledged.remove(f.id) }
+            for (f in action.findings) FindingRow(f, findingContext(action.text, f), f.id in acknowledged) { on -> if (on) acknowledged.add(f.id) else acknowledged.remove(f.id) }
         }
 
         Spacer(Modifier.height(12.dp))
@@ -164,7 +164,7 @@ private fun pluralBlank(count: Int): String =
     baby.freedom.mobile.l10n.pluralText(R.plurals.agent_approve_text_blank, count, count)
 
 @Composable
-private fun FindingRow(f: PublicationScan.Finding, ticked: Boolean, onTick: (Boolean) -> Unit) {
+private fun FindingRow(f: PublicationScan.Finding, context: String?, ticked: Boolean, onTick: (Boolean) -> Unit) {
     val kind = stringResource(
         when (f.kind) {
             PublicationScan.Kind.Secret -> R.string.agent_publish_kind_secret
@@ -182,6 +182,15 @@ private fun FindingRow(f: PublicationScan.Finding, ticked: Boolean, onTick: (Boo
             color = if (f.blocking) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
         )
         Text(findingExcerpt(f), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        if (context != null) {
+            Text(
+                stringResource(R.string.agent_publish_finding_context, context),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("agent-publish-context-${f.id}"),
+            )
+        }
         if (f.blocking) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -198,6 +207,27 @@ private fun FindingRow(f: PublicationScan.Finding, ticked: Boolean, onTick: (Boo
         }
     }
 }
+
+/**
+ * The text around [f] when it lies past the [PUBLISH_PREVIEW_CHARS] the
+ * card previews, so what the user ticks can be looked at first; null for
+ * one inside the preview (or one with no place in the text). The same
+ * characters the preview would show, [ApprovalText.flatten]ed, so nothing
+ * in it hides.
+ */
+internal fun findingContext(text: String, f: PublicationScan.Finding): String? {
+    val at = f.at ?: return null
+    if (at !in text.indices || text.codePointCount(0, at) < PUBLISH_PREVIEW_CHARS - FINDING_CONTEXT_BEFORE) return null
+    var start = maxOf(0, at - FINDING_CONTEXT_BEFORE)
+    if (start > 0 && Character.isLowSurrogate(text[start])) start--
+    var end = minOf(text.length, at + FINDING_CONTEXT_AFTER)
+    if (end < text.length && Character.isLowSurrogate(text[end])) end++
+    val shown = ApprovalText.flatten(text.substring(start, end), FINDING_CONTEXT_BEFORE + FINDING_CONTEXT_AFTER).removeSuffix("…")
+    return (if (start > 0) "…" else "") + shown + (if (end < text.length) "…" else "")
+}
+
+private const val FINDING_CONTEXT_BEFORE = 80
+private const val FINDING_CONTEXT_AFTER = 160
 
 /** A finding's redacted value as the card shows it, its count in the app's language. */
 @Composable

@@ -256,6 +256,8 @@ internal class AgentChats(
         forgetTools(sessionId)
         try {
             dao.deleteSession(sessionId)
+            // Only once the chat is gone: a chat that stays keeps its receipts.
+            forgetPublications(sessionId)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting a chat failed (${e.javaClass.simpleName})")
@@ -267,9 +269,9 @@ internal class AgentChats(
     suspend fun deleteAll(): Boolean = withContext(NonCancellable) {
         lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
         for (id in registries.keys.toList()) forgetTools(id)
-        forgetPublications(null)
         try {
             dao.deleteAll()
+            forgetPublications(null)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")
@@ -283,7 +285,6 @@ internal class AgentChats(
         AgentApprovals.withdrawSession(sessionId)
         AgentTransfers.withdrawSession(sessionId)
         AgentTabs.releaseChat(sessionId)
-        forgetPublications(sessionId)
     }
 
     companion object {
