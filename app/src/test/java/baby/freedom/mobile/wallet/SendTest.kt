@@ -1304,6 +1304,7 @@ class SendTest {
         chain.on["eth_sendRawTransaction"] = { """"error":{"code":-32000,"message":"insufficient funds for gas * price + value"}""" }
         val refused = s.submitAndAwaitBroadcast(s.prepare(call()), signer()) as WalletSender.Broadcast.Failed
         assertFalse(refused.mayHaveGone)
+        assertNull("a definite refusal names no hash", refused.hash)
         s.acknowledge()
 
         val old = WalletSender(chain.rpc(), scope, clock = { System.currentTimeMillis() + WalletSender.QUOTE_TTL_MS }, pollMs = 10, confirmTimeoutMs = 300)
@@ -1338,8 +1339,11 @@ class SendTest {
         val s = sender(chain, journal = FileSendJournal(journalFile()))
         chain.on["eth_sendRawTransaction"] = { throw IOException("timed out") }
         chain.on["eth_getTransactionReceipt"] = { throw IOException("timed out") }
-        val failed = s.submitAndAwaitBroadcast(s.prepare(call(data = "0xa9059cbb00")), signer()) as WalletSender.Broadcast.Failed
+        val quote = s.prepare(call(data = "0xa9059cbb00"))
+        val failed = s.submitAndAwaitBroadcast(quote, signer()) as WalletSender.Broadcast.Failed
         assertTrue(failed.mayHaveGone)
+        // The bytes a node may have taken (Try again resends them): the caller can look for their receipt.
+        assertEquals(quote.tx.sign(key.copyOf(), from.address).hash, failed.hash)
         val again = sender(chain, journal = FileSendJournal(journalFile()))
         val restored = again.status.value?.quote?.request?.dapp!!
         assertEquals("a9059cbb00", restored.data.toHex())

@@ -1768,4 +1768,5 @@ internal fun dappRequester(d: DappCall): String = d.origin?.let(::permissionOrig
         Strings.get(if (it.activates) R.string.send_requester_safe_activation else R.string.send_requester_safe_owners, it.name)
     }
     ?: d.swarm?.let { Strings.get(R.string.send_requester_swarm_node) }
+    ?: d.name?.let { Strings.get(R.string.send_requester_name, it.name) }
     ?: Strings.get(R.string.send_requester_pairing_code)

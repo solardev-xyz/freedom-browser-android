@@ -208,6 +208,10 @@ Normal tabs offer WebAuthn (#524): `Passkeys.kt` sets a tab's WebView to android
 - **Private tabs** keep it off: a passkey made there would stay in the passkey manager after the session.
 - **Setup** (*Settings → Privacy & security → Passkeys*, which also opens Android's passkey-manager page): pick a passkey manager, then add Freedom to its trusted browsers (KeePassDX: *Settings → Form filling → Passkeys settings → Privileged apps*; Bitwarden offers *Trust*). A manager that doesn't trust Freedom signs its own app origin instead of the site's, so registering seems to work and signing in then fails. Google Password Manager trusts only browsers on Google's allowlist, which Freedom isn't on yet.
 
+## Name registration
+
+**Wallet → Names → Register a name** (#579, a port of desktop's `src/main/domains/`) registers and renews `.eth`, `.wei` and `.gwei` names on Ethereum mainnet, no AI needed; the agent's `domain_*` tools are to reuse it. **Check** reads availability, owner, expiry and the price at one block; every read a write is built on must be verified (a quorum agreeing, or your own RPC unopposed), so a lone server can't say a taken name is free. Registration is commit/reveal: the secret is drawn, sealed with a Keystore key and saved to `no_backup/names/operations.json` (fsynced) before the commit can be reviewed, so the reveal survives a restart. Step 2 can go once the commitment is old enough by the chain's block time (`.eth`: the controller's `minCommitmentAge`; NameNFT: 60 s) and before it runs out (24 h). `.wei`/`.gwei` add one year per transaction, `.eth` 1 to 10 years. Each step is a wallet transaction through the usual review and unlock; its call data, value and contract are rebuilt from the chain at Confirm (pinned addresses, code hashes rechecked, controller authority, simulation from the paying account), and anything that changed sends nothing, except a price that only fell: the step then goes at the value you reviewed (same call data and contract), since the contract refunds what's over the price. Payments send the price plus 2%, which the contracts refund in the same transaction. An operation saved mid-dispatch reads back as *may have gone out*: it's never sent again, only settled from the chain (the receipt of the signed bytes when the wallet had handed them to a node, the commitment there, the name owned, the expiry moved). An outcome the phone couldn't save is still followed while the app stays open, and written with the next save that lands. **Remove wallet** forgets the operations: emptied, or deleted when the disk can't take a write; if neither works the page says so, and it's tried again whenever the wallet page opens with no wallet. Setting records (website, address) isn't here yet.
+
 ## Project layout
 
 ```
@@ -218,6 +222,7 @@ freedom-browser-android/
 │       ├── IncomingLinkActivity.kt # links, shares, searches from other apps → MainActivity
 │       ├── browser/              # tabs, address bar, WebView, resolver
 │       ├── ens/                  # Keccak256, ENS contenthash, Universal Resolver
+│       ├── names/                # .eth/.wei/.gwei registration and renewal (commit/reveal, journal, screen)
 │       └── node/NodeService.kt   # foreground service owning the Swarm node
 ├── lint-checks/                  # HardcodedUiText lint check (docs/localisation.md)
 ├── swarmnode/                    # Kotlin wrapper around the embedded nodes

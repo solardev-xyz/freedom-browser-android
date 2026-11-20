@@ -100,6 +100,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
+import baby.freedom.mobile.names.NameException
+import baby.freedom.mobile.names.NameRegistrar
+import baby.freedom.mobile.names.NameRegistrationScreen
+import baby.freedom.mobile.names.NamesEntrySection
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
@@ -767,6 +771,8 @@ fun WalletScreen(
     val x402Allowances by x402.allowances.collectAsState(initial = emptyList())
     val x402Payments by x402.history.collectAsState(initial = emptyList())
     var x402HistoryOpen by remember { mutableStateOf(false) }
+    // Register and renew .eth/.wei/.gwei names (#579).
+    var namesOpen by remember { mutableStateOf(false) }
     // The connected site whose page is open (#111), by origin, so it follows the stored grant.
     var openSite by remember { mutableStateOf<String?>(null) }
     // Undo for Disconnect, Revoke and Remove rule (#423): shown on the list and on a site's page.
@@ -940,6 +946,17 @@ fun WalletScreen(
             sender.discard()
             history.wipe()
             incoming.wipe()
+            // Name operations left by a Remove wallet whose wipe didn't reach the disk
+            // (still owed, or read back at the next start): none can belong to anyone now (#579).
+            val names = NameRegistrar.get(context)
+            names.awaitLoaded()
+            if (names.eraseOwed || names.operations.value.orEmpty().isNotEmpty()) {
+                try {
+                    names.wipe()
+                } catch (e: NameException) {
+                    android.util.Log.w("WalletScreen", "still couldn't forget the name operations (${e.code})")
+                }
+            }
         }
     }
 
@@ -1151,6 +1168,11 @@ fun WalletScreen(
 
     if (x402HistoryOpen) {
         X402HistoryPage(x402Payments, allChains.orEmpty(), onBack = { x402HistoryOpen = false })
+        return
+    }
+
+    if (namesOpen) {
+        NameRegistrationScreen(onOpenUrl = onOpenUrl, onDismiss = { namesOpen = false })
         return
     }
 
@@ -1574,6 +1596,13 @@ fun WalletScreen(
                         },
                     )
                 }
+                // Register and renew .eth/.wei/.gwei names (#579).
+                item("names") {
+                    NamesEntrySection(enabled = !busy) {
+                        error = null
+                        namesOpen = true
+                    }
+                }
             }
         }
     }
@@ -1677,6 +1706,7 @@ fun WalletScreen(
                 confirmRemove = false
                 run(Strings.get(R.string.wallet_action_remove)) {
                     var backupLeft: String? = null
+                    var namesLeft: String? = null
                     var backupKept: PhraseBackup.DeleteIfOf? = null
                     // With backup on, only this wallet's phrase is ever stored, and an
                     // unattributed entry is deleted as "that backup, whichever wallet it's
@@ -1719,16 +1749,25 @@ fun WalletScreen(
                             EthereumProviders.walletRemoved(context)
                             // Its site allowances and payment history (#140).
                             x402.clear()
+                            // The names its accounts were registering or renewing (#579).
+                            try {
+                                NameRegistrar.get(context).wipe()
+                            } catch (e: NameException) {
+                                // The wallet goes regardless (as with its Google backup); the page says what stayed.
+                                android.util.Log.w("WalletScreen", "couldn't forget the name operations (${e.code})")
+                                namesLeft = Strings.get(R.string.wallet_removed_names_not_deleted)
+                            }
                         },
                     )
                     // With the backup: the entry's lock is taken before the vault's, so a
                     // reconcile stuck on Play services doesn't hold up unlocking meanwhile
                     // (#244 R4-F4).
                     if (withBackup) phraseBackup.exclusive { removeWith(this) } else removeWith(null)
-                    backupLeft?.let {
-                        error = Strings.get(R.string.wallet_removed_backup_not_deleted, it)
-                    }
-                    backupKeptMessage(backupKept)?.let { error = it }
+                    error = listOfNotNull(
+                        backupLeft?.let { Strings.get(R.string.wallet_removed_backup_not_deleted, it) },
+                        backupKeptMessage(backupKept),
+                        namesLeft,
+                    ).joinToString("\n\n").ifEmpty { error }
                     backupCheck++
                 }
             },

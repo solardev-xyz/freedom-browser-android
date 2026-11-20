@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Registering and renewing .eth, .wei and .gwei names (#579):
+  names/NameRegistrationScreen.kt and the errors names/* hands it.
+-->
+<resources>
+    <!-- names/NameContracts.kt, NameChain.kt, NameRegistrar.kt -->
+    <string name="namereg_error_full_name">Enter a full .eth, .wei or .gwei name, like alice.eth.</string>
+    <string name="namereg_error_not_valid">That name isn\'t valid under the naming rules. Check the spelling.</string>
+    <string name="namereg_error_legacy_unicode">This name is written in a form its registry keeps as typed, and Freedom won\'t change its spelling. Use the registry\'s own app for it.</string>
+    <string name="namereg_error_top_level_only">Only names with one label before the ending, like alice.eth, can be registered or renewed here.</string>
+    <string name="namereg_error_term">.wei and .gwei names are registered and renewed one year at a time; .eth names for 1 to 10 years.</string>
+    <string name="namereg_error_chain_unreachable">Couldn\'t reach Ethereum. Check your connection and try again.</string>
+    <!-- %1$d: how many RPC servers answered -->
+    <string name="namereg_error_unverified">Freedom couldn\'t confirm this with more than one Ethereum server (%1$d answered), so it won\'t act on it. Try again in a moment, or add your own RPC in Settings → Chains → Ethereum.</string>
+    <string name="namereg_error_unreadable">An Ethereum server gave an answer Freedom couldn\'t read. Try again.</string>
+    <string name="namereg_error_contract_changed">A name contract isn\'t the version Freedom checked. Nothing was sent. Use the registry\'s own app until Freedom supports the new version.</string>
+    <string name="namereg_error_controller_changed">The registry\'s controller changed. Nothing was sent.</string>
+    <string name="namereg_error_not_accepted">The registry doesn\'t accept this name or term.</string>
+    <string name="namereg_error_no_longer_available">That name isn\'t available any more.</string>
+    <string name="namereg_error_cannot_renew">This name can\'t be renewed in its current state.</string>
+    <string name="namereg_error_changed">The name, its owner or its expiry changed since this was prepared. Check it again.</string>
+    <string name="namereg_error_quote_changed">The price changed while you were reviewing. Nothing was sent. Review it again.</string>
+    <!-- %1$s: what the step sends, in ETH; %2$s: what the account holds -->
+    <string name="namereg_error_funds">This sends %1$s plus the network fee, and the account holds %2$s. Add ETH to it, then review again.</string>
+    <string name="namereg_error_would_revert">The contract would refuse this transaction now, so nothing was sent. Check the name again.</string>
+    <string name="namereg_error_commitment_mismatch">The saved registration doesn\'t match its commitment. Nothing was sent.</string>
+    <string name="namereg_error_secret_lost">The saved registration secret can\'t be read on this phone any more. The commit can\'t be completed; dismiss it and start again.</string>
+    <string name="namereg_error_secure_storage">Registering needs the phone\'s secure key storage, which isn\'t working. Renewals still work.</string>
+    <string name="namereg_error_wipe">Couldn\'t delete the name registrations saved on this phone.</string>
+    <string name="namereg_error_save">Couldn\'t save on this phone. Nothing was sent. Check the free space and try again.</string>
+    <string name="namereg_error_gone">That registration isn\'t on this phone any more.</string>
+    <string name="namereg_error_not_ready">This step isn\'t ready to send yet.</string>
+    <!-- %1$s: the name, %2$s: a short account address, %3$s: years like "1 year" -->
+    <string name="namereg_error_open_registration">%1$s already has an open registration, paid from %2$s for %3$s. Finish or dismiss it below to start a different one.</string>
+    <!-- %1$s: the name, %2$s: a short account address, %3$s: years like "1 year" -->
+    <string name="namereg_error_open_renewal">%1$s already has an open renewal, paid from %2$s for %3$s. Finish or dismiss it below to start a different one.</string>
+    <!-- %1$s: the name, %2$s: where its open operation stands, e.g. "Commit confirmed. Step 2 can be sent in about 45 s." -->
+    <string name="namereg_open_registration_continues">%1$s already has this registration open, so nothing new was started. %2$s It carries on below.</string>
+    <!-- %1$s: the name, %2$s: where its open operation stands -->
+    <string name="namereg_open_renewal_continues">%1$s already has this renewal open, so nothing new was started. %2$s It carries on below.</string>
+    <string name="namereg_error_busy">This is being sent right now. Wait for it to finish.</string>
+    <string name="namereg_error_inconsistent">This saved registration doesn\'t match its name. Dismiss it and start again.</string>
+    <string name="namereg_send_busy">Another wallet transaction is still going out. Wait for it, then review this again.</string>
+    <string name="namereg_send_stale">The network fee was priced too long ago. Nothing was sent. Review it again.</string>
+    <string name="namereg_send_rejected">You declined it. Nothing was sent.</string>
+    <string name="namereg_state_dispatch_unknown">The wallet may have sent this. Freedom won\'t send it again: it checks the chain for the result instead. Look in the wallet\'s history too.</string>
+    <string name="namereg_state_verification_needed">The transaction went through, but Freedom couldn\'t see its result on chain yet. It won\'t send it again; Check again in a moment.</string>
+    <string name="namereg_state_commitment_missing">The commit isn\'t on the chain Freedom reads yet. Check again in a moment; don\'t send another commit.</string>
+    <string name="namereg_state_commitment_expired">The commit is too old to register with now. A new registration would need a new commit and its network fee.</string>
+    <string name="namereg_state_reverted">The transaction failed on chain. Its network fee was spent; nothing else was paid.</string>
+    <string name="namereg_state_reveal_reverted">The registration failed on chain: its network fee was spent, but the name wasn\'t bought and its price wasn\'t paid. The commit is still valid, so you can review step 2 again.</string>
+
+    <!-- names/NameRegistrationScreen.kt -->
+    <string name="namereg_title">Register a name</string>
+    <string name="namereg_section">Names</string>
+    <string name="namereg_entry">Register a name</string>
+    <string name="namereg_entry_subtitle">.eth, .wei and .gwei names on Ethereum</string>
+    <string name="namereg_intro">Check a .eth, .wei or .gwei name, then register it to this wallet or renew it. Each step is a wallet transaction you review first.</string>
+    <string name="namereg_name_label">Name</string>
+    <string name="namereg_name_hint">alice.eth</string>
+    <string name="namereg_check">Check</string>
+    <string name="namereg_checking">Checking on Ethereum…</string>
+    <string name="namereg_term_label">Term</string>
+    <!-- A term choice. %1$d: years -->
+    <plurals name="namereg_years">
+        <item quantity="one">%1$d year</item>
+        <item quantity="other">%1$d years</item>
+    </plurals>
+    <string name="namereg_term_one_year_only">.wei and .gwei names are one year per transaction.</string>
+    <string name="namereg_fewer_years">Fewer years</string>
+    <string name="namereg_more_years">More years</string>
+    <!-- %1$s: the name -->
+    <string name="namereg_available">%1$s is available</string>
+    <!-- %1$s: the name -->
+    <string name="namereg_taken">%1$s is registered</string>
+    <!-- %1$s: the name -->
+    <string name="namereg_unavailable">%1$s can\'t be registered</string>
+    <!-- %1$s: price in ETH, %2$s: term like "1 year" -->
+    <string name="namereg_price_for">%1$s for %2$s, plus network fees</string>
+    <!-- %1$s: date -->
+    <string name="namereg_expires">Expires %1$s</string>
+    <!-- %1$s: date -->
+    <string name="namereg_expired_on">Expired %1$s; it can still be renewed by anyone during its grace period.</string>
+    <string name="namereg_owner">Owner</string>
+    <string name="namereg_owner_you">Owner: this wallet</string>
+    <!-- %1$s: price in ETH, %2$s: term -->
+    <string name="namereg_renew_price">Renewing for %2$s costs %1$s, plus network fees.</string>
+    <string name="namereg_register">Register</string>
+    <string name="namereg_renew">Renew</string>
+    <string name="namereg_set_up_wallet">Set up the wallet first to register or renew a name.</string>
+    <string name="namereg_steps_note">Registering takes two transactions: a commit, then, about a minute later, the registration itself. The name isn\'t yours until step 2 is confirmed.</string>
+    <string name="namereg_your_names">In progress</string>
+    <!-- %1$s: the name, %2$s: register or renew -->
+    <string name="namereg_operation_title">%1$s · %2$s</string>
+    <string name="namereg_intent_register">register</string>
+    <string name="namereg_intent_renew">renew</string>
+    <string name="namereg_op_ready_commit">Step 1 of 2: ready to commit.</string>
+    <string name="namereg_op_ready_reveal">Step 2 of 2: ready to register.</string>
+    <string name="namereg_op_ready_renew">Ready to renew.</string>
+    <string name="namereg_op_dispatching">Going out…</string>
+    <string name="namereg_op_pending">Waiting for the transaction to be confirmed…</string>
+    <!-- %1$s: approximate time left, like "45 s" -->
+    <string name="namereg_op_waiting">Commit confirmed. Step 2 can be sent in about %1$s.</string>
+    <!-- A short wait. %1$d: seconds -->
+    <string name="namereg_seconds">%1$d s</string>
+    <!-- A short wait. %1$d: minutes -->
+    <string name="namereg_minutes">%1$d min</string>
+    <string name="namereg_op_waiting_soon">Commit confirmed. Step 2 can be sent in a moment.</string>
+    <string name="namereg_op_completed_register">Registered to this wallet.</string>
+    <string name="namereg_op_completed_renew">Renewed.</string>
+    <string name="namereg_op_stale">Out of date: check the name again.</string>
+    <!-- %1$s: date and time -->
+    <string name="namereg_op_reveal_by">Send step 2 before %1$s, or the commit runs out.</string>
+    <!-- %1$s: account name, %2$s: address -->
+    <string name="namereg_op_account">For %1$s (%2$s)</string>
+    <string name="namereg_op_account_missing">For an account that isn\'t in this wallet any more</string>
+    <string name="namereg_review_step">Review</string>
+    <string name="namereg_check_again">Check again</string>
+    <string name="namereg_dismiss">Dismiss</string>
+    <!-- %1$s: the name -->
+    <string name="namereg_dismiss_title">Dismiss %1$s?</string>
+    <string name="namereg_dismiss_paid_commit">Its commit is already paid for. Without it, Freedom can\'t send step 2 and the name isn\'t registered.</string>
+    <string name="namereg_dismiss_unknown">Freedom stops checking whether it went through. Look in the wallet\'s history before trying again.</string>
+    <string name="namereg_dismiss_plain">It\'s removed from this list.</string>
+    <string name="namereg_cancel">Cancel</string>
+
+    <!-- The review -->
+    <!-- %1$s: the name -->
+    <string name="namereg_review_commit_headline">Commit to registering %1$s</string>
+    <!-- %1$s: the name -->
+    <string name="namereg_review_reveal_headline">Register %1$s</string>
+    <!-- %1$s: the name -->
+    <string name="namereg_review_renew_headline">Renew %1$s</string>
+    <string name="namereg_review_step_label">Step</string>
+    <string name="namereg_review_step_commit">1 of 2: commit. It costs network fees but doesn\'t reserve or buy the name. Registering needs a second approval.</string>
+    <string name="namereg_review_step_reveal">2 of 2: register and pay for the name.</string>
+    <string name="namereg_review_name">Name</string>
+    <string name="namereg_review_term">Term</string>
+    <!-- %1$s: years like "1 year", %2$d: days -->
+    <string name="namereg_review_term_value">%1$s (%2$d days)</string>
+    <string name="namereg_review_price">Price</string>
+    <!-- %1$s: price in ETH -->
+    <string name="namereg_review_price_at_step2">%1$s, paid at step 2, plus network fees</string>
+    <!-- %1$s: price in ETH -->
+    <string name="namereg_review_price_value">%1$s, plus network fees</string>
+    <string name="namereg_review_price_change">Price change</string>
+    <!-- %1$s: price at commit, %2$s: price now -->
+    <string name="namereg_review_price_change_value">Quoted %1$s at commit, now %2$s</string>
+    <string name="namereg_review_buffer">Price buffer</string>
+    <!-- %1$s: amount sent, %2$d: percent -->
+    <string name="namereg_review_buffer_value">Sends %1$s: the price plus %2$d%%, in case the price changes before the transaction is mined. The contract refunds the unused amount to this wallet in the same transaction.</string>
+    <string name="namereg_review_ownership">Ownership</string>
+    <string name="namereg_review_ownership_renew">Renewing extends this exact name. It doesn\'t transfer it to the paying wallet.</string>
+    <string name="namereg_review_owner_register">Registered to</string>
+    <string name="namereg_review_paid_by">Paid by</string>
+    <string name="namereg_review_network">Network</string>
+    <string name="namereg_review_contract">Contract</string>
+    <string name="namereg_review_nonce">Nonce</string>
+    <string name="namereg_review_network_fee">Network fee</string>
+    <!-- %1$s: fee -->
+    <string name="namereg_review_fee_up_to">up to %1$s</string>
+    <string name="namereg_review_amount">Sends</string>
+    <string name="namereg_confirm">Confirm and send</string>
+    <string name="namereg_review_mismatch">This review no longer matches the transaction. Check the name again.</string>
+    <string name="namereg_action_price">price the transaction</string>
+    <string name="namereg_sent_commit">Commit sent. Freedom checks for it and tells you when step 2 can go.</string>
+    <string name="namereg_sent">Sent. Freedom checks for its confirmation.</string>
+    <!-- Added after the outcome of a send when the phone couldn't save it; the operation is followed while the app stays open. -->
+    <string name="namereg_outcome_unsaved">This phone couldn\'t save that outcome. Freedom keeps following it while the app is open, but after a restart it may show as possibly sent. Check the free space.</string>
+</resources>
