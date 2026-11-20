@@ -191,17 +191,15 @@ private fun ChatView(
         ?: choices.firstOrNull()?.ref
 
     if (choices.isEmpty() && turns.isEmpty()) {
-        Column(
-            Modifier.fillMaxSize().padding(24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            EmptyState(
-                icon = Icons.Outlined.AutoAwesome,
-                title = stringResource(R.string.agent_no_provider_title),
-                hint = stringResource(R.string.agent_no_provider_hint),
-            )
-            OutlinedButton(onClick = onOpenSettings, modifier = Modifier.heightIn(min = 48.dp)) {
+        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                EmptyState(
+                    icon = Icons.Outlined.AutoAwesome,
+                    title = stringResource(R.string.agent_no_provider_title),
+                    hint = stringResource(R.string.agent_no_provider_hint),
+                )
+            }
+            OutlinedButton(onClick = onOpenSettings, modifier = Modifier.padding(bottom = 32.dp).heightIn(min = 48.dp)) {
                 Text(stringResource(R.string.agent_open_settings))
             }
         }
