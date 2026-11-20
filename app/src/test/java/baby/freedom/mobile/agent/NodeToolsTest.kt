@@ -216,7 +216,7 @@ class NodeToolsTest {
         parseError(request(method = "GET") { it.put("body", "x") })
         parseError(request(method = "TRACE"))
         parseError(request(service = "bee"))
-        for (h in listOf("Authorization", "cookie", "Host", "origin", "referer", "sec-fetch-mode", "proxy-x", "Connection", "Transfer-Encoding", "content-length", "expect", "upgrade", "bad name")) {
+        for (h in listOf("Authorization", "cookie", "Host", "origin", "referer", "sec-fetch-mode", "proxy-x", "Connection", "Transfer-Encoding", "content-length", "expect", "upgrade", "Accept-Encoding", "bad name")) {
             parseError(request(method = "POST") { it.put("headers", JSONObject().put(h, "1")) })
         }
         parseError(request(method = "POST") { it.put("headers", JSONObject().put("x-a", "1\r\nHost: evil")) })
@@ -622,6 +622,27 @@ class NodeToolsTest {
             assertNull(redirect.headers["set-cookie"])
             assertEquals(3, server.requestCount)
         }
+    }
+
+    @Test
+    fun `the request always asks for identity and closes, whatever headers came with it`() {
+        okhttp3.mockwebserver.MockWebServer().use { server ->
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setBody("ok"))
+            // Past the parser (which refuses both), the transport still sets its own last (R2-M1).
+            val args = NodeRequestArgs("ant", "http", "GET", "/bzz/x", mapOf("accept-encoding" to "gzip", "connection" to "keep-alive"))
+            assertEquals("ok", NodeHttp.send(server.url("/").toString(), args).body)
+            val sent = server.takeRequest()
+            assertEquals(listOf("identity"), sent.headers.values("Accept-Encoding"))
+            assertEquals(listOf("close"), sent.headers.values("Connection"))
+        }
+    }
+
+    @Test
+    fun `the diagnostics sheet rounds the byte cap up, never down`() {
+        assertEquals(1, diagnosticsKb(1024))
+        assertEquals(2, diagnosticsKb(1025))
+        assertEquals(2, diagnosticsKb(2047))
+        assertEquals(64, diagnosticsKb(65536))
     }
 
     // ---- node_lifecycle -------------------------------------------------

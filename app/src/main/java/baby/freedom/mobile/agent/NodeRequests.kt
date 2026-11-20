@@ -44,10 +44,13 @@ internal data class NodeRequestArgs(
          * Android's own: what frames the request, which the platform's HTTP
          * stack sets itself (desktop's fetch refuses these too, as forbidden
          * request headers), and anything that would keep a connection open
-         * to be used again (every request here gets a fresh one).
+         * to be used again (every request here gets a fresh one), and
+         * `accept-encoding`: the request always asks for `identity`, so the
+         * body read back is the bytes the node sent, not a compressed stream
+         * read as text.
          */
         private val FRAMING = setOf(
-            "connection", "content-length", "expect", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",
+            "accept-encoding", "connection", "content-length", "expect", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",
         )
         private val KEYS = setOf("service", "transport", "request")
         private val REQUEST_KEYS = setOf("method", "path", "headers", "body")
@@ -294,9 +297,10 @@ internal object NodeHttp {
         val request = okhttp3.Request.Builder()
             .url(url)
             .method(args.method, body)
+            .apply { args.headers.forEach { (k, v) -> header(k, v) } }
+            // Set last, so no header the caller passed can replace them.
             .header("Connection", "close")
             .header("Accept-Encoding", "identity")
-            .apply { args.headers.forEach { (k, v) -> header(k, v) } }
             .build()
         val call = client.newCall(request)
         onCall(call)

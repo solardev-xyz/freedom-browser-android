@@ -236,7 +236,7 @@ private fun NodeAskBody(ask: NodeAsk) {
             )
             Field(
                 stringResource(R.string.agent_node_diagnostics_amount),
-                stringResource(R.string.agent_node_diagnostics_amount_value, kind.maxLines, kind.maxBytes / 1024),
+                stringResource(R.string.agent_node_diagnostics_amount_value, kind.maxLines, diagnosticsKb(kind.maxBytes)),
             )
             Note(stringResource(R.string.agent_node_diagnostics_note))
         }
@@ -300,3 +300,6 @@ private fun Field(label: String, value: String, mono: Boolean = false) {
         Text(value, style = MaterialTheme.typography.bodyMedium, fontFamily = if (mono) FontFamily.Monospace else null)
     }
 }
+
+/** [maxBytes] in KB, rounded up: the sheet never names less log than can go. */
+internal fun diagnosticsKb(maxBytes: Int): Int = (maxBytes + 1023) / 1024
