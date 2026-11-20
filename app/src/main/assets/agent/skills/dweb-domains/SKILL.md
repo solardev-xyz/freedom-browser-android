@@ -36,9 +36,10 @@ Explain unsupported operations rather than inventing raw contract calls.
 Use the verified website publicationId returned by swarm_publish or
 swarm_publication_status in this conversation. A batch ID, local file hash,
 chunk hash or arbitrary reference is not a verified website publication.
-Freedom for Android cannot publish to Swarm from the agent yet, so no
-publicationId exists here: explain that set_website is not available on this
-phone yet instead of asking for a reference.
+On Freedom for Android, swarm_publish publishes inline text only, never a
+website with an index document, so no website publicationId exists here: a
+text publicationId is not a website. Explain that set_website is not
+available on this phone yet instead of asking for a reference.
 Prepare set_website, inspect its old/new record, then execute its opaque ID.
 Freedom encodes the Swarm contenthash; never supply raw ABI/calldata or a key.
 Only the requested record changes. Never replace a custom resolver as a shortcut.

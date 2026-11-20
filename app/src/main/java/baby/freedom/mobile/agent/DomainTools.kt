@@ -48,10 +48,11 @@ internal data class DomainPublication(
 
 /**
  * Where `domain_prepare`'s `set_website` finds a chat's publications.
- * Desktop's come from `swarm_publish`, which Android doesn't have yet
- * (https://github.com/solardev-xyz/freedom-browser-android/issues/597):
- * until it lands this knows none, so no name is pointed at anything — a
- * raw reference from the model is never taken instead.
+ * Desktop's come from `swarm_publish`'s website publications. Android's
+ * `swarm_publish` (#597) publishes inline text only, with no index
+ * document and no retrieval verification, so none of its publications is
+ * a website: this knows none, and no name is pointed at anything — a text
+ * publication or a raw reference from the model is never taken instead.
  */
 internal fun interface DomainPublications {
     suspend fun find(publicationId: String, sessionId: String): DomainPublication?
@@ -225,11 +226,20 @@ internal class DomainToolset(
             val account = account(w, walletIndex)
             val registrar = b.registrar
             registrar.awaitLoaded()
-            // Unresolved work on this name comes back instead of a second operation (desktop's rule), whatever it was for.
+            // Unresolved work on this name comes back instead of a second operation (desktop's rule), whatever it was for —
+            // but only this chat's own: one the user started on the Names page, or another chat did, is never handed over.
             registrar.operations.value.orEmpty().firstOrNull { it.name == parsed.name && !it.state.terminal }?.let { open ->
+                if (open.chat != sessionId) {
+                    throw policy(
+                        "This name already has an open operation started outside this conversation, so nothing new was prepared. " +
+                            "Ask the user to finish or dismiss it on the wallet's Names page before preparing another.",
+                    )
+                }
                 return public(open).put(
                     "note",
-                    if (open.intent == intent && (record == null || open.record == record)) {
+                    if (open.intent == intent && open.account.equals(account.address, ignoreCase = true) &&
+                        (record == null || open.record == record)
+                    ) {
                         "This name already has this operation open, so nothing new was prepared. Continue it with its operationId."
                     } else {
                         "This name already has an open ${intentName(open.intent)} operation, so nothing new was prepared. " +
@@ -261,8 +271,9 @@ internal class DomainToolset(
         private suspend fun website(id: String): DomainPublication {
             val p = publications.find(id, sessionId)
                 ?: throw unavailable(
-                    "No verified Swarm website publication $id exists in this conversation. Freedom for Android can't publish " +
-                        "to Swarm from the agent yet, so a name can't be pointed at a website here; a raw reference is not accepted.",
+                    "No verified Swarm website publication $id exists in this conversation. On Freedom for Android, swarm_publish " +
+                        "publishes inline text only, never a website, so a name can't be pointed at a website here; a text " +
+                        "publication or a raw reference is not accepted.",
                 )
             if (!p.public) throw policy("A private draft link cannot be connected to a name. Publish it publicly first; that is its own approval.")
             if (!p.completed || !p.verified || !p.indexDocument) throw invalid("Choose a completed, retrieval-verified Swarm website publication ID.")
@@ -277,7 +288,7 @@ internal class DomainToolset(
             val b = backend() ?: throw unavailable(NO_BACKEND)
             val registrar = b.registrar
             registrar.awaitLoaded()
-            var op = registrar.get(id) ?: throw invalid(GONE)
+            var op = own(registrar, id)
             if (op.declined && op.state == State.READY) {
                 if (!resume) {
                     return public(op).put(
@@ -395,10 +406,18 @@ internal class DomainToolset(
                     },
                 )
             }
-            if (registrar.get(id) == null) throw invalid(GONE)
+            own(registrar, id)
             return status(registrar, id, wait)
         }
     }
+
+    /**
+     * [id] if this chat prepared it. Another chat's operation, or one the
+     * user started on the Names page, reads as not there: a chat never
+     * runs, declines or watches work it didn't start.
+     */
+    private fun own(registrar: NameRegistrar, id: String) =
+        registrar.get(id)?.takeIf { it.chat == sessionId } ?: throw invalid(GONE)
 
     /**
      * [out] as the model reads it, or — past [MAX_OUTPUT] characters, where

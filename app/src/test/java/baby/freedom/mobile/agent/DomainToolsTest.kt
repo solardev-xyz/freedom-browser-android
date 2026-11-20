@@ -6,6 +6,7 @@ import baby.freedom.mobile.ens.EnsAddressResult
 import baby.freedom.mobile.names.FakeNameChain
 import baby.freedom.mobile.names.NameContracts
 import baby.freedom.mobile.names.NameJournal
+import baby.freedom.mobile.names.NameOperation.Intent
 import baby.freedom.mobile.names.NameOperation.State
 import baby.freedom.mobile.names.NameOperation.Step
 import baby.freedom.mobile.names.NameRegistrar
@@ -357,6 +358,38 @@ class DomainToolsTest {
         val id = mine.getJSONObject(0).getString("operationId")
         assertEquals("INVALID_ARGUMENT", code(run("domain_operation_status", """{"operationId":"$id","transactionHash":"$hash1"}""")))
         assertEquals("INVALID_ARGUMENT", code(run("domain_operation_status", """{"operationId":"domain_${"f".repeat(24)}"}""")))
+    }
+
+    @Test
+    fun `an operation the Names page or another chat started is never handed over, run or watched`() {
+        // The user's own registration on the Names page (no chat).
+        val page = runBlocking {
+            registrar.start(registrar.check("fresh.wei", NameContracts.YEAR), Intent.REGISTER, me.address, me.index)
+        }
+        val pageId = "domain_" + page.id.removePrefix("name_")
+        val prep = run("domain_prepare", """{"name":"fresh.wei","intent":"register"}""")
+        assertEquals("POLICY_DENIED", code(prep))
+        assertFalse(prep.output, prep.output.contains(page.id.removePrefix("name_")))
+        assertEquals("INVALID_ARGUMENT", code(run("domain_execute", """{"operationId":"$pageId"}""")))
+        assertEquals("INVALID_ARGUMENT", code(run("domain_execute", """{"operationId":"$pageId","resume":true}""")))
+        assertEquals("INVALID_ARGUMENT", code(run("domain_operation_status", """{"operationId":"$pageId"}""")))
+        assertTrue(asked.isEmpty())
+        assertTrue(wallet.prepared.isEmpty())
+        assertFalse(registrar.get(page.id)!!.declined)
+
+        // Another chat's operation reads the same way, and stays that chat's own.
+        val other = json(run("domain_prepare", """{"name":"other.gwei","intent":"register"}""", session = "chat-2")).getString("operationId")
+        assertEquals("POLICY_DENIED", code(run("domain_prepare", """{"name":"other.gwei","intent":"register"}""")))
+        assertEquals("INVALID_ARGUMENT", code(run("domain_execute", """{"operationId":"$other"}""")))
+        assertEquals("INVALID_ARGUMENT", code(run("domain_operation_status", """{"operationId":"$other"}""")))
+        assertTrue(asked.isEmpty())
+        assertEquals("ready", json(run("domain_operation_status", """{"operationId":"$other"}""", session = "chat-2")).getString("state"))
+
+        // This chat's own operation, asked again for a different account, isn't called the same operation.
+        val mine = json(run("domain_prepare", """{"name":"mine.wei","intent":"register"}""")).getString("operationId")
+        val again = json(run("domain_prepare", """{"name":"mine.wei","intent":"register","walletIndex":1}"""))
+        assertEquals(mine, again.getString("operationId"))
+        assertTrue(again.getString("note").contains("open register operation"))
     }
 
     @Test
