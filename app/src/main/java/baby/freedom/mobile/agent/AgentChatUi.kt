@@ -253,8 +253,9 @@ private fun ChatView(
         dictation?.status ?: MutableStateFlow(DictationStatus.Idle)
     }.collectAsState()
     val approval by AgentApprovals.shown.collectAsState()
-    // An approval card or another page over the chat: no dictating into the hidden draft.
-    val hidden = approval != null || covered
+    val transfer by AgentTransfers.shown.collectAsState()
+    // An approval card, a transfer sheet (#596) or another page over the chat: no dictating into the hidden draft.
+    val hidden = approval != null || transfer != null || covered
     val hiddenNow by rememberUpdatedState(hidden)
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {

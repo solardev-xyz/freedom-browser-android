@@ -20,7 +20,6 @@ import baby.freedom.mobile.wallet.WalletSender
 import java.math.BigInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,7 +27,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
@@ -375,9 +373,9 @@ internal class WalletTransferTool(
             }
             val confirmed = quote.copy(request = quote.request.copy(toNameAccepted = answer.acceptedUnverified))
             recheckName(w, confirmed)
-            // From here the send is the wallet's own and runs to its end whatever the
-            // chat does (Stop included): the hash must reach the chat, not be dropped.
-            val outcome = withContext(NonCancellable) { w.send(confirmed) }
+            // From here the send is the wallet's own ([WalletSender] runs it in its own
+            // scope): a Stop now ends only this wait, and the wallet page follows the send.
+            val outcome = w.send(confirmed)
             when (outcome) {
                 is WalletSender.Broadcast.Sent -> return sent(confirmed, outcome.hash)
                 is WalletSender.Broadcast.Stale -> repriced = true
