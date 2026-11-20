@@ -403,7 +403,12 @@ private fun ChatView(
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
             FlowRow {
                 ModelPicker(choices, model, onPick = { picked = it })
-                ApprovalModePicker(mode) { m ->
+                // Not while a send is in flight: a new chat is created under the
+                // mode its Send tap read, so a pick landing before it returns would
+                // show for a moment, then be put back while the first steps run.
+                ApprovalModePicker(mode, enabled = !sending.value) { m ->
+                    // Checked here too: a tap can land before the picker redraws disabled.
+                    if (sending.value) return@ApprovalModePicker
                     modeFailed = false
                     if (sessionId == null) {
                         pickedMode = m.wire
@@ -741,18 +746,21 @@ internal fun shownMode(stored: String?, loaded: Boolean, sessionId: String?, pic
  * what it does, and what asks whatever the mode.
  */
 @Composable
-private fun ApprovalModePicker(mode: ApprovalMode, onPick: (ApprovalMode) -> Unit) {
+internal fun ApprovalModePicker(mode: ApprovalMode, enabled: Boolean = true, onPick: (ApprovalMode) -> Unit) {
     var open by remember { mutableStateOf(false) }
+    // A menu left open when it's disabled closes: its items would still pick.
+    LaunchedEffect(enabled) { if (!enabled) open = false }
     val label = stringResource(R.string.agent_mode_label, modeLabel(mode))
     Box {
         TextButton(
             onClick = { open = true },
+            enabled = enabled,
             modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = label },
         ) {
             Text(modeLabel(mode), style = MaterialTheme.typography.labelLarge)
             Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
         }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.widthIn(max = 340.dp)) {
+        DropdownMenu(expanded = open && enabled, onDismissRequest = { open = false }, modifier = Modifier.widthIn(max = 340.dp)) {
             for (m in ApprovalMode.entries) {
                 DropdownMenuItem(
                     text = {

@@ -46,7 +46,11 @@ internal enum class ActionKind {
      * Typing or a key into a password or one-time-code field: asks in
      * "sensitive actions" without asking the model, which is only given
      * a character count and the page's label for the field (phase 1's
-     * card always flagged these).
+     * card always flagged these). Such a field is one the page marks
+     * (type password, autocomplete password or one-time-code), masks with
+     * CSS, or a one-character box grouped with a one-time-code one (a
+     * split code's later boxes); see `isCredential` in page.js. A field
+     * the page gives no such sign of goes to the model's check.
      */
     Credential,
 

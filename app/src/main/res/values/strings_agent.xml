@@ -241,7 +241,7 @@
     <!-- "Ask when it matters" (#595): why this one asks, in the model's words. -->
     <string name="agent_approve_check">Your model\'s check: “%1$s”</string>
     <string name="agent_approve_check_form">Asked because this sends a form.</string>
-    <string name="agent_approve_check_credential">Asked because this types into a password or one-time code field.</string>
+    <string name="agent_approve_check_credential">Asked because this types into a password or one-time-code field.</string>
     <string name="agent_approve_check_none">Asked because your model couldn\'t check this step.</string>
     <string name="agent_approve_check_screen">Asked because this step needs its tab on screen, and only you switch to it.</string>
     <string name="agent_approve_untrusted">Names and messages come from the website.</string>
