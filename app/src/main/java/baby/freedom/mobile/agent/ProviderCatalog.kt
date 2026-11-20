@@ -20,6 +20,12 @@ internal enum class ProviderKind {
 
     /** A server on this phone or the local network, by URL (Ollama, OpenAI-compatible). */
     Lan,
+
+    /**
+     * A subscription the user signs in to by device code (#576, ChatGPT
+     * and Meta Muse): the stored "key" is a [SubscriptionCredential].
+     */
+    Subscription,
 }
 
 /**
@@ -27,11 +33,23 @@ internal enum class ProviderKind {
  * Completions, its Responses API, and Anthropic's Messages. Which one a
  * provider uses is desktop's choice (its Pi runtime's `api`).
  */
-internal enum class WireFormat { OpenAiChat, OpenAiResponses, AnthropicMessages }
+internal enum class WireFormat {
+    OpenAiChat,
+    OpenAiResponses,
+    AnthropicMessages,
+
+    /**
+     * The Responses API as ChatGPT's Codex endpoint takes it (#576, Pi's
+     * `openai-codex-responses`): the system prompt as `instructions`,
+     * always streamed, with the account's headers.
+     */
+    CodexResponses,
+}
 
 /** The group a provider is listed under on Settings → AI → Models & providers. */
 internal enum class ProviderGroup(@StringRes val titleRes: Int) {
     Labs(R.string.agent_group_labs),
+    Subscriptions(R.string.agent_group_subscriptions),
     Marketplaces(R.string.agent_group_marketplaces),
     Network(R.string.agent_group_network),
 }
@@ -123,6 +141,9 @@ internal object ProviderCatalog {
         "muse-spark-1.1" to "Muse Spark 1.1",
     )
 
+    // Desktop's fallback until the account's own list is fetched (`ASTRA`).
+    private val CODEX_MODELS = models("gpt-6-astra" to "GPT-6 Astra")
+
     val ALL: List<ProviderDefinition> = listOf(
         ProviderDefinition(
             "openai", "OpenAI", ProviderKind.ApiKey, ProviderGroup.Labs, WireFormat.OpenAiResponses,
@@ -145,6 +166,19 @@ internal object ProviderCatalog {
         ProviderDefinition(
             "meta", "Meta (Muse)", ProviderKind.ApiKey, ProviderGroup.Labs, WireFormat.OpenAiResponses,
             R.string.agent_privacy_meta, R.string.agent_desc_meta,
+            baseUrl = "https://api.meta.ai/v1", bundled = META_MODELS, defaultModelId = "muse-spark-1.3",
+        ),
+        ProviderDefinition(
+            SubscriptionAuth.CODEX, "ChatGPT", ProviderKind.Subscription, ProviderGroup.Subscriptions,
+            WireFormat.CodexResponses, R.string.agent_privacy_codex, R.string.agent_desc_codex,
+            baseUrl = "https://chatgpt.com/backend-api",
+            // Codex's version namespace, as desktop asks with it (not Pi's version).
+            catalogPath = "/codex/models?client_version=0.153.0", catalogKey = true,
+            bundled = CODEX_MODELS, defaultModelId = "gpt-6-astra",
+        ),
+        ProviderDefinition(
+            SubscriptionAuth.META, "Meta Muse", ProviderKind.Subscription, ProviderGroup.Subscriptions,
+            WireFormat.OpenAiResponses, R.string.agent_privacy_meta_subscription, R.string.agent_desc_meta_subscription,
             baseUrl = "https://api.meta.ai/v1", bundled = META_MODELS, defaultModelId = "muse-spark-1.3",
         ),
         ProviderDefinition(
@@ -246,7 +280,7 @@ internal object ProviderCatalog {
             throw CatalogException(CatalogException.Reason.Malformed)
         }
         val entries: JSONArray = when (definition.id) {
-            "near-ai", OLLAMA -> root.optJSONArray("models")
+            "near-ai", OLLAMA, SubscriptionAuth.CODEX -> root.optJSONArray("models")
             else -> root.optJSONArray("data")
         } ?: throw CatalogException(CatalogException.Reason.Malformed)
         if (entries.length() > maxModels) throw CatalogException(CatalogException.Reason.TooMany)
@@ -289,6 +323,12 @@ internal object ProviderCatalog {
                     val output = item.optJSONObject("architecture")?.optJSONArray("output_modalities")
                     if (output != null && !output.contains("text")) continue
                     AgentModel(id, cleanText(item.opt("name")) ?: id)
+                }
+                SubscriptionAuth.CODEX -> {
+                    // Desktop: only the models Codex lists for picking.
+                    if (item.opt("visibility") != "list") continue
+                    val id = cleanText(item.opt("id") ?: item.opt("modelId") ?: item.opt("slug")) ?: continue
+                    AgentModel(id, cleanText(item.opt("display_name")) ?: known[id]?.name ?: id)
                 }
                 OLLAMA -> AgentModel(cleanText(item.opt("name")) ?: continue)
                 COMPATIBLE -> AgentModel(cleanText(item.opt("id")) ?: continue)

@@ -16,6 +16,15 @@ internal enum class ChatError {
     NoKey,
     BadUrl,
     Unauthorized,
+
+    /** A subscription's stored sign-in can't be read on this phone any more (#576): sign in again, there's no key to enter. */
+    SignInLost,
+
+    /** A subscription's sign-in has ended (#576): the provider refused to renew it. */
+    SignInAgain,
+
+    /** A subscription's request was refused (#576, a 403): the account, not a key, e.g. a plan without it. */
+    AccountRefused,
     ModelNotFound,
     RateLimited,
     ServerError,

@@ -59,8 +59,9 @@ internal data class AgentConnection(
 internal data class ModelRef(val connectionId: String, val modelId: String)
 
 /**
- * Settings → AI as stored. [keys] maps a connection to its API key (only
- * one marked [AgentConnection.hasKey]); [keysUnreadable] is set when the
+ * Settings → AI as stored. [keys] maps a connection to its API key, or
+ * for a subscription (#576) to its [SubscriptionCredential]'s encoded
+ * form (only one marked [AgentConnection.hasKey]); [keysUnreadable] is set when the
  * saved key blob can't be decrypted (the Keystore key is gone, or failed
  * this time), so its connections ask for the key again rather than show
  * as connected.
@@ -82,7 +83,9 @@ internal data class AgentState(
      */
     fun keyLost(c: AgentConnection): Boolean {
         if (c.id in keys) return false
-        return c.hasKey || ProviderCatalog.definition(c.providerId)?.kind == ProviderKind.ApiKey
+        return c.hasKey || ProviderCatalog.definition(c.providerId)?.kind.let {
+            it == ProviderKind.ApiKey || it == ProviderKind.Subscription
+        }
     }
 }
 

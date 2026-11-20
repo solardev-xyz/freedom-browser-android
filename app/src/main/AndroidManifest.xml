@@ -60,6 +60,15 @@
          installed, to offer starting it. -->
     <queries>
         <package android:name="org.torproject.android" />
+        <!-- Browsers that open a Custom Tab, for a subscription's sign-in page (#576). -->
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
     </queries>
 
     <application

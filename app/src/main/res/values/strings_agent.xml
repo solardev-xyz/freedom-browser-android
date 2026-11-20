@@ -28,6 +28,7 @@
     <string name="agent_default_none">no default model</string>
 
     <string name="agent_group_labs">Model labs</string>
+    <string name="agent_group_subscriptions">Subscriptions</string>
     <string name="agent_group_marketplaces">Model marketplaces</string>
     <string name="agent_group_network">On your network</string>
 
@@ -49,6 +50,8 @@
     <string name="agent_desc_anthropic">Claude models with an API key</string>
     <string name="agent_desc_xai">Grok models with an API key</string>
     <string name="agent_desc_meta">Muse models with an API key</string>
+    <string name="agent_desc_codex">Sign in with your ChatGPT plan</string>
+    <string name="agent_desc_meta_subscription">Sign in with your Meta account</string>
     <string name="agent_desc_openrouter">Models from many providers through one key</string>
     <string name="agent_desc_venice">Models with privacy options</string>
     <string name="agent_desc_near">TEE and external models</string>
@@ -58,6 +61,8 @@
     <string name="agent_privacy_openai">Requests go to OpenAI under its API data policy.</string>
     <string name="agent_privacy_anthropic">Requests go to Anthropic under its API data policy.</string>
     <string name="agent_privacy_xai">Requests go to xAI. Standard API retention applies; this connection doesn\'t turn on account-level zero retention.</string>
+    <string name="agent_privacy_codex">Uses your ChatGPT subscription. Requests go to OpenAI.</string>
+    <string name="agent_privacy_meta_subscription">Uses Sign in with Meta. Requests go to Meta through its Model API.</string>
     <string name="agent_privacy_meta">Requests go to the Meta Model API under your developer account\'s data policy.</string>
     <string name="agent_privacy_openrouter">Requests go through OpenRouter to an inference provider. Its model list is public, so your key isn\'t sent to fetch it.</string>
     <string name="agent_privacy_venice">Privacy varies by model. Models that need end-to-end encryption aren\'t offered yet.</string>
@@ -105,7 +110,10 @@
     <string name="agent_test_ok">%1$s replied. The connection works.</string>
     <string name="agent_test_no_key">Save a key first.</string>
     <string name="agent_test_unauthorized">The provider didn\'t accept the key.</string>
+    <string name="agent_test_account_refused">The provider refused this account. Your plan may not include it.</string>
+    <string name="agent_test_sign_in_again">Your sign-in has ended. Sign in again.</string>
     <string name="agent_test_model_not_found">The provider doesn\'t offer %1$s to this key.</string>
+    <string name="agent_test_model_not_found_account">The provider doesn\'t offer %1$s to this account.</string>
     <string name="agent_test_model_not_found_server">The server doesn\'t offer %1$s.</string>
     <string name="agent_test_rate_limited">The provider is limiting requests. Try again later.</string>
     <string name="agent_test_server_error">The provider had an error. Try again later.</string>
@@ -167,6 +175,9 @@
     <string name="agent_error_no_key">The provider\'s API key can\'t be read. Enter it again in Settings → AI.</string>
     <string name="agent_error_bad_url">The server\'s address isn\'t allowed. Check it in Settings → AI.</string>
     <string name="agent_error_unauthorized">The provider didn\'t accept the API key.</string>
+    <string name="agent_error_account_refused">The provider refused this account. Your plan may not include it.</string>
+    <string name="agent_error_sign_in_lost">This phone can\'t read your sign-in any more. Sign in again under Settings → AI → Models &amp; providers.</string>
+    <string name="agent_error_sign_in_again">Your sign-in has ended. Sign in again under Settings → AI → Models &amp; providers.</string>
     <string name="agent_error_model_not_found">The provider doesn\'t have this model.</string>
     <string name="agent_error_rate_limited">The provider is busy or this key has reached its limit. Try again later.</string>
     <string name="agent_error_server">The provider had a problem answering. Try again.</string>
@@ -178,4 +189,42 @@
     <string name="agent_error_too_many_steps">The agent took too many steps and was stopped.</string>
     <string name="agent_error_ai_off">Stopped: AI was turned off.</string>
     <string name="agent_error_key_changed">Stopped: the provider\'s key or address changed, or the provider was removed.</string>
+
+    <!-- Subscription sign-in by device code (#576). -->
+    <string name="agent_sign_in">Sign in</string>
+    <string name="agent_sign_in_again">Sign in again</string>
+    <string name="agent_signing_in">Starting…</string>
+    <string name="agent_sign_out">Sign out</string>
+    <string name="agent_sign_out_title">Sign out of %1$s?</string>
+    <string name="agent_sign_out_message">Its sign-in, model list and favourites are deleted from this phone. Requests using it stop.</string>
+    <string name="agent_sign_out_failed">Couldn\'t sign out. Try again.</string>
+    <string name="agent_signed_in">Signed in</string>
+    <string name="agent_status_signed_in">Signed in</string>
+    <plurals name="agent_status_signed_in_models">
+        <item quantity="one">Signed in · %1$d model</item>
+        <item quantity="other">Signed in · %1$d models</item>
+    </plurals>
+    <string name="agent_status_sign_in_again">Signed out by the provider. Sign in again.</string>
+    <string name="agent_status_sign_in_lost">This phone can\'t read its sign-in any more. Sign in again.</string>
+    <string name="agent_test_sign_in_first">Sign in first.</string>
+    <string name="agent_sign_in_how">Freedom shows a code. Open the sign-in page in your browser, sign in, and enter the code there. This page then finishes by itself.</string>
+    <string name="agent_sign_in_code_label">Your code</string>
+    <string name="agent_sign_in_page">Enter it at %1$s</string>
+    <string name="agent_sign_in_copy">Copy code</string>
+    <string name="agent_sign_in_copied">Code copied.</string>
+    <string name="agent_sign_in_open">Open sign-in page</string>
+    <string name="agent_sign_in_open_failed">No browser could open the page. Open %1$s yourself.</string>
+    <string name="agent_sign_in_cancel">Cancel</string>
+    <string name="agent_sign_in_waiting">Waiting for you to enter the code…</string>
+    <string name="agent_sign_in_done">Signed in to %1$s.</string>
+    <string name="agent_sign_in_denied">The sign-in was declined on the provider\'s page.</string>
+    <string name="agent_sign_in_expired">The code ran out before it was entered. Sign in again for a new one.</string>
+    <string name="agent_sign_in_not_enabled">The provider doesn\'t offer sign-in by code right now. Try again later.</string>
+    <string name="agent_sign_in_no_access">Signed in, but this account has no model access. Check your subscription.</string>
+    <string name="agent_sign_in_rate_limited">The provider is limiting sign-ins. Try again later.</string>
+    <string name="agent_sign_in_server_error">The provider had an error. Try again later.</string>
+    <string name="agent_sign_in_unreachable">Couldn\'t reach the provider.</string>
+    <string name="agent_sign_in_timed_out">The provider didn\'t answer in time. Try again.</string>
+    <string name="agent_sign_in_bad_reply">The provider\'s answer couldn\'t be used, so nothing was opened or saved.</string>
+    <string name="agent_sign_in_save_failed">Signed in, but couldn\'t save it. Try again.</string>
 </resources>

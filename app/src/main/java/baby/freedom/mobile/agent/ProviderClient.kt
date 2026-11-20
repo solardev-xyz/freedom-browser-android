@@ -181,8 +181,10 @@ internal class ProviderClient(
 
     /**
      * Fetches [url] (a GET, or a JSON POST of [json]) for [connectionId]
-     * at [revision], reading at most [maxBytes] of the answer. Cancelling
-     * the caller cancels the call at once, as do [RequestGate.disable] and
+     * at [revision], reading at most [maxBytes] of the answer, asking for
+     * [accept] (Codex's streamed Test connection asks for
+     * `text/event-stream`, as its chat does: [testAccept]). Cancelling the
+     * caller cancels the call at once, as do [RequestGate.disable] and
      * [RequestGate.bump].
      */
     suspend fun fetch(
@@ -193,10 +195,11 @@ internal class ProviderClient(
         maxBytes: Long,
         json: JSONObject? = null,
         timeoutMs: Long = CALL_TIMEOUT_MS,
+        accept: String = ACCEPT_JSON,
     ): ProviderReply {
         val sent = Sent()
         val request = Request.Builder().url(url).tag(Sent::class.java, sent).apply {
-            header("Accept", "application/json")
+            header("Accept", accept)
             headers.forEach { (k, v) -> header(k, v) }
             if (json != null) post(json.toString().toRequestBody(JSON))
         }.build()
@@ -271,7 +274,7 @@ internal class ProviderClient(
     ): StreamEnd {
         val sent = Sent()
         val request = Request.Builder().url(url).tag(Sent::class.java, sent).apply {
-            header("Accept", "text/event-stream")
+            header("Accept", ACCEPT_EVENT_STREAM)
             headers.forEach { (k, v) -> header(k, v) }
             post(json.toString().toRequestBody(JSON))
         }.build()
@@ -448,15 +451,26 @@ internal class ProviderClient(
         const val TEST_PROMPT = "Reply with OK."
         private const val TEST_MAX_TOKENS = 32
 
-        /** Request headers for [definition], with [key] if there is one. */
-        fun authHeaders(definition: ProviderDefinition, key: String?): Map<String, String> = buildMap {
-            if (definition.wire == WireFormat.AnthropicMessages) {
-                put("anthropic-version", "2023-06-01")
-                if (!key.isNullOrEmpty()) put("x-api-key", key)
-            } else if (!key.isNullOrEmpty()) {
-                put("Authorization", "Bearer $key")
+        /**
+         * Request headers for [definition], with [key] if there is one.
+         * ChatGPT's (#576) also name the account ([accountId]) and the
+         * client, as Pi's `buildSSEHeaders` does (`originator` stays `pi`,
+         * as on desktop).
+         */
+        fun authHeaders(definition: ProviderDefinition, key: String?, accountId: String? = null): Map<String, String> =
+            buildMap {
+                if (definition.wire == WireFormat.AnthropicMessages) {
+                    put("anthropic-version", "2023-06-01")
+                    if (!key.isNullOrEmpty()) put("x-api-key", key)
+                } else if (!key.isNullOrEmpty()) {
+                    put("Authorization", "Bearer $key")
+                }
+                if (definition.wire == WireFormat.CodexResponses) {
+                    if (accountId != null) put("chatgpt-account-id", accountId)
+                    put("originator", "pi")
+                    put("OpenAI-Beta", "responses=experimental")
+                }
             }
-        }
 
         /** Where a model list is fetched from: [base] is the provider's API base (or a LAN server's URL). */
         fun catalogUrl(definition: ProviderDefinition, base: HttpUrl): HttpUrl? {
@@ -476,6 +490,7 @@ internal class ProviderClient(
         fun endpoint(definition: ProviderDefinition, base: HttpUrl): HttpUrl = when (definition.wire) {
             WireFormat.AnthropicMessages -> base.plus("messages")
             WireFormat.OpenAiResponses -> base.plus("responses")
+            WireFormat.CodexResponses -> base.plus("codex/responses")
             WireFormat.OpenAiChat -> {
                 val api = if (definition.id == ProviderCatalog.OLLAMA) {
                     rootOfOllama(base).newBuilder().addPathSegment("v1").build()
@@ -485,6 +500,17 @@ internal class ProviderClient(
                 api.plus("chat/completions")
             }
         }
+
+        const val ACCEPT_JSON = "application/json"
+        const val ACCEPT_EVENT_STREAM = "text/event-stream"
+
+        /**
+         * What Test connection's request for [definition] accepts: Codex's
+         * is a stream ([testRequest]), so it asks for one, as its chat
+         * ([stream]) and Pi do; every other test is one JSON answer.
+         */
+        fun testAccept(definition: ProviderDefinition): String =
+            if (definition.wire == WireFormat.CodexResponses) ACCEPT_EVENT_STREAM else ACCEPT_JSON
 
         /** The Test connection request for [definition] at [base]: its URL and body. */
         fun testRequest(definition: ProviderDefinition, base: HttpUrl, modelId: String): Pair<HttpUrl, JSONObject> {
@@ -499,6 +525,13 @@ internal class ProviderClient(
                     .put("model", modelId)
                     .put("input", TEST_PROMPT)
                     .put("max_output_tokens", TEST_MAX_TOKENS)
+                    .put("store", false)
+                // Codex only streams, and takes no token cap (Pi sends none).
+                WireFormat.CodexResponses -> url to JSONObject()
+                    .put("model", modelId)
+                    .put("instructions", "You are a helpful assistant.")
+                    .put("input", JSONArray().put(user))
+                    .put("stream", true)
                     .put("store", false)
                 WireFormat.OpenAiChat -> url to JSONObject()
                     .put("model", modelId)
@@ -526,6 +559,14 @@ internal class ProviderClient(
 
         /** Whether a 2xx Test connection answer is a reply in [definition]'s format. */
         fun isReply(definition: ProviderDefinition, body: String): Boolean {
+            // A streamed answer: some event says the response finished.
+            if (definition.wire == WireFormat.CodexResponses) {
+                return body.lineSequence().any { line ->
+                    if (!line.startsWith("data:")) return@any false
+                    val type = AgentWire.parseObject(line.removePrefix("data:").trim())?.optString("type")
+                    type == "response.completed" || type == "response.done"
+                }
+            }
             val root = try {
                 JSONObject(body)
             } catch (e: Exception) {
@@ -536,6 +577,7 @@ internal class ProviderClient(
             return when (definition.wire) {
                 WireFormat.AnthropicMessages -> root.optJSONArray("content") != null
                 WireFormat.OpenAiResponses -> root.optJSONArray("output") != null || root.has("status")
+                WireFormat.CodexResponses -> false
                 WireFormat.OpenAiChat -> (root.optJSONArray("choices")?.length() ?: 0) > 0
             }
         }

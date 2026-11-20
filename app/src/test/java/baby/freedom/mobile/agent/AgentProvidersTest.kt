@@ -162,7 +162,10 @@ class AgentProvidersTest {
         assertEquals(RefreshResult.Done, providers.refreshModels("openrouter"))
         assertNull(server.takeRequest().getHeader("Authorization"))
         assertEquals(TestResult.Ok, providers.testConnection("openrouter", "a/b"))
-        assertEquals("Bearer sk-or-123", server.takeRequest().getHeader("Authorization"))
+        val test = server.takeRequest()
+        assertEquals("Bearer sk-or-123", test.getHeader("Authorization"))
+        // A non-streamed test asks for one JSON answer.
+        assertEquals("application/json", test.getHeader("Accept"))
     }
 
     @Test

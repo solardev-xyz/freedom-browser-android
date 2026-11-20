@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Cloud
@@ -35,7 +36,9 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -48,6 +51,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
@@ -57,6 +61,8 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -182,6 +188,7 @@ internal fun AiProvidersPage(onBack: () -> Unit) {
     val providers = remember(context) { AgentProviders.get(context) }
     val state by providers.state.collectAsState(initial = null)
     val discovered by providers.models.collectAsState(initial = emptyMap())
+    val signedOut by providers.signedOut.collectAsState()
     var target by rememberSaveable { mutableStateOf<ProviderTarget?>(null) }
     val current = state
     if (current != null && !current.enabled) LaunchedEffect(Unit) { onBack() }
@@ -221,7 +228,7 @@ internal fun AiProvidersPage(onBack: () -> Unit) {
                             for (c in current.connections.filter { it.providerId == ProviderCatalog.COMPATIBLE }) {
                                 PageRow(
                                     title = c.name,
-                                    subtitle = connectionStatus(current, discovered, c),
+                                    subtitle = connectionStatus(current, discovered, c, signedOut),
                                     thirdLine = c.baseUrl,
                                     style = PageRowStyle.Inset,
                                     leadingIcon = Icons.Filled.Dns,
@@ -242,11 +249,15 @@ internal fun AiProvidersPage(onBack: () -> Unit) {
                                 subtitle = if (c == null) {
                                     stringResource(definition.descriptionRes)
                                 } else {
-                                    connectionStatus(current, discovered, c)
+                                    connectionStatus(current, discovered, c, signedOut)
                                 },
                                 thirdLine = if (c == null) stringResource(R.string.agent_status_not_connected) else c.baseUrl,
                                 style = PageRowStyle.Inset,
-                                leadingIcon = if (definition.kind == ProviderKind.Lan) Icons.Filled.Dns else Icons.Filled.Cloud,
+                                leadingIcon = when (definition.kind) {
+                                    ProviderKind.Lan -> Icons.Filled.Dns
+                                    ProviderKind.Subscription -> Icons.Filled.AccountCircle
+                                    ProviderKind.ApiKey -> Icons.Filled.Cloud
+                                },
                                 onClick = { target = ProviderTarget(definition.id, c?.id) },
                             )
                         }
@@ -257,11 +268,26 @@ internal fun AiProvidersPage(onBack: () -> Unit) {
     }
 }
 
-/** "Connected · 12 models", or that a saved key must be entered again. */
-private fun connectionStatus(state: AgentState, discovered: Map<String, List<AgentModel>>, c: AgentConnection): String {
+/** "Connected · 12 models", or that a saved key must be entered again (a subscription: signed in again). */
+private fun connectionStatus(
+    state: AgentState,
+    discovered: Map<String, List<AgentModel>>,
+    c: AgentConnection,
+    signedOut: Set<String>,
+): String {
     val definition = ProviderCatalog.definition(c.providerId)
+    val subscription = definition?.kind == ProviderKind.Subscription
+    if (subscription && state.keyLost(c)) return Strings.get(R.string.agent_status_sign_in_lost)
+    if (subscription && c.id in signedOut) return Strings.get(R.string.agent_status_sign_in_again)
     if (state.keyLost(c)) return Strings.get(R.string.agent_status_key_lost)
     val count = discovered[c.id]?.size ?: definition?.bundled?.size ?: 0
+    if (subscription) {
+        return if (count == 0) {
+            Strings.get(R.string.agent_status_signed_in)
+        } else {
+            Strings.plural(R.plurals.agent_status_signed_in_models, count, count)
+        }
+    }
     return if (count == 0) {
         Strings.get(R.string.agent_status_connected)
     } else {
@@ -281,12 +307,21 @@ private fun urlHint(rejection: ProviderUrls.Rejection): String = Strings.get(
 )
 
 /** [keyed]: a key went with the request, so a missing model may be the key's own limit. */
-private fun testLine(result: TestResult, model: String, keyed: Boolean): String = when (result) {
+private fun testLine(result: TestResult, model: String, keyed: Boolean, subscription: Boolean): String = when (result) {
     TestResult.Ok -> Strings.get(R.string.agent_test_ok, model)
-    TestResult.NoKey -> Strings.get(R.string.agent_test_no_key)
-    TestResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
+    TestResult.NoKey -> Strings.get(if (subscription) R.string.agent_test_sign_in_first else R.string.agent_test_no_key)
+    TestResult.SignInAgain -> Strings.get(R.string.agent_test_sign_in_again)
+    TestResult.Unauthorized ->
+        Strings.get(if (subscription) R.string.agent_test_account_refused else R.string.agent_test_unauthorized)
     TestResult.ModelNotFound ->
-        Strings.get(if (keyed) R.string.agent_test_model_not_found else R.string.agent_test_model_not_found_server, model)
+        Strings.get(
+            when {
+                subscription -> R.string.agent_test_model_not_found_account
+                keyed -> R.string.agent_test_model_not_found
+                else -> R.string.agent_test_model_not_found_server
+            },
+            model,
+        )
     TestResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
     TestResult.ServerError -> Strings.get(R.string.agent_test_server_error)
     TestResult.Refused -> Strings.get(R.string.agent_test_refused)
@@ -307,8 +342,13 @@ internal fun refreshNotFoundText(definition: ProviderDefinition): Int = when {
 
 private fun refreshLine(result: RefreshResult, definition: ProviderDefinition): String = when (result) {
     RefreshResult.Done -> Strings.get(R.string.agent_refresh_done)
-    RefreshResult.NoKey -> Strings.get(R.string.agent_test_no_key)
-    RefreshResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
+    RefreshResult.NoKey -> Strings.get(
+        if (definition.kind == ProviderKind.Subscription) R.string.agent_test_sign_in_first else R.string.agent_test_no_key,
+    )
+    RefreshResult.SignInAgain -> Strings.get(R.string.agent_test_sign_in_again)
+    RefreshResult.Unauthorized -> Strings.get(
+        if (definition.kind == ProviderKind.Subscription) R.string.agent_test_account_refused else R.string.agent_test_unauthorized,
+    )
     RefreshResult.NotFound -> Strings.get(refreshNotFoundText(definition))
     RefreshResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
     RefreshResult.ServerError -> Strings.get(R.string.agent_test_server_error)
@@ -357,7 +397,8 @@ private fun ProviderPage(
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val isLan = definition.kind == ProviderKind.Lan
-    val hasKeyField = !isLan || definition.id == ProviderCatalog.COMPATIBLE
+    val isSubscription = definition.kind == ProviderKind.Subscription
+    val hasKeyField = (!isLan && !isSubscription) || definition.id == ProviderCatalog.COMPATIBLE
     // Keyed on the provider, not the target: saving a new server gives the
     // same page its connection id, and its status line must survive that.
     // The key is held in plain `remember`: never in saved instance state.
@@ -372,6 +413,11 @@ private fun ProviderPage(
     var filter by rememberSaveable(target.providerId) { mutableStateOf("") }
     var confirmRemove by remember { mutableStateOf(false) }
     if (reveal) SecureWindow()
+    // A finished or failed sign-in isn't shown again on the next visit.
+    // Here, not in the list item, which scrolling off disposes.
+    if (isSubscription) DisposableEffect(definition.id) {
+        onDispose { providers.dismissLogin(definition.id) }
+    }
 
     val keyText = key.trim()
     val keyOk = keyText.isEmpty() || AgentProviders.isUsableKey(keyText)
@@ -419,7 +465,10 @@ private fun ProviderPage(
         onDismiss = onBack,
         trailing = {
             if (connection != null) TextButton(onClick = { confirmRemove = true }) {
-                Text(stringResource(R.string.agent_remove), color = MaterialTheme.colorScheme.error)
+                Text(
+                    stringResource(if (isSubscription) R.string.agent_sign_out else R.string.agent_remove),
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
         },
     ) {
@@ -504,6 +553,12 @@ private fun ProviderPage(
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
+                        if (isSubscription) SubscriptionSignIn(
+                            providers = providers,
+                            definition = definition,
+                            connected = connection != null,
+                            enabled = !busy,
+                        )
                         definition.keyUrl?.let { link ->
                             Text(
                                 stringResource(R.string.agent_get_key, link),
@@ -515,12 +570,14 @@ private fun ProviderPage(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Button(onClick = { save() }, enabled = canSave, modifier = Modifier.heightIn(min = 48.dp)) {
-                                BusyLabel(
-                                    running == PageAction.Saving,
-                                    if (isLan) R.string.agent_save else R.string.agent_save_key,
-                                    R.string.agent_saving,
-                                )
+                            if (!isSubscription) {
+                                Button(onClick = { save() }, enabled = canSave, modifier = Modifier.heightIn(min = 48.dp)) {
+                                    BusyLabel(
+                                        running == PageAction.Saving,
+                                        if (isLan) R.string.agent_save else R.string.agent_save_key,
+                                        R.string.agent_saving,
+                                    )
+                                }
                             }
                             if (connection != null) {
                                 val testWith = testModel(state, connection, models)
@@ -529,7 +586,7 @@ private fun ProviderPage(
                                         val model = testWith ?: return@OutlinedButton
                                         run(PageAction.Testing) {
                                             val keyed = connection.id in state.keys
-                                            testLine(providers.testConnection(connection.id, model.id), model.name, keyed)
+                                            testLine(providers.testConnection(connection.id, model.id), model.name, keyed, isSubscription)
                                         }
                                     },
                                     enabled = !busy && testWith != null,
@@ -614,21 +671,166 @@ private fun ProviderPage(
 
     if (confirmRemove && connection != null) {
         ConfirmDialog(
-            title = stringResource(R.string.agent_remove_title, connection.name),
-            message = stringResource(R.string.agent_remove_message),
-            confirmLabel = stringResource(R.string.agent_remove),
+            title = stringResource(
+                if (isSubscription) R.string.agent_sign_out_title else R.string.agent_remove_title,
+                connection.name,
+            ),
+            message = stringResource(if (isSubscription) R.string.agent_sign_out_message else R.string.agent_remove_message),
+            confirmLabel = stringResource(if (isSubscription) R.string.agent_sign_out else R.string.agent_remove),
             onConfirm = {
                 confirmRemove = false
                 scope.launch {
                     if (providers.remove(connection.id)) {
                         onBack()
                     } else {
-                        line = Strings.get(R.string.agent_remove_failed)
+                        line = Strings.get(if (isSubscription) R.string.agent_sign_out_failed else R.string.agent_remove_failed)
                     }
                 }
             },
             onDismiss = { confirmRemove = false },
         )
+    }
+}
+
+private fun loginLine(failure: LoginFailure): String = Strings.get(
+    when (failure) {
+        LoginFailure.Denied -> R.string.agent_sign_in_denied
+        LoginFailure.Expired -> R.string.agent_sign_in_expired
+        LoginFailure.NotEnabled -> R.string.agent_sign_in_not_enabled
+        LoginFailure.NoAccess -> R.string.agent_sign_in_no_access
+        LoginFailure.RateLimited -> R.string.agent_sign_in_rate_limited
+        LoginFailure.ServerError -> R.string.agent_sign_in_server_error
+        LoginFailure.Unreachable -> R.string.agent_sign_in_unreachable
+        LoginFailure.TimedOut -> R.string.agent_sign_in_timed_out
+        LoginFailure.BadReply -> R.string.agent_sign_in_bad_reply
+        LoginFailure.SaveFailed -> R.string.agent_sign_in_save_failed
+    },
+)
+
+/**
+ * A subscription's sign-in (#576): Sign in, then the code with the page
+ * to enter it on (opened only from the user's tap, in a Custom Tab),
+ * Copy and Cancel, until the provider says yes. The sign-in runs in
+ * [AgentProviders], so it carries on while the user is in the browser,
+ * and this shows it again on return. The page shown, opened and copied
+ * is exactly the one [SubscriptionAuth.verificationUrl] passed.
+ */
+@Composable
+private fun SubscriptionSignIn(
+    providers: AgentProviders,
+    definition: ProviderDefinition,
+    connected: Boolean,
+    enabled: Boolean,
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    // Start and Cancel wait for a save under way (see cancelLogin); they only change state in memory.
+    val scope = rememberCoroutineScope()
+    val login by providers.login.collectAsState()
+    val mine = login?.takeIf { it.providerId == definition.id }
+    var note by remember(definition.id) { mutableStateOf<String?>(null) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        when (mine) {
+            is LoginState.Waiting -> {
+                val code = mine.code
+                Text(
+                    stringResource(R.string.agent_sign_in_code_label),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                SelectionContainer {
+                    Text(
+                        code.userCode,
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                Text(
+                    stringResource(R.string.agent_sign_in_page, code.verificationUrl),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = {
+                            note = if (SignInPage.open(context, code.verificationUrl)) {
+                                null
+                            } else {
+                                Strings.get(R.string.agent_sign_in_open_failed, code.verificationUrl)
+                            }
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(stringResource(R.string.agent_sign_in_open)) }
+                    OutlinedButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(code.userCode))
+                            note = Strings.get(R.string.agent_sign_in_copied)
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(stringResource(R.string.agent_sign_in_copy)) }
+                    TextButton(
+                        onClick = {
+                            note = null
+                            scope.launch { providers.cancelLogin(definition.id) }
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(stringResource(R.string.agent_sign_in_cancel)) }
+                }
+                Text(
+                    note ?: stringResource(R.string.agent_sign_in_waiting),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+            else -> {
+                if (!connected) {
+                    Text(
+                        stringResource(R.string.agent_sign_in_how),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                val starting = mine is LoginState.Starting
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = {
+                            note = null
+                            scope.launch { providers.startLogin(definition.id) }
+                        },
+                        enabled = enabled && !starting,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        BusyLabel(
+                            starting,
+                            if (connected) R.string.agent_sign_in_again else R.string.agent_sign_in,
+                            R.string.agent_signing_in,
+                        )
+                    }
+                    if (starting) TextButton(
+                        onClick = { scope.launch { providers.cancelLogin(definition.id) } },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(stringResource(R.string.agent_sign_in_cancel)) }
+                }
+                val status = when (mine) {
+                    is LoginState.Failed -> loginLine(mine.failure)
+                    is LoginState.Done -> Strings.get(R.string.agent_sign_in_done, definition.name)
+                    else -> null
+                }
+                status?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
+            }
+        }
     }
 }
 
