@@ -266,7 +266,10 @@ internal class NodeResponseTooLarge(val answered: NodeResponse? = null) :
 /**
  * Sends one request to a node on this phone and reads its answer, on
  * OkHttp with nothing it would do on its own: no proxy, no redirect
- * followed, no retry after a failed connection, no pooled connection
+ * followed, no retry after a failed connection, no retry of a `503` with
+ * `Retry-After: 0` (OkHttp resends any method on that, so a network
+ * interceptor drops the header from a 503 before OkHttp sees it; it isn't
+ * one the model gets back anyway), no pooled connection
  * (each request gets a fresh one, closed after, so a write can never go
  * out twice on a stale socket), no transparent gzip, and at most
  * [NodeResponse.MAX_BYTES] read back whatever `Content-Length` says
@@ -287,7 +290,17 @@ internal object NodeHttp {
             .writeTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
             .cache(null)
             .cookieJar(okhttp3.CookieJar.NO_COOKIES)
+            .addNetworkInterceptor(NoServiceUnavailableRetry)
             .build()
+    }
+
+    /** Takes `Retry-After` off a 503, so RetryAndFollowUpInterceptor never resends it (R3-M1). */
+    private object NoServiceUnavailableRetry : okhttp3.Interceptor {
+        override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+            val response = chain.proceed(chain.request())
+            if (response.code != 503 || response.header("Retry-After") == null) return response
+            return response.newBuilder().removeHeader("Retry-After").build()
+        }
     }
 
     fun send(base: String, args: NodeRequestArgs, onCall: (okhttp3.Call) -> Unit = {}): NodeResponse {

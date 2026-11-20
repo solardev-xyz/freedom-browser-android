@@ -638,6 +638,23 @@ class NodeToolsTest {
     }
 
     @Test
+    fun `a 503 with Retry-After 0 is answered once, never resent`() {
+        for (method in listOf("POST", "PUT", "DELETE", "GET")) {
+            okhttp3.mockwebserver.MockWebServer().use { server ->
+                server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(503).setHeader("Retry-After", "0").setBody("busy"))
+                server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(201).setBody("second"))
+                val body = if (method == "POST" || method == "PUT") "{}" else null
+                val args = NodeRequestArgs("ant", "http", method, "/tags", mapOf("content-type" to "application/json").takeIf { body != null }.orEmpty(), body)
+                val answer = NodeHttp.send(server.url("/").toString(), args)
+                // OkHttp would otherwise resend it on its own and hand back the 201 (R3-M1).
+                assertEquals(method, 503, answer.status)
+                assertEquals(method, "busy", answer.body)
+                assertEquals(method, 1, server.requestCount)
+            }
+        }
+    }
+
+    @Test
     fun `the diagnostics sheet rounds the byte cap up, never down`() {
         assertEquals(1, diagnosticsKb(1024))
         assertEquals(2, diagnosticsKb(1025))
