@@ -696,6 +696,237 @@ class AgentChatsTest {
         assertEquals(AgentChats.MAX_TITLE_CHARS + 1, long.length)
         assertTrue(long.endsWith("…"))
     }
+
+    // ---- attachments (#601) ----
+
+    private val anthropicReply = arrayOf(
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"A cat.\"}}",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+    )
+
+    private fun attachmentStore(): AgentAttachments {
+        val root = java.nio.file.Files.createTempDirectory(System.getenv("TMPDIR")?.let { java.io.File(it).toPath() } ?: java.io.File(System.getProperty("java.io.tmpdir")).toPath(), "attachments").toFile()
+        root.deleteOnExit()
+        return AgentAttachments(root) { f -> if (f.readBytes().take(3) == "PNG".toByteArray().toList()) "image/png" else null }
+    }
+
+    private fun withAttachments(store: AgentAttachments, forgetNodeOperations: suspend (String?) -> Unit = {}) = AgentChats(
+        dao, providers, "You are Freedom Agent. {{identity}}", scope = scope, zone = { ZoneId.of("UTC") },
+        forgetNodeOperations = forgetNodeOperations,
+        // As the app's chats have them, with a PDF processor never reached here.
+        toolsFor = { id ->
+            ToolRegistry(
+                AttachmentTools(
+                    id, { store },
+                    {
+                        object : PdfProcessor {
+                            override suspend fun extractText(file: java.io.File, page: Int, pageCount: Int) = error("unused")
+                            override suspend fun renderPage(file: java.io.File, page: Int) = error("unused")
+                        }
+                    },
+                ).tools,
+            )
+        },
+        attachments = store, takesImages = { providers.takesImages(it) },
+    )
+
+    private suspend fun AgentAttachments.stageText(name: String, text: String): String =
+        (stage(name, null) { java.io.ByteArrayInputStream(text.toByteArray()) } as StageResult.Staged).attachment.id
+
+    @Test
+    fun `files go with the message - named to the model in this turn and the next, and shown with the turn`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        route("/v1/chat/completions", { sse(chatText("Read it."), chatStop) }, { sse(chatText("Again."), chatStop) })
+        val staged = store.stageText("notes.txt", "hello")
+        val id = chats.send(null, "summarise this", model, attachmentIds = listOf(staged))!!
+        val turn = awaitDone(id, chats)
+        // The text shown is the user's own; the files are kept beside it.
+        assertEquals("summarise this", turn.userText)
+        val sent = Attachment.parseList(turn.attachments).single()
+        assertEquals("notes.txt", sent.name)
+        assertTrue(store.staged.value.isEmpty())
+        assertEquals(listOf(sent), store.list(id))
+        val first = bodies.last().getJSONArray("messages")
+        val userText = first.getJSONObject(1).getString("content")
+        assertTrue(userText, userText.startsWith("summarise this\n\nFreedom attached these user-selected conversation resources."))
+        assertTrue(userText.contains(sent.id))
+        assertTrue(first.getJSONObject(0).getString("content").contains("attachment_read"))
+        // The attachment tools are offered; render_page isn't to a model not known to take images.
+        val tools = (0 until bodies.last().getJSONArray("tools").length()).map {
+            bodies.last().getJSONArray("tools").getJSONObject(it).getJSONObject("function").getString("name")
+        }
+        assertTrue("attachment_read" in tools && "attachment_list" in tools)
+        assertFalse("attachment_render_page" in tools)
+
+        chats.send(id, "and now?", model)!!
+        awaitDone(id, chats)
+        val history = bodies.last().getJSONArray("messages").getJSONObject(1).getString("content")
+        assertTrue(history.contains(sent.id))
+    }
+
+    @Test
+    fun `a file sent with a turn that failed is still named in the next`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        route("/v1/chat/completions", { MockResponse().setResponseCode(500) }, { sse(chatText("ok"), chatStop) })
+        val id = chats.send(null, "read this", model, attachmentIds = listOf(store.stageText("a.txt", "a")))!!
+        assertEquals(ChatStatus.FAILED, awaitDone(id, chats).status)
+        val file = store.list(id).single()
+        chats.send(id, "try again", model)!!
+        awaitDone(id, chats)
+        val messages = bodies.last().getJSONArray("messages")
+        // The failed turn isn't replayed; its file is named in this one.
+        assertEquals(listOf("system", "user"), (0 until messages.length()).map { messages.getJSONObject(it).getString("role") })
+        val text = messages.getJSONObject(1).getString("content")
+        assertTrue(text, text.startsWith("try again\n\nFiles attached earlier in this conversation"))
+        assertTrue(text.contains(file.id))
+    }
+
+    @Test
+    fun `a model list stored before images were known takes them as the bundled entry says`() = runBlocking {
+        val model = connectHosted("anthropic", "claude-sonnet-5-5")
+        val connection = providers.state.first().connection(model.connectionId)!!
+        val old = AgentStore.decodeModels("""[{"id":"claude-sonnet-5-5"},{"id":"not-bundled"}]""")
+        val models = providers.modelsOf(connection, mapOf(connection.id to old))
+        assertEquals(listOf<Boolean?>(true, false), models.map { it.vision })
+    }
+
+    @Test
+    fun `a model that takes images gets the message's images and render_page`() = runBlocking {
+        val model = connectHosted("anthropic", "claude-sonnet-5-5")
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        route("/anthropic/messages", { sse(*anthropicReply) })
+        val image = (store.stage("cat.png", null) { java.io.ByteArrayInputStream("PNG-cat".toByteArray()) } as StageResult.Staged).attachment.id
+        val id = chats.send(null, "what is it?", model, attachmentIds = listOf(image))!!
+        assertEquals("A cat.", awaitDone(id, chats).assistantText)
+        val body = bodies.last()
+        val content = body.getJSONArray("messages").getJSONObject(0).getJSONArray("content")
+        assertEquals("text", content.getJSONObject(0).getString("type"))
+        assertEquals("image", content.getJSONObject(1).getString("type"))
+        assertEquals(java.util.Base64.getEncoder().encodeToString("PNG-cat".toByteArray()), content.getJSONObject(1).getJSONObject("source").getString("data"))
+        val tools = (0 until body.getJSONArray("tools").length()).map { body.getJSONArray("tools").getJSONObject(it).getString("name") }
+        assertTrue("attachment_render_page" in tools)
+    }
+
+    @Test
+    fun `a model not known to take images gets no image, only the note`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        route("/v1/chat/completions", { sse(chatText("I can't see it."), chatStop) })
+        val image = (store.stage("cat.png", null) { java.io.ByteArrayInputStream("PNG-cat".toByteArray()) } as StageResult.Staged).attachment.id
+        val id = chats.send(null, "what is it?", model, attachmentIds = listOf(image))!!
+        awaitDone(id, chats)
+        val content = bodies.last().getJSONArray("messages").getJSONObject(1).get("content")
+        assertTrue(content is String && content.contains("cat.png"))
+    }
+
+    @Test
+    fun `a message that can't be saved puts its files back under the composer`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        store.stageText("a.txt", "a")
+        dao.failInserts = true
+        assertNull(chats.send(null, "hi", model, attachmentIds = store.staged.value.map { it.id }))
+        assertEquals(listOf("a.txt"), store.staged.value.map { it.name })
+        // A file no longer staged: nothing is sent.
+        dao.failInserts = false
+        assertNull(chats.send(null, "hi", model, attachmentIds = listOf("selection_00000000000000000000")))
+        assertTrue(dao.sessionIds().isEmpty())
+    }
+
+    @Test
+    fun `a launch sweep while a send is between moving its files and saving its chat keeps them`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        // A chat with files already, so the sweep has a folder to judge.
+        route("/v1/chat/completions", { sse(chatText("ok"), chatStop) }, { sse(chatText("ok"), chatStop) })
+        val first = chats.send(null, "one", model, attachmentIds = listOf(store.stageText("a.txt", "a")))!!
+        awaitDone(first, chats)
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        dao.holdInserts = hold
+        val staged = store.stageText("b.txt", "b")
+        val send = CoroutineScope(Dispatchers.IO).let { scope ->
+            kotlinx.coroutines.CompletableDeferred<String?>().also { out ->
+                scope.launch { out.complete(chats.send(null, "two", model, attachmentIds = listOf(staged))) }
+            }
+        }
+        // The files have moved; the chat isn't in the database yet.
+        withTimeout(5_000) { while (store.staged.value.isNotEmpty()) delay(10) }
+        assertEquals(listOf(first), dao.sessionIds())
+        // MainActivity's sweep at that instant.
+        assertEquals(0, store.sweep { dao.sessionIds().toSet() })
+        hold.complete(Unit)
+        val second = withTimeout(5_000) { send.await() }!!
+        awaitDone(second, chats)
+        assertEquals(listOf("b.txt"), store.list(second).map { it.name })
+        // Committed: the next sweep judges it by the chat list, which names it.
+        assertEquals(0, store.sweep { dao.sessionIds().toSet() })
+        assertEquals(1, store.list(second).size)
+    }
+
+    @Test
+    fun `a send landing while Delete all chats is between the database and the folders keeps its files`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        // Delete all holds after the database delete, before the folders go.
+        val between = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resume = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val chats = withAttachments(store) { if (it == null) { between.complete(Unit); resume.await() } }
+        route("/v1/chat/completions", { sse(chatText("ok"), chatStop) })
+        val io = CoroutineScope(Dispatchers.IO)
+        val deleted = kotlinx.coroutines.CompletableDeferred<Boolean>().also { out ->
+            io.launch { out.complete(chats.deleteAll()) }
+        }
+        withTimeout(5_000) { between.await() }
+        val staged = store.stageText("b.txt", "b")
+        val send = kotlinx.coroutines.CompletableDeferred<String?>().also { out ->
+            io.launch { out.complete(chats.send(null, "two", model, attachmentIds = listOf(staged))) }
+        }
+        // The send waits for Delete all rather than saving a chat whose folder is about to go.
+        delay(300)
+        assertFalse(send.isCompleted)
+        resume.complete(Unit)
+        assertTrue(withTimeout(5_000) { deleted.await() })
+        val id = withTimeout(5_000) { send.await() }!!
+        awaitDone(id, chats)
+        // The chat that survives has its file.
+        assertEquals(listOf(id), dao.sessionIds())
+        assertEquals(listOf("b.txt"), store.list(id).map { it.name })
+    }
+
+    @Test
+    fun `deleting a chat, or every chat, deletes its files, and a start sweeps a chat's that's gone`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        route("/v1/chat/completions", { sse(chatText("ok"), chatStop) }, { sse(chatText("ok"), chatStop) })
+        val one = chats.send(null, "one", model, attachmentIds = listOf(store.stageText("a.txt", "a")))!!
+        awaitDone(one, chats)
+        val two = chats.send(null, "two", model, attachmentIds = listOf(store.stageText("b.txt", "b")))!!
+        awaitDone(two, chats)
+        assertTrue(chats.delete(one))
+        assertTrue(store.list(one).isEmpty())
+        assertEquals(1, store.list(two).size)
+        // A chat gone from the database while its files stayed (a crash): swept at the next start.
+        dao.deleteSession(two)
+        val restarted = withAttachments(store)
+        withTimeout(5_000) { while (store.list(two).isNotEmpty()) delay(10) }
+        route("/v1/chat/completions", { sse(chatText("ok"), chatStop) })
+        val three = restarted.send(null, "three", model, attachmentIds = listOf(store.stageText("c.txt", "c")))!!
+        awaitDone(three, restarted)
+        assertTrue(restarted.deleteAll())
+        assertTrue(store.list(three).isEmpty())
+    }
+
 }
 
 /** [ChatDao] in memory, for tests. */
@@ -709,8 +940,17 @@ internal class MemoryChatDao : ChatDao {
     override fun turnsFlow(sessionId: String) = turns.map { all -> all.filter { it.sessionId == sessionId }.sortedBy { it.position } }
     override suspend fun turns(sessionId: String) = turnsFlow(sessionId).first()
     override suspend fun nextPosition(sessionId: String) = (turns(sessionId).maxOfOrNull { it.position } ?: -1) + 1
+    /** Set: saving a new chat throws, as a database that can't be written would. */
+    @Volatile var failInserts = false
+
+    /** Set: saving a new chat waits for it, as a slow database would. */
+    @Volatile var holdInserts: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    override suspend fun sessionIds(): List<String> = sessions.value.keys.toList()
     override suspend fun insertSession(session: ChatSession) {
+        holdInserts?.await()
         synchronized(this) {
+            if (failInserts) throw java.io.IOException("disk")
             require(session.id !in sessions.value)
             sessions.value = sessions.value + (session.id to session)
         }

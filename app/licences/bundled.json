@@ -2,6 +2,8 @@
   "own": [
     "adblock/README.md",
     "agent/page.js",
+    "agent/pdf/extract.html",
+    "agent/pdf/extract.mjs",
     "agent/skills/dweb-domains/SKILL.md",
     "agent/skills/dweb-domains/ens.md",
     "agent/skills/dweb-domains/gwei.md",
@@ -215,6 +217,25 @@
       "url": "https://github.com/gvergnaud/ts-pattern",
       "files": ["openlv/openlv.esm.js"],
       "texts": ["bundled/ts-pattern.txt"]
+    },
+    {
+      "name": "PDF.js (pdfjs-dist, legacy build)",
+      "version": "6.3.289",
+      "section": "data",
+      "licence": "Apache-2.0",
+      "url": "https://github.com/mozilla/pdf.js",
+      "notice": "Copyright Mozilla Foundation. Shipped unmodified as assets/agent/pdf/pdf.min.mjs and pdf.worker.min.mjs (pdfjs-dist's legacy/build), which Freedom Agent uses to read the text of an attached PDF.",
+      "files": ["agent/pdf/pdf.min.mjs", "agent/pdf/pdf.worker.min.mjs"],
+      "texts": ["texts/Apache-2.0.txt"]
+    },
+    {
+      "name": "core-js (in the PDF.js legacy build)",
+      "version": "3.50.0",
+      "section": "data",
+      "licence": "MIT",
+      "url": "https://github.com/zloirock/core-js",
+      "files": ["agent/pdf/pdf.min.mjs", "agent/pdf/pdf.worker.min.mjs"],
+      "texts": ["bundled/core-js.txt"]
     },
     {
       "name": "EasyList, EasyList Germany, EasyPrivacy, Fanboy's Cookiemonster and Fanboy's Annoyance List",

@@ -10,7 +10,7 @@ import org.json.JSONObject
  * where Android does it differently (a held tab instead of an Agent
  * pane; an interaction brings its tab on screen). Uploads and downloads
  * came with #600. Not here yet: frames, page tools (WebMCP), wallet
- * actions and the screenshot (a tool result carries no image yet).
+ * actions and the screenshot (a tool result can carry an image since #601).
  */
 internal object BrowserToolSpecs {
     const val LIST_TABS = "browser_list_tabs"

@@ -278,4 +278,118 @@ class AgentLoopTest {
         override fun dialog(id: Long): AgentDialog? = null
         override fun answerDialog(id: Long, dialog: AgentDialog, accept: Boolean, promptText: String?) = false
     }
+
+    // ---- images (#601) ----
+
+    /** A tool that returns a picture, and one only a model that takes images is offered. */
+    private class Camera(private val image: ImagePart) : AgentTool {
+        override val spec = ToolSpec("look", "Look.", JSONObject().put("type", "object"))
+        override suspend fun run(arguments: JSONObject) = ToolOutcome("a picture", images = listOf(image))
+    }
+
+    private class Render : AgentTool {
+        override val needsImages = true
+        override val spec = ToolSpec("render", "Render.", JSONObject().put("type", "object"))
+        override suspend fun run(arguments: JSONObject) = ToolOutcome("rendered")
+    }
+
+    @Test
+    fun `a model that takes images gets the message's images and a tool's, one that doesn't gets neither`() {
+        val photo = ImagePart("image/png", "AAAA")
+        for (images in listOf(true, false)) {
+            val model = Script(reply("", ToolCall("c1", "look", "{}")), reply("A cat."))
+            val loop = AgentLoop(model, ToolRegistry(listOf(Camera(photo), Render())), ContextLimits(128_000, 1000), "m", { "s" }, images = images)
+            val outcome = runBlocking { loop.run(emptyList(), null, "what is it?", {}, {}, userImages = listOf(photo)) }
+            assertEquals("A cat.", outcome.text)
+            val second = model.requests[1].items
+            assertEquals(if (images) listOf(photo) else emptyList<ImagePart>(), (second[0] as ChatItem.User).images)
+            assertEquals(if (images) listOf(photo) else emptyList<ImagePart>(), (second[2] as ChatItem.ToolResult).images)
+            assertEquals(images, "render" in model.requests[0].tools.map { it.name })
+        }
+    }
+
+    @Test
+    fun `an image counts as a flat cost, never its base64 length`() {
+        // A 20 MB image's base64 alone would be past this window many times over.
+        val huge = ImagePart("image/png", "A".repeat(2_000_000))
+        val model = Script(reply("ok"))
+        val compacted = ArrayList<Summary>()
+        val loop = AgentLoop(model, tools, ContextLimits(32_768, 1000), "m", { "s" }, images = true)
+        val history = listOf(HistoryTurn(0, "earlier", "answer"))
+        runBlocking { loop.run(history, null, "look", {}, { compacted += it }, userImages = listOf(huge)) }
+        assertTrue(compacted.isEmpty())
+        assertEquals(1, model.requests.size)
+    }
+
+    @Test
+    fun `a request keeps the newest images within its budget and names the others`() {
+        val old = ImagePart("image/png", "O".repeat(10))
+        val mid = ImagePart("image/png", "M".repeat(10))
+        val new = ImagePart("image/png", "N".repeat(10))
+        val items = listOf(
+            ChatItem.User("look", listOf(old)),
+            ChatItem.Assistant("", listOf(ToolCall("c1", "look", "{}"))),
+            ChatItem.ToolResult("c1", "look", "first", images = listOf(mid)),
+            ChatItem.Assistant("", listOf(ToolCall("c2", "look", "{}"))),
+            ChatItem.ToolResult("c2", "look", "second", images = listOf(new)),
+        )
+        val kept = AgentLoop.withinImageBudget(items, budget = 25)
+        assertEquals(listOf(new), (kept[4] as ChatItem.ToolResult).images)
+        assertEquals(listOf(mid), (kept[2] as ChatItem.ToolResult).images)
+        val user = kept[0] as ChatItem.User
+        assertTrue(user.images.isEmpty())
+        assertEquals("look\n" + AgentLoop.IMAGE_DROPPED, user.text)
+        assertEquals(items, AgentLoop.withinImageBudget(items, budget = 30))
+    }
+
+    @Test
+    fun `a request carries at most the newest 20 images`() {
+        val images = List(25) { ImagePart("image/png", "I$it") }
+        val items = listOf(
+            ChatItem.User("look", images.take(10)),
+            ChatItem.Assistant("", listOf(ToolCall("c1", "look", "{}"))),
+            ChatItem.ToolResult("c1", "look", "pages", images = images.drop(10)),
+        )
+        val kept = AgentLoop.withinImageBudget(items)
+        assertEquals(images.drop(10), (kept[2] as ChatItem.ToolResult).images)
+        val user = kept[0] as ChatItem.User
+        assertEquals(images.take(5), user.images)
+        assertEquals(5, user.text.split("\n").count { it == AgentLoop.IMAGE_DROPPED })
+        assertEquals(20, AgentLoop.MAX_IMAGES)
+    }
+
+    @Test
+    fun `a turn lets go of the images it no longer sends`() {
+        // Each step's tool returns a new picture; the turn mustn't keep
+        // the ones past the newest 20 alive until it ends.
+        val first = ArrayList<java.lang.ref.WeakReference<ImagePart>>()
+        val camera = object : AgentTool {
+            override val spec = ToolSpec("look", "Look.", JSONObject().put("type", "object"))
+            override suspend fun run(arguments: JSONObject): ToolOutcome {
+                val image = ImagePart("image/png", "P".repeat(1000) + first.size)
+                first += java.lang.ref.WeakReference(image)
+                return ToolOutcome("a picture", images = listOf(image))
+            }
+        }
+        val steps = 22
+        var collected = -1
+        var sent = -1
+        val model = object : ModelStream {
+            var n = 0
+            override suspend fun step(request: StepRequest, onText: (String) -> Unit): StepOutcome {
+                if (n++ < steps) return StepOutcome.Ok(StepResult("", listOf(ToolCall("c$n", "look", "{}")), StopReason.ToolUse))
+                sent = request.items.sumOf { (it as? ChatItem.ToolResult)?.images?.size ?: 0 }
+                repeat(5) { System.gc(); Thread.sleep(20) }
+                collected = first.take(steps - AgentLoop.MAX_IMAGES).count { it.get() == null }
+                onText("Pictures.")
+                return StepOutcome.Ok(StepResult("Pictures.", emptyList(), StopReason.Done))
+            }
+        }
+        val loop = AgentLoop(model, ToolRegistry(listOf(camera)), ContextLimits(128_000, 1000), "m", { "s" }, images = true)
+        val outcome = runBlocking { loop.run(emptyList(), null, "look", {}, {}) }
+        assertEquals("Pictures.", outcome.text)
+        assertEquals(AgentLoop.MAX_IMAGES, sent)
+        assertEquals(steps - AgentLoop.MAX_IMAGES, collected)
+        assertTrue(first.takeLast(AgentLoop.MAX_IMAGES).all { it.get() != null })
+    }
 }

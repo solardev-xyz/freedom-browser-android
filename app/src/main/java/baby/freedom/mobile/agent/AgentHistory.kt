@@ -73,6 +73,11 @@ internal data class ChatTurn(
     val durationMs: Long? = null,
     /** A [ChatError]'s name, when it didn't end in a whole answer. */
     val error: String? = null,
+    /**
+     * The files sent with the message (#601), as JSON ([Attachment.listJson]);
+     * null for none. Shown under it, and named to the model again in later turns.
+     */
+    val attachments: String? = null,
 )
 
 @Dao
@@ -129,6 +134,10 @@ internal interface ChatDao {
     @Query("DELETE FROM agent_sessions")
     suspend fun deleteAll()
 
+    /** Every chat's id, for sweeping attachments whose chat is gone (#601). */
+    @Query("SELECT id FROM agent_sessions")
+    suspend fun sessionIds(): List<String>
+
     /** A new session and its first turn, together. */
     @Transaction
     suspend fun start(session: ChatSession, turn: ChatTurn) {
@@ -141,7 +150,7 @@ internal interface ChatDao {
     }
 }
 
-@Database(entities = [ChatSession::class, ChatTurn::class], version = 2, exportSchema = true)
+@Database(entities = [ChatSession::class, ChatTurn::class], version = 3, exportSchema = true)
 internal abstract class AgentDatabase : RoomDatabase() {
     abstract fun chats(): ChatDao
 
@@ -155,11 +164,18 @@ internal abstract class AgentDatabase : RoomDatabase() {
             }
         }
 
+        /** The files a message was sent with (#601); every turn from before had none. */
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE agent_turns ADD COLUMN attachments TEXT")
+            }
+        }
+
         @Volatile private var instance: AgentDatabase? = null
 
         fun get(context: Context): AgentDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AgentDatabase::class.java, FILE_NAME)
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
                 .also { instance = it }
         }

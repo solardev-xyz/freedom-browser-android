@@ -18,13 +18,30 @@ import org.json.JSONObject
 
 /** One entry of a conversation as the model sees it. */
 internal sealed interface ChatItem {
-    data class User(val text: String) : ChatItem
+    /** The user's message; [images] only for a model that takes them (#601). */
+    data class User(val text: String, val images: List<ImagePart> = emptyList()) : ChatItem
 
     /** What the model said in one step, and the tools it asked for. */
     data class Assistant(val text: String, val toolCalls: List<ToolCall> = emptyList()) : ChatItem
 
-    /** A tool's answer to [callId]. */
-    data class ToolResult(val callId: String, val name: String, val output: String, val isError: Boolean = false) : ChatItem
+    /** A tool's answer to [callId]; [images] it returned (#601), for a model that takes them. */
+    data class ToolResult(
+        val callId: String,
+        val name: String,
+        val output: String,
+        val isError: Boolean = false,
+        val images: List<ImagePart> = emptyList(),
+    ) : ChatItem
+}
+
+/**
+ * An image for the model (#601): a JPEG, PNG or WebP, base64 without
+ * line breaks. Sent the way Pi sends it in each format.
+ */
+internal data class ImagePart(val mimeType: String, val base64: String) {
+    val dataUrl: String get() = "data:$mimeType;base64,$base64"
+
+    override fun toString(): String = "ImagePart($mimeType, ${base64.length} chars)"
 }
 
 /** A tool call: [arguments] is the JSON text the model wrote. */
@@ -113,29 +130,46 @@ internal object AgentWire {
     private fun chatBody(definition: ProviderDefinition, r: StepRequest): JSONObject {
         val messages = JSONArray()
         if (r.system.isNotEmpty()) messages.put(JSONObject().put("role", "system").put("content", r.system))
-        for (item in r.items) when (item) {
-            is ChatItem.User -> messages.put(JSONObject().put("role", "user").put("content", item.text))
-            is ChatItem.Assistant -> messages.put(
-                JSONObject().put("role", "assistant").apply {
-                    // `null` content with tool calls, as OpenAI writes it.
-                    put("content", if (item.text.isEmpty() && item.toolCalls.isNotEmpty()) JSONObject.NULL else item.text)
-                    if (item.toolCalls.isNotEmpty()) put(
-                        "tool_calls",
-                        JSONArray(
-                            item.toolCalls.map {
-                                JSONObject().put("id", it.id).put("type", "function").put(
-                                    "function",
-                                    JSONObject().put("name", it.name).put("arguments", it.arguments),
-                                )
-                            },
-                        ),
-                    )
-                },
-            )
-            is ChatItem.ToolResult -> messages.put(
-                JSONObject().put("role", "tool").put("tool_call_id", item.callId).put("content", item.output),
-            )
+        // Chat Completions takes no image in a tool message: as Pi does, a
+        // step's tool images follow its tool messages in one user message.
+        val toolImages = ArrayList<ImagePart>()
+        fun flushImages() {
+            if (toolImages.isEmpty()) return
+            val content = JSONArray().put(JSONObject().put("type", "text").put("text", TOOL_IMAGES_NOTE))
+            for (image in toolImages) content.put(chatImage(image))
+            messages.put(JSONObject().put("role", "user").put("content", content))
+            toolImages.clear()
         }
+        for (item in r.items) {
+            if (item !is ChatItem.ToolResult) flushImages()
+            when (item) {
+                is ChatItem.User -> messages.put(JSONObject().put("role", "user").put("content", chatContent(item)))
+                is ChatItem.Assistant -> messages.put(
+                    JSONObject().put("role", "assistant").apply {
+                        // `null` content with tool calls, as OpenAI writes it.
+                        put("content", if (item.text.isEmpty() && item.toolCalls.isNotEmpty()) JSONObject.NULL else item.text)
+                        if (item.toolCalls.isNotEmpty()) put(
+                            "tool_calls",
+                            JSONArray(
+                                item.toolCalls.map {
+                                    JSONObject().put("id", it.id).put("type", "function").put(
+                                        "function",
+                                        JSONObject().put("name", it.name).put("arguments", it.arguments),
+                                    )
+                                },
+                            ),
+                        )
+                    },
+                )
+                is ChatItem.ToolResult -> {
+                    messages.put(
+                        JSONObject().put("role", "tool").put("tool_call_id", item.callId).put("content", toolText(item)),
+                    )
+                    toolImages += item.images
+                }
+            }
+        }
+        flushImages()
         return JSONObject()
             .put("model", r.modelId)
             .put("messages", messages)
@@ -172,7 +206,15 @@ internal object AgentWire {
         for (item in r.items) when (item) {
             is ChatItem.User -> {
                 flush()
-                messages.put(JSONObject().put("role", "user").put("content", item.text))
+                val content: Any = if (item.images.isEmpty()) {
+                    item.text
+                } else {
+                    JSONArray().apply {
+                        put(JSONObject().put("type", "text").put("text", item.text.ifEmpty { IMAGE_PLACEHOLDER }))
+                        for (image in item.images) put(anthropicImage(image))
+                    }
+                }
+                messages.put(JSONObject().put("role", "user").put("content", content))
             }
             is ChatItem.Assistant -> {
                 flush()
@@ -188,9 +230,17 @@ internal object AgentWire {
             }
             is ChatItem.ToolResult -> {
                 val results = pendingResults ?: JSONArray().also { pendingResults = it }
+                val content: Any = if (item.images.isEmpty()) {
+                    item.output
+                } else {
+                    JSONArray().apply {
+                        put(JSONObject().put("type", "text").put("text", toolText(item)))
+                        for (image in item.images) put(anthropicImage(image))
+                    }
+                }
                 results.put(
                     JSONObject().put("type", "tool_result").put("tool_use_id", item.callId)
-                        .put("content", item.output).apply { if (item.isError) put("is_error", true) },
+                        .put("content", content).apply { if (item.isError) put("is_error", true) },
                 )
             }
         }
@@ -270,7 +320,17 @@ internal object AgentWire {
 
     private fun responsesInput(items: List<ChatItem>, input: JSONArray) {
         for (item in items) when (item) {
-            is ChatItem.User -> input.put(JSONObject().put("role", "user").put("content", item.text))
+            is ChatItem.User -> {
+                val content: Any = if (item.images.isEmpty()) {
+                    item.text
+                } else {
+                    JSONArray().apply {
+                        put(JSONObject().put("type", "input_text").put("text", item.text.ifEmpty { IMAGE_PLACEHOLDER }))
+                        for (image in item.images) put(responsesImage(image))
+                    }
+                }
+                input.put(JSONObject().put("role", "user").put("content", content))
+            }
             is ChatItem.Assistant -> {
                 if (item.text.isNotEmpty()) input.put(
                     JSONObject().put("type", "message").put("role", "assistant").put(
@@ -285,11 +345,46 @@ internal object AgentWire {
                         .put("arguments", call.arguments),
                 )
             }
-            is ChatItem.ToolResult -> input.put(
-                JSONObject().put("type", "function_call_output").put("call_id", item.callId).put("output", item.output),
-            )
+            is ChatItem.ToolResult -> {
+                val output: Any = if (item.images.isEmpty()) {
+                    item.output
+                } else {
+                    JSONArray().apply {
+                        if (item.output.isNotEmpty()) put(JSONObject().put("type", "input_text").put("text", item.output))
+                        for (image in item.images) put(responsesImage(image))
+                    }
+                }
+                input.put(JSONObject().put("type", "function_call_output").put("call_id", item.callId).put("output", output))
+            }
         }
     }
+
+    // Pi's words where a message has images and no text, and before a step's tool images.
+    const val IMAGE_PLACEHOLDER = "(see attached image)"
+    const val TOOL_IMAGES_NOTE = "Attached image(s) from tool result:"
+
+    private fun toolText(item: ChatItem.ToolResult): String =
+        item.output.ifEmpty { if (item.images.isNotEmpty()) IMAGE_PLACEHOLDER else item.output }
+
+    private fun chatContent(item: ChatItem.User): Any = if (item.images.isEmpty()) {
+        item.text
+    } else {
+        JSONArray().apply {
+            put(JSONObject().put("type", "text").put("text", item.text.ifEmpty { IMAGE_PLACEHOLDER }))
+            for (image in item.images) put(chatImage(image))
+        }
+    }
+
+    private fun chatImage(image: ImagePart): JSONObject =
+        JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image.dataUrl))
+
+    private fun anthropicImage(image: ImagePart): JSONObject = JSONObject().put("type", "image").put(
+        "source",
+        JSONObject().put("type", "base64").put("media_type", image.mimeType).put("data", image.base64),
+    )
+
+    private fun responsesImage(image: ImagePart): JSONObject =
+        JSONObject().put("type", "input_image").put("detail", "auto").put("image_url", image.dataUrl)
 
     /** A call's arguments as an object; `{}` for empty or unusable text (Anthropic wants an object). */
     fun argumentsObject(text: String): JSONObject = parseObject(text.ifBlank { "{}" }) ?: JSONObject()
