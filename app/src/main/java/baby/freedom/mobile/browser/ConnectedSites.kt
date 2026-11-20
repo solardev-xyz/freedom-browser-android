@@ -491,7 +491,7 @@ internal fun SwarmSitesSection(
             grant.act.forEach { rule ->
                 val address = SwarmAct.publisher(rule.publicKey)?.address
                 val removeLabel = stringResource(R.string.send_swarm_act_remove_cd, address ?: rule.publicKey)
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("swarm-act-rule")) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp).testTag("swarm-act-rule")) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(rule.publicKey, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                         address?.let {
