@@ -106,8 +106,8 @@ import kotlinx.coroutines.launch
 internal fun agentAiOn(context: Context): Flow<Boolean> =
     AgentProviders.get(context).state.map { it.enabled }.distinctUntilChanged()
 
-/** A model the picker offers: [label] is its name, [connectionName] its provider's. */
-internal data class ModelChoice(val ref: ModelRef, val label: String, val connectionName: String)
+/** A model the picker offers: [label] is its name, [connectionName] its provider's; [vision]: it takes images (#601). */
+internal data class ModelChoice(val ref: ModelRef, val label: String, val connectionName: String, val vision: Boolean = false)
 
 /**
  * The models the chat's picker offers (#574): each connection's
@@ -118,13 +118,13 @@ internal data class ModelChoice(val ref: ModelRef, val label: String, val connec
 internal fun modelChoices(state: AgentState, discovered: Map<String, List<AgentModel>>, providers: AgentProviders): List<ModelChoice> =
     state.connections.filter { !state.keyLost(it) }.flatMap { c ->
         val models = providers.modelsOf(c, discovered)
-        val names = models.associate { it.id to it.name }
+        val byId = models.associateBy { it.id }
         val definition = ProviderCatalog.definition(c.providerId)
         val default = state.defaultModel?.takeIf { it.connectionId == c.id }?.modelId
         val ids = (listOfNotNull(default) + c.favorites).distinct().ifEmpty {
             listOfNotNull(definition?.defaultModelId ?: models.firstOrNull()?.id)
         }
-        ids.map { ModelChoice(ModelRef(c.id, it), names[it] ?: it, c.name) }
+        ids.map { ModelChoice(ModelRef(c.id, it), byId[it]?.name ?: it, c.name, byId[it]?.vision == true) }
     }
 
 /** How long a just-shown Stop ignores taps. */
@@ -253,6 +253,13 @@ private fun ChatView(
 
     // Voice dictation (#578): only when the phone has a recognizer.
     val context = LocalContext.current
+    // Files for the message being written (#601): held by the store, so a
+    // rotation keeps them; a pick never sent is gone after a restart.
+    val attachmentStore = remember(context) { AgentAttachments.get(context) }
+    val staged by attachmentStore.staged.collectAsState()
+    var refused by remember { mutableStateOf<List<StageResult.Refused>>(emptyList()) }
+    // Picks still being copied in: Send waits for them.
+    var staging by remember { mutableStateOf(0) }
     val recognizers = rememberDictationRecognizer()
     val recognizer = recognizers.kind
     val languagePick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
@@ -450,7 +457,24 @@ private fun ChatView(
                 serviceOffered = RecognizerKind.Service in recognizers.available,
                 onOpenAndroidSettings = { openAppSettings(context) },
             )
+            StageRefusals(refused)
+            StagedAttachments(staged) { id ->
+                refused = emptyList()
+                scope.launch { attachmentStore.unstage(id) }
+            }
+            StagedNote(staged, modelTakesImages = choices.firstOrNull { it.ref == model }?.vision == true)
             Row(verticalAlignment = Alignment.Bottom) {
+                AttachButton(enabled = !sending.value && staged.size < AttachmentRules.MAX_SELECTIONS) { uris ->
+                    refused = emptyList()
+                    staging++
+                    scope.launch {
+                        try {
+                            refused = stagePicks(context, attachmentStore, uris).filterIsInstance<StageResult.Refused>()
+                        } finally {
+                            staging--
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = {
@@ -514,11 +538,14 @@ private fun ChatView(
                             // to come mustn't change the draft mid-send.
                             dictation?.cancel()
                             val text = draft
-                            if (text.isBlank()) return@FilledIconButton
+                            if (text.isBlank() || staging > 0) return@FilledIconButton
+                            // The files shown are the files sent.
+                            val files = staged.map { it.id }
                             sending.value = true
+                            refused = emptyList()
                             scope.launch {
                                 try {
-                                    val id = chats.send(sessionId, text, m, mode)
+                                    val id = chats.send(sessionId, text, m, mode, files)
                                     if (id == null) {
                                         sendFailed = true
                                     } else {
@@ -540,7 +567,7 @@ private fun ChatView(
                                 }
                             }
                         },
-                        enabled = !sending.value && model != null && draft.isNotBlank() &&
+                        enabled = !sending.value && model != null && draft.isNotBlank() && staging == 0 &&
                             draft.length <= AgentChats.MAX_MESSAGE_CHARS,
                         modifier = Modifier.padding(start = 8.dp),
                     ) {
@@ -893,6 +920,7 @@ private fun TurnHead(turn: ChatTurn, modifier: Modifier = Modifier) {
                     color = colors.onSecondaryContainer,
                 )
             }
+            TurnAttachments(turn.attachments)
         }
         Text(
             stringResource(R.string.agent_name),

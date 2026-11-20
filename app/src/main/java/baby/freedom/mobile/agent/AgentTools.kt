@@ -13,14 +13,35 @@ import org.json.JSONObject
  * result. [declined]: the user said no on an approval card; the turn
  * ends there ([AgentLoop]), so nothing else is asked of them in it.
  */
-internal data class ToolOutcome(val output: String, val isError: Boolean = false, val declined: Boolean = false)
+internal data class ToolOutcome(
+    val output: String,
+    val isError: Boolean = false,
+    val declined: Boolean = false,
+    /** Images for the model (#601), next to [output]; only from a tool run for a model that takes them. */
+    val images: List<ImagePart> = emptyList(),
+)
 
 /** A tool the agent can run. [run] gets the call's arguments as an object. */
 internal interface AgentTool {
     val spec: ToolSpec
 
+    /** Offered only to a model that takes images (#601, desktop's `attachment_render_page`). */
+    val needsImages: Boolean get() = false
+
     suspend fun run(arguments: JSONObject): ToolOutcome
 }
+
+/**
+ * What the model of the turn running a tool takes (#601): set by
+ * [ToolRegistry.run] for the call, read by a tool whose answer depends
+ * on it (an image attachment is shown only to a model that takes images).
+ */
+internal class ModelInput(val images: Boolean) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<ModelInput>
+}
+
+/** Whether the model a tool is running for takes images ([ModelInput]); false outside a turn. */
+internal suspend fun modelTakesImages(): Boolean = kotlin.coroutines.coroutineContext[ModelInput]?.images == true
 
 /**
  * The tools a chat offers the model (#574): the harmless
@@ -29,24 +50,31 @@ internal interface AgentTool {
  * (#595), the read-only [NodeStatusTool] (#577), [WalletTransferTool]
  * (#596), whose every transfer goes to the user on its own review sheet
  * whatever the mode, [SwarmPublishTools] (#597), whose every
- * publication does too, and the name tools ([DomainToolset], #599),
- * whose every transaction does too.
+ * publication does too, the name tools ([DomainToolset], #599),
+ * whose every transaction does too, and the files attached to the chat
+ * ([AttachmentTools], #601).
  */
 internal class ToolRegistry(tools: List<AgentTool>) {
     private val byName = tools.associateBy { it.spec.name }
 
     val specs: List<ToolSpec> = tools.map { it.spec }
 
+    /** The tools offered to a model: those for images ([AgentTool.needsImages]) only if it takes them. */
+    fun specsFor(images: Boolean): List<ToolSpec> = if (images) specs else specs.filter { byName[it.name]?.needsImages != true }
+
     /**
      * Runs [call], always to one result: a tool the model made up or
      * arguments that aren't a JSON object come back to it as an error it
      * can correct, never as a failed turn.
      */
-    suspend fun run(call: ToolCall): ToolOutcome {
-        val tool = byName[call.name] ?: return ToolOutcome(UNKNOWN_TOOL, isError = true)
+    suspend fun run(call: ToolCall, images: Boolean = false): ToolOutcome {
+        val tool = byName[call.name]?.takeUnless { it.needsImages && !images } ?: return ToolOutcome(UNKNOWN_TOOL, isError = true)
         if (call.arguments.length > AgentWire.MAX_ARGUMENT_CHARS) return ToolOutcome(BAD_ARGUMENTS, isError = true)
         val args = AgentWire.parseObject(call.arguments.ifBlank { "{}" }) ?: return ToolOutcome(BAD_ARGUMENTS, isError = true)
-        val outcome = tool.run(args)
+        val outcome = kotlinx.coroutines.withContext(ModelInput(images)) { tool.run(args) }.let {
+            // Never to a model that doesn't take them, whatever a tool returned.
+            if (images || it.images.isEmpty()) it else it.copy(images = emptyList())
+        }
         return if (outcome.output.length > MAX_OUTPUT_CHARS) {
             outcome.copy(output = outcome.output.take(MAX_OUTPUT_CHARS) + "\n[truncated]")
         } else {
@@ -69,7 +97,8 @@ internal class ToolRegistry(tools: List<AgentTool>) {
          * A chat's tools: the clock, its own browser tools (#575), under
          * the chat's [approvals] (#595), the read-only node status (#577),
          * wallet transfers (#596), Swarm publishing (#597), the name tools
-         * (#599) and, when the app ships any, `read` for its built-in [skills].
+         * (#599), when the app ships any, `read` for its built-in [skills],
+         * and the chat's attachments (#601).
          */
         fun forChat(
             sessionId: String,
@@ -80,7 +109,8 @@ internal class ToolRegistry(tools: List<AgentTool>) {
             listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) +
                 BrowserToolset(sessionId, approvals = approvals).tools + NodeStatusTool() + WalletTransferTool(sessionId) +
                 SwarmPublishTools(sessionId, { AgentPublications.get(app()) }, { NodePublishBackend(app()) }).tools +
-                DomainToolset(sessionId).tools + listOfNotNull(skills?.takeUnless { it.isEmpty }?.let(::SkillReadTool)),
+                DomainToolset(sessionId).tools + listOfNotNull(skills?.takeUnless { it.isEmpty }?.let(::SkillReadTool)) +
+                AttachmentTools(sessionId, { AgentAttachments.get(app()) }, { AgentPdf.get(app()) }).tools,
         )
     }
 }

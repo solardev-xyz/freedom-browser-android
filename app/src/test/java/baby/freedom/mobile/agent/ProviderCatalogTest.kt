@@ -74,13 +74,17 @@ class ProviderCatalogTest {
     @Test
     fun `chatgpt lists only the models codex offers for picking`() {
         val list = JSONArray()
-            .put(JSONObject().put("slug", "gpt-6.1-sol").put("display_name", "GPT-6.1 Sol").put("visibility", "list"))
+            .put(
+                JSONObject().put("slug", "gpt-6.1-sol").put("display_name", "GPT-6.1 Sol").put("visibility", "list")
+                    .put("input_modalities", JSONArray().put("text")),
+            )
             .put(JSONObject().put("slug", "codex-auto-review").put("visibility", "hide"))
             .put(JSONObject().put("slug", "gpt-6-astra").put("visibility", "list"))
             .put(JSONObject().put("slug", "gpt-6-astra").put("visibility", "list"))
             .put(JSONObject().put("slug", "bad\u202Eid").put("visibility", "list"))
         val models = ProviderCatalog.parseModels(def("openai-codex"), JSONObject().put("models", list).toString())
-        assertEquals(listOf(AgentModel("gpt-6.1-sol", "GPT-6.1 Sol"), AgentModel("gpt-6-astra", "GPT-6 Astra")), models)
+        // Images (#601): as the list says, else as the bundled entry does.
+        assertEquals(listOf(AgentModel("gpt-6.1-sol", "GPT-6.1 Sol", vision = false), AgentModel("gpt-6-astra", "GPT-6 Astra", vision = true)), models)
     }
 
     @Test
@@ -94,7 +98,51 @@ class ProviderCatalogTest {
                 JSONObject().put("id", "o3"),
             ),
         )
-        assertEquals(listOf(AgentModel("gpt-6.1-sol", "GPT-6.1 Sol"), AgentModel("o3", "o3")), models)
+        assertEquals(listOf(AgentModel("gpt-6.1-sol", "GPT-6.1 Sol", vision = true), AgentModel("o3", "o3", vision = true)), models)
+    }
+
+    @Test
+    fun `which models take images, as each catalog says (#601)`() {
+        val openrouter = ProviderCatalog.parseModels(
+            def("openrouter"),
+            data(
+                JSONObject().put("id", "a/vision").put("architecture", JSONObject().put("input_modalities", JSONArray().put("text").put("image"))),
+                JSONObject().put("id", "b/text").put("architecture", JSONObject().put("input_modalities", JSONArray().put("text"))),
+                JSONObject().put("id", "c/unsaid"),
+            ),
+        )
+        assertEquals(listOf(true, false, false), openrouter.map { it.vision })
+        val venice = ProviderCatalog.parseModels(
+            def("venice"),
+            data(
+                JSONObject().put("id", "v1").put("type", "text").put("model_spec", JSONObject().put("capabilities", JSONObject().put("supportsVision", true))),
+                JSONObject().put("id", "v2").put("type", "text").put("model_spec", JSONObject().put("capabilities", JSONObject().put("supportsVision", "yes"))),
+            ),
+        )
+        assertEquals(listOf(true, false), venice.map { it.vision })
+        val near = ProviderCatalog.parseModels(
+            def("near-ai"),
+            JSONObject().put(
+                "models",
+                JSONArray()
+                    .put(JSONObject().put("modelId", "n1").put("metadata", JSONObject().put("architecture", JSONObject().put("inputModalities", JSONArray().put("image")))))
+                    .put(JSONObject().put("modelId", "n2")),
+            ).toString(),
+        )
+        assertEquals(listOf(true, false), near.map { it.vision })
+        // Pi's bundled lists: all but its text-only models.
+        val bundled = def("openai").bundled.associate { it.id to it.vision }
+        assertEquals(false, bundled["gpt-4"])
+        assertEquals(false, bundled["o3-mini"])
+        assertEquals(true, bundled["gpt-6.1-sol"])
+        assertTrue(def("anthropic").bundled.all { it.vision })
+        // A server on the network says nothing: no images.
+        val ollama = ProviderCatalog.parseModels(def(ProviderCatalog.OLLAMA), JSONObject().put("models", JSONArray().put(JSONObject().put("name", "llava"))).toString())
+        assertFalse(ollama.single().vision)
+        // Stored and read back; a list stored before says nothing, so no images.
+        val stored = AgentStore.encodeModels(openrouter)
+        assertEquals(openrouter, AgentStore.decodeModels(stored))
+        assertEquals(listOf(false), AgentStore.decodeModels("""[{"id":"a/vision"}]""").map { it.vision })
     }
 
     @Test

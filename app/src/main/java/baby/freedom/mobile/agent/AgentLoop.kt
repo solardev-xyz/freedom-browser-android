@@ -53,7 +53,10 @@ internal enum class ChatError {
     Declined,
 }
 
-/** A finished turn of a chat, as the model is given it again. */
+/**
+ * A finished turn of a chat, as the model is given it again: [userText]
+ * with the note naming the files sent with it (#601), never their images.
+ */
 internal data class HistoryTurn(val position: Int, val userText: String, val assistantText: String)
 
 /** The conversation before [through] (a turn position), compacted. */
@@ -113,14 +116,19 @@ internal class AgentLoop(
     toolsUnsupported: Boolean = false,
     /** Told once a request without tools went through where the same one with them was refused. */
     private val onToolsUnsupported: () -> Unit = {},
+    /** The model takes images (#601): it's sent the turn's images, and offered the tools that return them. */
+    private val images: Boolean = false,
 ) {
-    private var offerTools = !toolsUnsupported && tools.specs.isNotEmpty()
+    private val offered = tools.specsFor(images)
 
-    private val specs: List<ToolSpec> get() = if (offerTools) tools.specs else emptyList()
+    private var offerTools = !toolsUnsupported && offered.isNotEmpty()
+
+    private val specs: List<ToolSpec> get() = if (offerTools) offered else emptyList()
 
     /**
      * Runs one turn for [userText] after [history] (finished turns, by
-     * position, which [summary] may already cover in part). [onText]
+     * position, which [summary] may already cover in part), with
+     * [userImages] for a model that takes them (#601). [onText]
      * gets the turn's whole reply text each time it grows, as a buffer
      * valid only during the call (copying a long reply on every piece
      * would cost more than the reply); [onCompacted]
@@ -134,10 +142,11 @@ internal class AgentLoop(
         userText: String,
         onText: (CharSequence) -> Unit,
         onCompacted: suspend (Summary) -> Unit,
+        userImages: List<ImagePart> = emptyList(),
     ): TurnOutcome {
         var currentSummary = summary
         val turn = ArrayList<ChatItem>()
-        turn += ChatItem.User(userText)
+        turn += ChatItem.User(userText, if (images) userImages else emptyList())
         val text = StringBuilder()
         var compactionFailed = false
         for (step in 0 until maxSteps) {
@@ -191,8 +200,8 @@ internal class AgentLoop(
             turn += ChatItem.Assistant(result.text, result.toolCalls)
             // Every call gets exactly one result, in the order asked.
             for (call in result.toolCalls) {
-                val out = tools.run(call)
-                turn += ChatItem.ToolResult(call.id, call.name, out.output, out.isError)
+                val out = tools.run(call, images)
+                turn += ChatItem.ToolResult(call.id, call.name, out.output, out.isError, out.images)
                 // The user's Don't allow ends the turn: the step's other
                 // calls aren't run and no further step is asked for, so
                 // one no isn't followed by another card, and another.
@@ -210,7 +219,7 @@ internal class AgentLoop(
             add(ChatItem.User(t.userText))
             add(ChatItem.Assistant(t.assistantText))
         }
-        addAll(turn)
+        addAll(withinImageBudget(turn))
     }
 
     private fun estimate(system: String, items: List<ChatItem>): Int =
@@ -272,13 +281,70 @@ internal class AgentLoop(
     companion object {
         const val MAX_STEPS = 24
 
+        /**
+         * The images one request carries, in base64 characters (#601):
+         * every step sends the turn so far again, and each image a tool
+         * read stays in it, so ten 8 MB photos would make a body no phone
+         * can build. The newest ones are kept; an older one is named in
+         * its place, and the model can read it again.
+         */
+        const val MAX_IMAGE_CHARS = 16 * 1024 * 1024
+
+        const val IMAGE_DROPPED = "[An image here was left out of this request to keep it small; read it again if you need it.]"
+
+        /** [items] with the oldest images over [MAX_IMAGE_CHARS] left out. */
+        fun withinImageBudget(items: List<ChatItem>, budget: Int = MAX_IMAGE_CHARS): List<ChatItem> {
+            var left = budget.toLong()
+            val out = ArrayList<ChatItem>(items.size)
+            for (item in items.asReversed()) {
+                val images = when (item) {
+                    is ChatItem.User -> item.images
+                    is ChatItem.ToolResult -> item.images
+                    is ChatItem.Assistant -> emptyList()
+                }
+                if (images.isEmpty()) {
+                    out += item
+                    continue
+                }
+                val kept = ArrayList<ImagePart>()
+                var dropped = 0
+                for (image in images) {
+                    if (image.base64.length <= left) {
+                        kept += image
+                        left -= image.base64.length
+                    } else {
+                        dropped++
+                        left = 0
+                    }
+                }
+                out += if (dropped == 0) {
+                    item
+                } else {
+                    val note = List(dropped) { IMAGE_DROPPED }.joinToString("\n")
+                    when (item) {
+                        is ChatItem.User -> item.copy(text = item.text + "\n" + note, images = kept)
+                        is ChatItem.ToolResult -> item.copy(output = item.output + "\n" + note, images = kept)
+                        is ChatItem.Assistant -> item
+                    }
+                }
+            }
+            return out.asReversed()
+        }
+
         /** Pi's estimate: about four characters a token. */
         fun tokens(chars: Int): Int = (chars + 3) / 4
 
+        /**
+         * What an image counts for in the estimate (#601): a flat ~1,600
+         * tokens (Anthropic's figure for a large image), never its base64
+         * length, which would have one photo compact the conversation.
+         */
+        const val IMAGE_CHARS = 1_600 * 4
+
         private fun charsOf(item: ChatItem): Int = when (item) {
-            is ChatItem.User -> item.text.length
+            is ChatItem.User -> item.text.length + item.images.size * IMAGE_CHARS
             is ChatItem.Assistant -> item.text.length + item.toolCalls.sumOf { it.name.length + it.arguments.length }
-            is ChatItem.ToolResult -> item.output.length
+            is ChatItem.ToolResult -> item.output.length + item.images.size * IMAGE_CHARS
         }
 
         // Pi's compaction prompts (`compaction/compaction.js`, `utils.js`,

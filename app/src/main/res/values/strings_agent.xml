@@ -156,7 +156,7 @@
     <string name="agent_delete_chat">Delete chat %1$s</string>
     <string name="agent_delete_all">Delete all chats</string>
     <string name="agent_delete_all_title">Delete all chats?</string>
-    <string name="agent_delete_all_text">Every chat and its replies are removed from this phone. This can\'t be undone.</string>
+    <string name="agent_delete_all_text">Every chat, its replies and the files attached to it are removed from this phone. This can\'t be undone.</string>
     <string name="agent_delete_all_confirm">Delete all</string>
     <string name="agent_no_provider_title">No model yet</string>
     <string name="agent_no_provider_hint">Add a provider with an API key, or a server on your network, in Settings → AI.</string>
@@ -167,6 +167,22 @@
     <string name="agent_send">Send</string>
     <string name="agent_stop">Stop</string>
     <string name="agent_send_failed">Couldn\'t send this. Try again.</string>
+    <!-- Attachments (#601): files sent with a message. -->
+    <string name="agent_attach">Attach files</string>
+    <string name="agent_attachment_remove">Remove %1$s</string>
+    <string name="agent_attachment_size">%1$s · %2$s</string>
+    <string name="agent_attachment_kind_text">Text</string>
+    <string name="agent_attachment_kind_image">Image</string>
+    <string name="agent_attachment_kind_pdf">PDF</string>
+    <string name="agent_attachment_too_many">Attach at most 10 files to a message.</string>
+    <string name="agent_attachment_too_large">%1$s is larger than 20 MB.</string>
+    <string name="agent_attachment_total_too_large">%1$s wasn\'t attached: a message\'s files can come to 50 MB at most.</string>
+    <string name="agent_attachment_unsupported">%1$s isn\'t a text file, image or PDF.</string>
+    <string name="agent_attachment_not_image">%1$s isn\'t a JPEG, PNG or WebP image that can be opened.</string>
+    <string name="agent_attachment_image_too_large">%1$s is larger than 8 MB, the most a model is sent.</string>
+    <string name="agent_attachment_unreadable">Couldn\'t read %1$s.</string>
+    <string name="agent_attachment_no_vision">This model can\'t see images: it gets only their names. Pick a model that takes images to have it look at them.</string>
+    <string name="agent_attachment_where">The model you pick gets images with your message if it takes them, and reads other files when it needs them. The files stay on this phone with the chat and are deleted with it.</string>
     <string name="agent_model_label">%1$s · %2$s</string>
     <string name="agent_model_none">No model</string>
     <!-- The chat's approval mode (#595): short labels for the composer's picker, a line under each in its menu. -->

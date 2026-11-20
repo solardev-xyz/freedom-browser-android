@@ -49,6 +49,10 @@ internal class AgentChats(
     private val limitsOf: (ProviderDefinition) -> ContextLimits = ContextLimits::of,
     /** A deleted chat's publication receipts go with it (#597); null: every chat's. */
     private val forgetPublications: (String?) -> Unit = {},
+    /** The files attached to chats (#601); null: none can be. */
+    private val attachments: AgentAttachments? = null,
+    /** Whether a model takes images (#601): it's sent the message's images, and offered `attachment_render_page`. */
+    private val takesImages: suspend (ModelRef) -> Boolean = { false },
 ) {
     /** A turn in progress: its reply so far. */
     data class Live(val sessionId: String, val turnId: String, val text: String)
@@ -123,6 +127,14 @@ internal class AgentChats(
                 dao.markRunningInterrupted()
             } catch (e: Exception) {
                 Log.w(TAG, "sweeping running chat turns failed (${e.javaClass.simpleName})")
+            }
+            try {
+                // Files of a chat deleted while they couldn't be, or of a
+                // message whose save the app's stop cut off (#601). Before
+                // any send: one under way would look like an orphan.
+                attachments?.let { a -> a.sweep(dao.sessionIds().toSet()) }
+            } catch (e: Exception) {
+                Log.w(TAG, "sweeping chat attachments failed (${e.javaClass.simpleName})")
             } finally {
                 swept.complete(Unit)
             }
@@ -138,18 +150,33 @@ internal class AgentChats(
     /**
      * Sends [text] with [model] in session [sessionId] (a new chat when
      * null, under approval [mode]; an existing chat keeps its own, set
-     * with [setMode]) and starts its turn. Returns the session's id, or
-     * null when nothing was sent: the session is still running a turn,
-     * the text is empty or too long, or it couldn't be saved.
+     * with [setMode]) and starts its turn, with the staged files
+     * [attachmentIds] (#601), which move into the chat. Returns the
+     * session's id, or null when nothing was sent: the session is still
+     * running a turn, the text is empty or too long, a file is no longer
+     * staged, or it couldn't be saved (then the files are staged again).
      */
-    suspend fun send(sessionId: String?, text: String, model: ModelRef, mode: ApprovalMode = ApprovalMode.DEFAULT): String? {
+    suspend fun send(
+        sessionId: String?,
+        text: String,
+        model: ModelRef,
+        mode: ApprovalMode = ApprovalMode.DEFAULT,
+        attachmentIds: List<String> = emptyList(),
+    ): String? {
         val message = text.trim()
         if (message.isEmpty() || message.length > MAX_MESSAGE_CHARS) return null
+        if (attachmentIds.size > AttachmentRules.MAX_SELECTIONS) return null
         swept.await()
         return lock.withLock {
             if (sessionId != null && sessionId in jobs) return@withLock null
             val now = clock()
             val id = sessionId ?: UUID.randomUUID().toString()
+            val files = if (attachmentIds.isEmpty()) {
+                emptyList()
+            } else {
+                val store = attachments ?: return@withLock null
+                withContext(NonCancellable) { store.consume(id, attachmentIds) } ?: return@withLock null
+            }
             val turn = ChatTurn(
                 id = UUID.randomUUID().toString(),
                 sessionId = id,
@@ -157,6 +184,7 @@ internal class AgentChats(
                 userText = message,
                 status = ChatStatus.RUNNING,
                 startedAt = now,
+                attachments = files.takeIf { it.isNotEmpty() }?.let(Attachment::listJson),
             )
             val saved = try {
                 withContext(NonCancellable) {
@@ -178,7 +206,12 @@ internal class AgentChats(
             } catch (e: Exception) {
                 Log.w(TAG, "saving a chat message failed (${e.javaClass.simpleName})")
                 null
-            } ?: return@withLock null
+            }
+            if (saved == null) {
+                // Back under the composer, for the next try.
+                if (files.isNotEmpty()) withContext(NonCancellable) { attachments?.unconsume(id, files) }
+                return@withLock null
+            }
             _live.update { it + (id to Live(id, saved.id, "")) }
             // Started only once it's in [jobs], so its own wind-down finds itself there.
             val job = scope.launch(start = CoroutineStart.LAZY) { runTurn(saved, model) }
@@ -205,12 +238,15 @@ internal class AgentChats(
                     session?.let { modes.putIfAbsent(turn.sessionId, ApprovalMode.of(it.approvalMode)) }
                     val stream = ModelStream { request, onText -> providers.streamStep(target, request, onText) }
                     check = TurnCheck(ClassifierRun(stream, model.modelId), turn.userText).also { checks[turn.sessionId] = it }
-                    // Desktop's hydration: only whole turns go back to the model.
+                    // Desktop's hydration: only whole turns go back to the model,
+                    // each naming the files sent with it (#601), never their images.
                     val history = dao.turns(turn.sessionId)
                         .filter { it.position < turn.position && it.status == ChatStatus.COMPLETED && it.assistantText.isNotBlank() }
-                        .map { HistoryTurn(it.position, it.userText, it.assistantText) }
+                        .map { HistoryTurn(it.position, withAttachments(it), it.assistantText) }
                     val summary = session?.summary?.let { Summary(it, session.summaryThrough) }
                     val prompt = systemPromptFor(target)
+                    val images = runCatching { takesImages(model) }.getOrDefault(false)
+                    val userImages = if (images) imagesOf(turn) else emptyList()
                     val toolsKey = "${target.connection.id}\u0000${target.connection.revision}\u0000${model.modelId}"
                     val loop = AgentLoop(
                         model = stream,
@@ -224,9 +260,10 @@ internal class AgentChats(
                         },
                         toolsUnsupported = toolsKey in noTools,
                         onToolsUnsupported = { noTools += toolsKey },
+                        images = images,
                     )
                     loop.run(
-                        history, summary, turn.userText,
+                        history, summary, withAttachments(turn),
                         onText = { text ->
                             latest = text
                             val now = clock()
@@ -250,6 +287,7 @@ internal class AgentChats(
                             }
                         },
                         onCompacted = { s -> withContext(NonCancellable) { dao.setSummary(turn.sessionId, s.text, s.through) } },
+                        userImages = userImages,
                     )
                 }
             }
@@ -290,7 +328,27 @@ internal class AgentChats(
         val identity = JSONObject()
             .put("modelId", target.modelId.take(200))
             .put("providerId", target.definition.id.take(200))
-        return promptTemplate.trim().replace("{{identity}}", identity.toString())
+        return promptTemplate.trim().replace("{{identity}}", identity.toString()) +
+            if (attachments != null) "\n\n" + AttachmentTools.SYSTEM_PROMPT else ""
+    }
+
+    /** A turn's message as the model reads it: with the note naming its files (#601). */
+    private fun withAttachments(turn: ChatTurn): String = turn.userText + AttachmentTools.note(Attachment.parseList(turn.attachments))
+
+    /**
+     * The images sent with [turn], for a model that takes them (desktop's
+     * `promptImages`); one that can't be read now is left out, and the
+     * model can still try `attachment_read`.
+     */
+    private suspend fun imagesOf(turn: ChatTurn): List<ImagePart> {
+        val store = attachments ?: return emptyList()
+        return Attachment.parseList(turn.attachments).filter { it.kind == AttachmentKind.Image }.mapNotNull { a ->
+            try {
+                store.readImage(turn.sessionId, a.id).second
+            } catch (e: AttachmentException) {
+                null
+            }
+        }
     }
 
     /** Stops [sessionId]'s turn; returns once its end is written. */
@@ -309,8 +367,14 @@ internal class AgentChats(
         forgetTools(sessionId)
         try {
             dao.deleteSession(sessionId)
-            // Only once the chat is gone: a chat that stays keeps its receipts.
+            // Only once the chat is gone: a chat that stays keeps its receipts and files.
             forgetPublications(sessionId)
+            try {
+                attachments?.deleteChat(sessionId)
+            } catch (e: Exception) {
+                // Swept at the next start.
+                Log.w(TAG, "deleting a chat's attachments failed (${e.javaClass.simpleName})")
+            }
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting a chat failed (${e.javaClass.simpleName})")
@@ -326,6 +390,11 @@ internal class AgentChats(
         try {
             dao.deleteAll()
             forgetPublications(null)
+            try {
+                attachments?.deleteAll()
+            } catch (e: Exception) {
+                Log.w(TAG, "deleting chat attachments failed (${e.javaClass.simpleName})")
+            }
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")
@@ -397,6 +466,8 @@ internal class AgentChats(
                     forgetPublications = { id ->
                         if (id == null) AgentPublications.forgetAll(app) else AgentPublications.forgetSession(app, id)
                     },
+                    attachments = AgentAttachments.get(app),
+                    takesImages = { ref -> AgentProviders.get(app).takesImages(ref) },
                 )
                 chats
             }.also { instance = it }

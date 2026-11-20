@@ -84,8 +84,12 @@ internal data class ProviderDefinition(
     val catalogUrl: String? get() = if (baseUrl != null && catalogPath != null) baseUrl + catalogPath else null
 }
 
-/** A model as the picker shows it. [name] falls back to [id]. */
-internal data class AgentModel(val id: String, val name: String = id)
+/**
+ * A model as the picker shows it. [name] falls back to [id]. [vision]:
+ * it takes images (#601, desktop's `vision`), as its provider's catalog
+ * or Pi's bundled list says; false when nothing says so.
+ */
+internal data class AgentModel(val id: String, val name: String = id, val vision: Boolean = false)
 
 internal object ProviderCatalog {
     /** Desktop's bounds on a hosted provider's model list: bytes read and entries. */
@@ -102,7 +106,13 @@ internal object ProviderCatalog {
     const val OLLAMA = "ollama"
     const val COMPATIBLE = "openai-compatible"
 
-    private fun models(vararg pairs: Pair<String, String>) = pairs.map { (id, name) -> AgentModel(id, name) }
+    /**
+     * Pi's bundled models that take text only (`input` without `image`);
+     * every other one in the bundled lists takes images.
+     */
+    private val TEXT_ONLY = setOf("gpt-4", "o3-mini", "gpt-5.3-codex-spark")
+
+    private fun models(vararg pairs: Pair<String, String>) = pairs.map { (id, name) -> AgentModel(id, name, id !in TEXT_ONLY) }
 
     // Pi's bundled lists, whole (`pi-ai/dist/providers/data/*.json`, in
     // reverse of Pi's alphabetical order), which desktop uses for these four.
@@ -317,7 +327,7 @@ internal object ProviderCatalog {
                     // An end-to-end encrypted model needs its own protocol;
                     // never downgrade it to plain requests (desktop).
                     if (spec?.optString("privacy") == "e2ee" || spec?.optBoolean("offline") == true) continue
-                    AgentModel(id, cleanText(spec?.opt("name")) ?: id)
+                    AgentModel(id, cleanText(spec?.opt("name")) ?: id, spec?.optJSONObject("capabilities")?.opt("supportsVision") == true)
                 }
                 "near-ai" -> {
                     val id = cleanText(item.opt("modelId") ?: item.opt("id")) ?: continue
@@ -325,25 +335,33 @@ internal object ProviderCatalog {
                     val output = metadata?.optJSONObject("architecture")?.optJSONArray("outputModalities")
                     if (output != null && !output.contains("text")) continue
                     if (metadata?.opt("isReady") == false) continue
-                    AgentModel(id, cleanText(metadata?.opt("modelDisplayName")) ?: id)
+                    val input = metadata?.optJSONObject("architecture")?.optJSONArray("inputModalities")
+                    AgentModel(id, cleanText(metadata?.opt("modelDisplayName")) ?: id, input?.contains("image") == true)
                 }
                 "openrouter" -> {
                     val id = cleanText(item.opt("id")) ?: continue
                     val output = item.optJSONObject("architecture")?.optJSONArray("output_modalities")
                     if (output != null && !output.contains("text")) continue
-                    AgentModel(id, cleanText(item.opt("name")) ?: id)
+                    val input = item.optJSONObject("architecture")?.optJSONArray("input_modalities")
+                    AgentModel(id, cleanText(item.opt("name")) ?: id, input?.contains("image") == true)
                 }
                 SubscriptionAuth.CODEX -> {
                     // Desktop: only the models Codex lists for picking.
                     if (item.opt("visibility") != "list") continue
                     val id = cleanText(item.opt("id") ?: item.opt("modelId") ?: item.opt("slug")) ?: continue
-                    AgentModel(id, cleanText(item.opt("display_name")) ?: known[id]?.name ?: id)
+                    val input = item.optJSONArray("input_modalities")
+                    AgentModel(
+                        id, cleanText(item.opt("display_name")) ?: known[id]?.name ?: id,
+                        if (input != null) input.contains("image") else known[id]?.vision == true,
+                    )
                 }
+                // A server on the network doesn't say what a model takes
+                // (desktop asks the user, on a form this app doesn't have yet).
                 OLLAMA -> AgentModel(cleanText(item.opt("name")) ?: continue)
                 COMPATIBLE -> AgentModel(cleanText(item.opt("id")) ?: continue)
                 else -> {
                     val id = cleanText(item.opt("id")) ?: continue
-                    AgentModel(id, cleanText(item.opt("display_name") ?: item.opt("name")) ?: id)
+                    AgentModel(id, cleanText(item.opt("display_name") ?: item.opt("name")) ?: id, known[id]?.vision == true)
                 }
             }
             if (seen.add(model.id)) out += model

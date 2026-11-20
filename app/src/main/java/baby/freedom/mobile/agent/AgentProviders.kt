@@ -110,6 +110,12 @@ internal class AgentProviders(
     fun modelsOf(connection: AgentConnection, discovered: Map<String, List<AgentModel>>): List<AgentModel> =
         discovered[connection.id] ?: ProviderCatalog.definition(connection.providerId)?.bundled.orEmpty()
 
+    /** Whether [ref]'s model takes images (#601), as its connection's model list says. */
+    suspend fun takesImages(ref: ModelRef): Boolean {
+        val connection = state.first().connection(ref.connectionId) ?: return false
+        return modelsOf(connection, models.first()).any { it.id == ref.modelId && it.vision }
+    }
+
     /** The gate follows the stored switch from the first call on (under [lock]). */
     private suspend fun loadGate(s: AgentState) {
         if (gateLoaded) return

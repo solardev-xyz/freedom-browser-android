@@ -424,7 +424,12 @@ internal class AgentStore(
         }
 
         internal fun encodeModels(models: List<AgentModel>): String = JSONArray().apply {
-            for (m in models) put(JSONObject().put("id", m.id).apply { if (m.name != m.id) put("name", m.name) })
+            for (m in models) put(
+                JSONObject().put("id", m.id).apply {
+                    if (m.name != m.id) put("name", m.name)
+                    if (m.vision) put("vision", true)
+                },
+            )
         }.toString()
 
         internal fun decodeModels(json: String): List<AgentModel> = try {
@@ -432,7 +437,8 @@ internal class AgentStore(
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val id = ProviderCatalog.cleanText(o.opt("id")) ?: return@mapNotNull null
-                AgentModel(id, ProviderCatalog.cleanText(o.opt("name")) ?: id)
+                // A list saved before #601 says nothing of images: none, until it's fetched again.
+                AgentModel(id, ProviderCatalog.cleanText(o.opt("name")) ?: id, o.opt("vision") == true)
             }
         } catch (e: Exception) {
             emptyList()
