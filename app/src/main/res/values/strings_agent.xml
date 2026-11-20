@@ -70,6 +70,9 @@
     <string name="agent_api_key_stored">Stored encrypted on this phone, never in a backup.</string>
     <string name="agent_api_key_invalid">A key has no spaces or line breaks.</string>
     <string name="agent_api_key_optional">API key (optional)</string>
+    <string name="agent_api_key_new_url">A new address needs its key typed again; the saved one stays with the old address.</string>
+    <string name="agent_remove_key">Remove key</string>
+    <string name="agent_key_removed">Key removed.</string>
     <string name="agent_show_key">Show key</string>
     <string name="agent_hide_key">Hide key</string>
     <string name="agent_save_key">Save key</string>

@@ -112,8 +112,9 @@ internal class AgentProviders(
     /**
      * Saves a LAN server: Ollama (one, `ollama`) or an OpenAI-compatible
      * one ([connectionId] null adds a new one). [url] must have passed
-     * [ProviderUrls]; [key] is optional (`null` keeps the saved one, `""`
-     * removes it). Returns the connection's id, or null if not saved.
+     * [ProviderUrls]; [key] is optional (`null` keeps the saved one for
+     * the same URL and drops it for a new one, `""` removes it). Returns
+     * the connection's id, or null if not saved.
      */
     suspend fun saveLan(
         providerId: String,
@@ -143,8 +144,13 @@ internal class AgentProviders(
                 favorites = old?.favorites.orEmpty(),
                 revision = revision,
             )
+            // A saved key only stays with the server it was saved for
+            // (desktop: a different endpoint is a new connection): a new
+            // address without a key typed again goes without one.
+            val moved = old != null && old.baseUrl != urlText
             val ok = store.edit { cur ->
                 val keys = when {
+                    key == null && moved -> cur.keys - id
                     key == null -> cur.keys
                     key.isEmpty() -> cur.keys - id
                     else -> cur.keys + (id to key.trim())

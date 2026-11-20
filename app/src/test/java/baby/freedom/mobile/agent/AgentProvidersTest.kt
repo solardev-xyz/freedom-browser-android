@@ -229,8 +229,9 @@ class AgentProvidersTest {
     fun `turning AI off stops a request in flight at once and drops its result`() = runBlocking {
         val id = connectOllama()
         routes["/api/tags"] = { stalled() }
-        val refresh = async { providers.refreshModels(id) }
-        withTimeout(5_000) { while (gate.inFlight() == 0) delay(10) }
+        val refresh = async(kotlinx.coroutines.Dispatchers.IO) { providers.refreshModels(id) }
+        // The request has reached the server, which is now holding its answer.
+        assertTrue(server.takeRequest(5, TimeUnit.SECONDS) != null)
         val start = System.nanoTime()
         assertTrue(providers.setEnabled(false))
         assertEquals(RefreshResult.Cancelled, withTimeout(2_000) { refresh.await() })
@@ -244,16 +245,16 @@ class AgentProvidersTest {
         providers.setEnabled(true)
         providers.saveApiKey("venice", "old-key")
         routes["/venice/models"] = { stalled() }
-        val refresh = async { providers.refreshModels("venice") }
-        withTimeout(5_000) { while (gate.inFlight() == 0) delay(10) }
+        val refresh = async(kotlinx.coroutines.Dispatchers.IO) { providers.refreshModels("venice") }
+        assertTrue(server.takeRequest(5, TimeUnit.SECONDS) != null)
         assertTrue(providers.saveApiKey("venice", "new-key"))
         assertEquals(RefreshResult.Cancelled, withTimeout(2_000) { refresh.await() })
         assertNull(models["venice"])
         assertEquals("new-key", state.keys["venice"])
 
         routes["/venice/chat/completions"] = { stalled() }
-        val test = async { providers.testConnection("venice", "m") }
-        withTimeout(5_000) { while (gate.inFlight() == 0) delay(10) }
+        val test = async(kotlinx.coroutines.Dispatchers.IO) { providers.testConnection("venice", "m") }
+        assertTrue(server.takeRequest(5, TimeUnit.SECONDS) != null)
         assertTrue(providers.remove("venice"))
         assertEquals(TestResult.Cancelled, withTimeout(2_000) { test.await() })
         assertNull(state.connection("venice"))
@@ -381,5 +382,33 @@ class AgentProvidersTest {
         assertEquals(RefreshResult.Done, providers.refreshModels(id))
         assertEquals(TestResult.Ok, providers.testConnection(id, "a"))
         assertEquals(RefreshResult.Done, providers.refreshModels(id))
+    }
+
+    @Test
+    fun `a saved key stays with its server's address, and can be removed`() = runBlocking {
+        routes["/v1/models"] = { json(JSONObject().put("data", JSONArray().put(JSONObject().put("id", "qwen")))) }
+        providers.setEnabled(true)
+        val url = base.newBuilder().addPathSegment("v1").build()
+        val id = providers.saveLan(ProviderCatalog.COMPATIBLE, null, "Box", url, key = "lan-secret")!!
+        // Same address, no key typed: the key stays.
+        assertEquals(id, providers.saveLan(ProviderCatalog.COMPATIBLE, id, "Box", url, key = null))
+        assertEquals("lan-secret", state.keys[id])
+        // A new address with no key typed: the old key doesn't follow it there.
+        val other = MockWebServer().apply { start() }
+        try {
+            other.enqueue(json(JSONObject().put("data", JSONArray().put(JSONObject().put("id", "x")))))
+            val moved = other.url("/v1").newBuilder().host("127.0.0.1").build()
+            assertEquals(id, providers.saveLan(ProviderCatalog.COMPATIBLE, id, "Box", moved, key = null))
+            assertFalse(id in state.keys)
+            assertEquals(RefreshResult.Done, providers.refreshModels(id))
+            assertNull(other.takeRequest().getHeader("Authorization"))
+        } finally {
+            other.shutdown()
+        }
+        // A key saved, then removed with "".
+        providers.saveLan(ProviderCatalog.COMPATIBLE, id, "Box", url, key = "k2")
+        assertEquals("k2", state.keys[id])
+        providers.saveLan(ProviderCatalog.COMPATIBLE, id, "Box", url, key = "")
+        assertFalse(id in state.keys)
     }
 }

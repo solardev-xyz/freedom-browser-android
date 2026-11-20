@@ -152,7 +152,13 @@ internal class ProviderClient(
                     }
 
                     override fun onResponse(call: Call, response: Response) {
-                        val reply = response.use { read(it, maxBytes) }
+                        // Anything thrown here is on OkHttp's own thread: it
+                        // would crash the app and leave the caller waiting.
+                        val reply = try {
+                            response.use { read(it, maxBytes) }
+                        } catch (e: Throwable) {
+                            ProviderReply.Unreachable
+                        }
                         cont.resume(if (call.isCanceled()) ProviderReply.Cancelled else reply)
                     }
                 })

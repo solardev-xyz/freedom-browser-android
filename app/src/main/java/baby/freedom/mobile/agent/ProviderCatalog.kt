@@ -85,32 +85,41 @@ internal object ProviderCatalog {
 
     private fun models(vararg pairs: Pair<String, String>) = pairs.map { (id, name) -> AgentModel(id, name) }
 
-    // Pi's bundled lists (`pi-ai/dist/providers/data/*.json`), which desktop uses for these four.
+    // Pi's bundled lists, whole (`pi-ai/dist/providers/data/*.json`, in
+    // reverse of Pi's alphabetical order), which desktop uses for these four.
     private val OPENAI_MODELS = models(
-        "gpt-6.1-sol" to "GPT-6.1 Sol", "gpt-6-sol" to "GPT-6 Sol", "gpt-6-luna" to "GPT-6 Luna",
-        "gpt-6-astra" to "GPT-6 Astra", "gpt-5.6-sol" to "GPT-5.6 Sol", "gpt-5.6-terra" to "GPT-5.6 Terra",
-        "gpt-5.6-luna" to "GPT-5.6 Luna", "gpt-5.5" to "GPT-5.5", "gpt-5.5-pro" to "GPT-5.5 Pro",
-        "gpt-5.4" to "GPT-5.4", "gpt-5.4-mini" to "GPT-5.4 mini", "gpt-5.4-nano" to "GPT-5.4 nano",
-        "gpt-5.4-pro" to "GPT-5.4 Pro", "gpt-5.3-codex" to "GPT-5.3 Codex", "gpt-5.2" to "GPT-5.2",
-        "gpt-5.1" to "GPT-5.1", "gpt-5" to "GPT-5", "gpt-5-mini" to "GPT-5 Mini", "gpt-5-nano" to "GPT-5 Nano",
-        "gpt-4.1" to "GPT-4.1", "gpt-4.1-mini" to "GPT-4.1 mini", "gpt-4o" to "GPT-4o", "gpt-4o-mini" to "GPT-4o mini",
-        "o3" to "o3", "o3-pro" to "o3-pro", "o4-mini" to "o4-mini",
+        "o4-mini" to "o4-mini", "o3-pro" to "o3-pro", "o3-mini" to "o3-mini", "o3" to "o3", "o1-pro" to "o1-pro",
+        "o1" to "o1", "gpt-realtime-2.1" to "GPT-Realtime-2.1", "gpt-daybreak-red-latest" to "Daybreak Red",
+        "gpt-daybreak-blue-latest" to "Daybreak Blue", "gpt-6.1-sol" to "GPT-6.1 Sol", "gpt-6-sol" to "GPT-6 Sol",
+        "gpt-6-luna" to "GPT-6 Luna", "gpt-6-astra" to "GPT-6 Astra", "gpt-5.6-terra" to "GPT-5.6 Terra",
+        "gpt-5.6-sol" to "GPT-5.6 Sol", "gpt-5.6-luna" to "GPT-5.6 Luna", "gpt-5.5-pro" to "GPT-5.5 Pro",
+        "gpt-5.5" to "GPT-5.5", "gpt-5.4-pro" to "GPT-5.4 Pro", "gpt-5.4-nano" to "GPT-5.4 nano",
+        "gpt-5.4-mini" to "GPT-5.4 mini", "gpt-5.4" to "GPT-5.4", "gpt-5.3-codex-spark" to "GPT-5.3 Codex Spark",
+        "gpt-5.3-codex" to "GPT-5.3 Codex", "gpt-5.3-chat-latest" to "GPT-5.3 Chat (latest)",
+        "gpt-5.2-pro" to "GPT-5.2 Pro", "gpt-5.2-chat-latest" to "GPT-5.2 Chat", "gpt-5.2" to "GPT-5.2",
+        "gpt-5.1" to "GPT-5.1", "gpt-5-pro" to "GPT-5 Pro", "gpt-5-nano" to "GPT-5 Nano",
+        "gpt-5-mini" to "GPT-5 Mini", "gpt-5-chat-latest" to "GPT-5 Chat Latest", "gpt-5" to "GPT-5",
+        "gpt-4o-mini" to "GPT-4o mini", "gpt-4o-2024-11-20" to "GPT-4o (2024-11-20)",
+        "gpt-4o-2024-08-06" to "GPT-4o (2024-08-06)", "gpt-4o-2024-05-13" to "GPT-4o (2024-05-13)",
+        "gpt-4o" to "GPT-4o", "gpt-4.1-nano" to "GPT-4.1 nano", "gpt-4.1-mini" to "GPT-4.1 mini",
+        "gpt-4.1" to "GPT-4.1", "gpt-4-turbo" to "GPT-4 Turbo", "gpt-4" to "GPT-4",
     )
     private val ANTHROPIC_MODELS = models(
-        "claude-opus-5-5" to "Claude Opus 5.5", "claude-sonnet-5-5" to "Claude Sonnet 5.5",
+        "claude-sonnet-5-5" to "Claude Sonnet 5.5", "claude-sonnet-5" to "Claude Sonnet 5",
+        "claude-sonnet-4-6" to "Claude Sonnet 4.6", "claude-sonnet-4-5-20250929" to "Claude Sonnet 4.5",
+        "claude-sonnet-4-5" to "Claude Sonnet 4.5 (latest)", "claude-opus-5-5" to "Claude Opus 5.5",
+        "claude-opus-5" to "Claude Opus 5", "claude-opus-4-8" to "Claude Opus 4.8",
+        "claude-opus-4-7" to "Claude Opus 4.7", "claude-opus-4-6" to "Claude Opus 4.6",
+        "claude-opus-4-5-20251101" to "Claude Opus 4.5", "claude-opus-4-5" to "Claude Opus 4.5 (latest)",
+        "claude-haiku-4-5-20251001" to "Claude Haiku 4.5", "claude-haiku-4-5" to "Claude Haiku 4.5 (latest)",
         "claude-fable-5-1" to "Claude Fable 5.1", "claude-fable-5" to "Claude Fable 5",
-        "claude-opus-5" to "Claude Opus 5", "claude-sonnet-5" to "Claude Sonnet 5",
-        "claude-opus-4-8" to "Claude Opus 4.8", "claude-opus-4-7" to "Claude Opus 4.7",
-        "claude-opus-4-6" to "Claude Opus 4.6", "claude-sonnet-4-6" to "Claude Sonnet 4.6",
-        "claude-opus-4-5" to "Claude Opus 4.5", "claude-sonnet-4-5" to "Claude Sonnet 4.5",
-        "claude-haiku-4-5" to "Claude Haiku 4.5",
     )
     private val XAI_MODELS = models(
         "grok-4.7" to "Grok 4.7", "grok-4.6" to "Grok 4.6", "grok-4.5" to "Grok 4.5", "grok-4.3" to "Grok 4.3",
     )
     private val META_MODELS = models(
-        "muse-spark-1.3" to "Muse Spark 1.3", "muse-spark-1.3-contributor" to "Muse Spark 1.3 Contributor",
-        "muse-spark-1.2" to "Muse Spark 1.2", "muse-spark-1.2-contributor" to "Muse Spark 1.2 Contributor",
+        "muse-spark-1.3-contributor" to "Muse Spark 1.3 Contributor", "muse-spark-1.3" to "Muse Spark 1.3",
+        "muse-spark-1.2-contributor" to "Muse Spark 1.2 Contributor", "muse-spark-1.2" to "Muse Spark 1.2",
         "muse-spark-1.1" to "Muse Spark 1.1",
     )
 

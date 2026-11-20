@@ -355,6 +355,9 @@ private fun ProviderPage(
     val urlCheck = if (isLan && url.isNotBlank()) ProviderUrls.validate(url) else null
     val canSave = !busy && keyOk && if (isLan) urlCheck?.url != null else keyText.isNotEmpty()
     val models = connection?.let { providers.modelsOf(it, discovered) }.orEmpty()
+    // A saved key stays only with the address it was saved for.
+    val urlMoved = isLan && connection != null && connection.id in state.keys &&
+        urlCheck?.url?.let(ProviderUrls::display) != connection.baseUrl
 
     fun run(block: suspend () -> String?) {
         if (busy) return
@@ -448,6 +451,7 @@ private fun ProviderPage(
                                     Text(
                                         when {
                                             !keyOk -> stringResource(R.string.agent_api_key_invalid)
+                                            urlMoved && keyText.isEmpty() -> stringResource(R.string.agent_api_key_new_url)
                                             connection != null && connection.id in state.keys ->
                                                 stringResource(R.string.agent_api_key_saved)
                                             connection != null && !isLan -> stringResource(R.string.agent_status_key_lost)
@@ -506,6 +510,17 @@ private fun ProviderPage(
                                     enabled = !busy && testWith != null,
                                     modifier = Modifier.heightIn(min = 48.dp),
                                 ) { Text(stringResource(R.string.agent_test)) }
+                                val savedUrl = connection.baseUrl?.let { ProviderUrls.validate(it).url }
+                                if (isLan && hasKeyField && connection.id in state.keys && savedUrl != null) TextButton(
+                                    onClick = {
+                                        run {
+                                            val id = providers.saveLan(definition.id, connection.id, connection.name, savedUrl, key = "")
+                                            Strings.get(if (id == null) R.string.agent_save_failed else R.string.agent_key_removed)
+                                        }
+                                    },
+                                    enabled = !busy,
+                                    modifier = Modifier.heightIn(min = 48.dp),
+                                ) { Text(stringResource(R.string.agent_remove_key), color = MaterialTheme.colorScheme.error) }
                                 if (definition.catalogPath != null) OutlinedButton(
                                     onClick = { run { refreshLine(providers.refreshModels(connection.id)) } },
                                     enabled = !busy,
