@@ -540,17 +540,28 @@ class AgentProvidersTest {
         assertEquals("sk-NEW", lost.state.first().keys["openai"])
     }
 
-    /** [aes], counting each call, and failing as a busy Keystore while [busy] is set. */
+    /**
+     * [aes], counting each call, and failing as a busy Keystore while [busy]
+     * is set (an encrypt only while [busyEncrypt] is set too). [replaceKey]
+     * clears both, as a new Keystore key would.
+     */
     private inner class FlakyCipher : baby.freedom.mobile.data.SecretCipher {
         private val real = AesGcmCipher { aes }
         @Volatile var busy = false
+        @Volatile var busyEncrypt = true
         @Volatile var encrypts = 0
         @Volatile var decrypts = 0
+        @Volatile var replaced = 0
 
         override fun encrypt(plain: ByteArray): ByteArray {
             encrypts++
-            if (busy) throw java.security.ProviderException("keystore busy")
+            if (busy && busyEncrypt) throw java.security.ProviderException("keystore busy")
             return real.encrypt(plain)
+        }
+
+        override fun replaceKey() {
+            replaced++
+            busy = false
         }
 
         override fun decrypt(blob: ByteArray): ByteArray {
@@ -587,16 +598,91 @@ class AgentProvidersTest {
         assertTrue(p.saveApiKey("anthropic", "sk-TWO"))
         // A fresh process, whose first read of the blob meets a busy Keystore.
         val flaky = FlakyCipher().apply { busy = true }
-        val again = AgentProviders(AgentStore(file, modelFile, flaky), RequestGate())
+        val again = AgentProviders(AgentStore(file, modelFile, flaky, keyRetryMs = 20), RequestGate())
         val s = again.state.first()
         assertTrue(s.keysUnreadable)
-        assertFalse(again.saveApiKey("xai", "sk-THREE"))
+        // The save waits for the blob rather than writing over it.
+        val save = async(kotlinx.coroutines.Dispatchers.Default) { again.saveApiKey("xai", "sk-THREE") }
+        delay(300)
+        assertFalse(save.isCompleted)
         flaky.busy = false
-        assertTrue(again.saveApiKey("xai", "sk-THREE"))
+        assertTrue(withTimeout(5_000) { save.await() })
         assertEquals(
             mapOf("openai" to "sk-ONE", "anthropic" to "sk-TWO", "xai" to "sk-THREE"),
             AgentStore(file, modelFile, AesGcmCipher { aes }).state.first().keys,
         )
+    }
+
+    @Test
+    fun `a key blob that never opens holds up no other change, and a key saved over it gives up on it`() = runBlocking {
+        val cipher = FlakyCipher()
+        val p = AgentProviders(AgentStore(file, modelFile, cipher), RequestGate())
+        p.setEnabled(true)
+        assertTrue(p.saveApiKey("openai", "sk-ONE"))
+        assertTrue(p.saveApiKey("anthropic", "sk-TWO"))
+        val key = androidx.datastore.preferences.core.stringPreferencesKey("keys_v1")
+        val blob = file.state.value[key]
+        // Every decrypt fails as if the Keystore were busy, and never stops (a damaged Keystore key).
+        val flaky = FlakyCipher().apply { busy = true; busyEncrypt = false }
+        val stuck = AgentProviders(AgentStore(file, modelFile, flaky, keyRetryMs = 20, keyGiveUpMs = 300), RequestGate())
+        assertTrue(stuck.state.first().keysUnreadable)
+        assertTrue(stuck.setFavorite("openai", "o3", true))
+        assertTrue(stuck.setDefault("openai", "o3"))
+        assertTrue(stuck.remove("anthropic"))
+        assertTrue(stuck.setEnabled(false))
+        assertEquals(blob, file.state.value[key])
+        // What's on file, read by an instance whose Keystore works.
+        val fine = AgentStore(file, modelFile, AesGcmCipher { aes }).state.first()
+        assertFalse(fine.enabled)
+        assertNull(fine.connection("anthropic"))
+        assertEquals(mapOf("openai" to "sk-ONE"), fine.keys)
+        assertEquals(listOf("o3"), fine.connection("openai")!!.favorites.filter { it == "o3" })
+        // A key typed again is saved once the blob has failed long enough.
+        assertTrue(stuck.setEnabled(true))
+        assertTrue(withTimeout(5_000) { stuck.saveApiKey("openai", "sk-AGAIN") })
+        assertEquals(mapOf("openai" to "sk-AGAIN"), stuck.state.first().keys)
+        assertFalse(stuck.state.first().keysUnreadable)
+        assertEquals(0, flaky.replaced)
+    }
+
+    @Test
+    fun `a Keystore key that can't encrypt either is replaced once its blob is given up on`() = runBlocking {
+        val cipher = FlakyCipher()
+        val p = AgentProviders(AgentStore(file, modelFile, cipher), RequestGate())
+        p.setEnabled(true)
+        assertTrue(p.saveApiKey("openai", "sk-ONE"))
+        // Both directions fail until the key is replaced.
+        val broken = FlakyCipher().apply { busy = true }
+        val stuck = AgentProviders(AgentStore(file, modelFile, broken, keyRetryMs = 20, keyGiveUpMs = 200), RequestGate())
+        assertTrue(stuck.state.first().keysUnreadable)
+        assertTrue(withTimeout(5_000) { stuck.saveApiKey("anthropic", "sk-TWO") })
+        assertEquals(1, broken.replaced)
+        val s = stuck.state.first()
+        assertEquals(mapOf("anthropic" to "sk-TWO"), s.keys)
+        // The key it gave up on asks to be entered again.
+        assertTrue(s.keyLost(s.connection("openai")!!))
+    }
+
+    @Test
+    fun `a key removed while its blob can't be opened doesn't come back when it opens`() = runBlocking {
+        val cipher = FlakyCipher()
+        val p = AgentProviders(AgentStore(file, modelFile, cipher), RequestGate(), ProviderClient(gate))
+        p.setEnabled(true)
+        val url = base.newBuilder().addPathSegment("v1").build()
+        val removed = p.saveLan(ProviderCatalog.COMPATIBLE, null, "Removed", url, key = "secret-one")!!
+        val moved = p.saveLan(ProviderCatalog.COMPATIBLE, null, "Moved", url, key = "secret-two")!!
+        val flaky = FlakyCipher().apply { busy = true }
+        val stuck = AgentProviders(AgentStore(file, modelFile, flaky, keyRetryMs = 20), RequestGate())
+        assertTrue(stuck.state.first().keysUnreadable)
+        assertEquals(removed, stuck.saveLan(ProviderCatalog.COMPATIBLE, removed, "Removed", url, key = ""))
+        val elsewhere = HttpUrl.Builder().scheme("http").host("127.0.0.1").port(9).addPathSegment("v1").build()
+        assertEquals(moved, stuck.saveLan(ProviderCatalog.COMPATIBLE, moved, "Moved", elsewhere, key = null))
+        // The blob still holds both keys, but neither goes with its connection now.
+        val s = AgentStore(file, modelFile, AesGcmCipher { aes }).state.first()
+        assertFalse(s.keysUnreadable)
+        assertTrue(s.keys.isEmpty())
+        assertFalse(s.keyLost(s.connection(removed)!!))
+        assertFalse(s.keyLost(s.connection(moved)!!))
     }
 
     @Test

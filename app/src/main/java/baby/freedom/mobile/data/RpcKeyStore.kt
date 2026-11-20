@@ -32,6 +32,13 @@ import kotlinx.coroutines.flow.map
 internal interface SecretCipher {
     fun encrypt(plain: ByteArray): ByteArray
     fun decrypt(blob: ByteArray): ByteArray
+
+    /**
+     * Drops the key, so the next [encrypt] makes a new one. Only for when
+     * nothing it encrypted is to be read again: a key the Keystore can no
+     * longer use would otherwise fail every new blob too.
+     */
+    fun replaceKey() {}
 }
 
 /**
@@ -40,7 +47,13 @@ internal interface SecretCipher {
  * lives in the Android Keystore ([KeystoreKey]) and never leaves it;
  * unit tests pass an in-memory key.
  */
-internal class AesGcmCipher(private val key: () -> SecretKey) : SecretCipher {
+internal class AesGcmCipher(
+    /** What [replaceKey] does: nothing unless the key can be replaced. */
+    private val replace: () -> Unit = {},
+    private val key: () -> SecretKey,
+) : SecretCipher {
+    override fun replaceKey() = replace()
+
     override fun encrypt(plain: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         // The provider picks a fresh random IV (the Keystore insists on it).
@@ -105,6 +118,12 @@ internal class KeystoreAesKey(private val alias: String) {
                 .build(),
         )
         return gen.generateKey()
+    }
+
+    /** Deletes the key; the next [get] generates a new one under the same alias. */
+    fun reset(): Unit = synchronized(this) {
+        cached = null
+        KeyStore.getInstance(PROVIDER).apply { load(null) }.deleteEntry(alias)
     }
 
     private companion object {
@@ -208,7 +227,7 @@ class RpcKeyStore internal constructor(
             instance ?: synchronized(this) {
                 instance ?: RpcKeyStore(
                     context.applicationContext.rpcSecrets,
-                    AesGcmCipher(KeystoreKey::get),
+                    AesGcmCipher(key = KeystoreKey::get),
                 ).also { instance = it }
             }
     }

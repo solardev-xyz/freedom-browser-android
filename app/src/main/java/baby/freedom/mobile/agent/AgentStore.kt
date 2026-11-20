@@ -59,10 +59,11 @@ internal data class AgentConnection(
 internal data class ModelRef(val connectionId: String, val modelId: String)
 
 /**
- * Settings → AI as stored. [keys] maps a connection to its API key;
- * [keysUnreadable] is set when a saved key blob can't be decrypted (the
- * Keystore key is gone), so its connections ask for the key again rather
- * than show as connected.
+ * Settings → AI as stored. [keys] maps a connection to its API key (only
+ * one marked [AgentConnection.hasKey]); [keysUnreadable] is set when the
+ * saved key blob can't be decrypted (the Keystore key is gone, or failed
+ * this time), so its connections ask for the key again rather than show
+ * as connected.
  */
 internal data class AgentState(
     val enabled: Boolean = false,
@@ -108,6 +109,13 @@ internal class AgentStore(
     private val cipher: SecretCipher,
     /** The first wait before a key blob the Keystore couldn't open just now is tried again. */
     private val keyRetryMs: Long = KEY_RETRY_MS,
+    /**
+     * How long a key blob must have failed to open before a key saved
+     * over it gives up on it (see [edit]).
+     */
+    private val keyGiveUpMs: Long = KEY_GIVE_UP_MS,
+    /** A monotonic clock, in milliseconds. */
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     val state: Flow<AgentState> = store.data
         .catch { e ->
@@ -151,15 +159,37 @@ internal class AgentStore(
     /**
      * Replaces the state with [change] applied to it, in one write.
      * `false` when the write failed (nothing changed); a `null` from
-     * [change] leaves it as it is and counts as done.
+     * [change] leaves it as it is and counts as done. [change] may be
+     * called more than once.
+     *
+     * A key blob that can't be opened doesn't hold anything else up: a
+     * change that saves no key (the AI switch, a removal, a favourite)
+     * leaves the blob as it is. One that saves a key would write a new
+     * blob over it, dropping every other connection's key, so over a blob
+     * that failed only this time (a busy Keystore) it waits, trying the
+     * blob again, until the blob opens (and the new key joins the others)
+     * or has failed for [keyGiveUpMs]: then the blob is given up on, as
+     * the page already does when it asks for those keys again.
      */
     suspend fun edit(change: (AgentState) -> AgentState?): Boolean = guarded("settings") {
-        store.edit { prefs ->
-            // A blob the Keystore can't open just now isn't a lost one:
-            // writing over it would drop every other connection's key.
-            val current = decode(prefs, failTransient = true)
-            val next = change(current) ?: return@edit
-            encode(next, prefs, current.keys)
+        while (true) {
+            var wait = 0L
+            store.edit { prefs ->
+                val (current, transient) = decodeRead(prefs)
+                val next = change(current) ?: return@edit
+                if (transient != null && storedKeys(next).isNotEmpty()) {
+                    val since = failing?.takeIf { it.first == prefs[KEYS] }?.second ?: clock()
+                    val left = keyGiveUpMs - (clock() - since)
+                    if (left > 0) {
+                        wait = left.coerceAtMost(keyRetryMs)
+                        return@edit
+                    }
+                }
+                encode(next, prefs, current.keys, overUnopened = current.keysUnreadable)
+            }
+            if (wait == 0L) break
+            // Outside the write, so other changes aren't held up meanwhile.
+            delay(wait)
         }
     }
 
@@ -181,12 +211,6 @@ internal class AgentStore(
         false
     }
 
-    private fun decode(prefs: Preferences, failTransient: Boolean = false): AgentState {
-        val (decoded, transient) = decodeRead(prefs)
-        if (transient != null && failTransient) throw transient
-        return decoded
-    }
-
     /**
      * [prefs] decoded, and the failure when the key blob couldn't be
      * opened only for now (it then reads as unreadable), else `null`.
@@ -206,20 +230,36 @@ internal class AgentStore(
             enabled = prefs[ENABLED] ?: false,
             connections = connections,
             defaultModel = default?.takeIf { d -> connections.any { it.id == d.connectionId } },
-            keys = keys.filterKeys { id -> connections.any { it.id == id } },
+            // A key goes with a connection only while it's marked as having
+            // one: a key removed (or a server moved) while the blob couldn't
+            // be opened stays in that blob, and mustn't come back with it.
+            keys = keys.filterKeys { id -> connections.any { it.id == id && it.hasKey } },
             keysUnreadable = unreadable,
             nextRevision = prefs[NEXT_REVISION] ?: 1,
         ) to (read as? KeyRead.Unavailable)?.cause
     }
 
-    /** [previous]: the keys [prefs]' blob holds now, so an unchanged set keeps its blob. */
-    private fun encode(state: AgentState, prefs: MutablePreferences, previous: Map<String, String>) {
+    /** The keys [state] would store: those of its connections marked as having one. */
+    private fun storedKeys(state: AgentState): Map<String, String> =
+        state.keys.filterKeys { id -> state.connections.any { it.id == id && it.hasKey } }
+
+    /**
+     * [previous]: the keys [prefs]' blob holds now, so an unchanged set
+     * keeps its blob. [overUnopened]: that blob couldn't be opened, so a
+     * new one replaces it for good.
+     */
+    private fun encode(
+        state: AgentState,
+        prefs: MutablePreferences,
+        previous: Map<String, String>,
+        overUnopened: Boolean,
+    ) {
         prefs[ENABLED] = state.enabled
         prefs[NEXT_REVISION] = state.nextRevision
         prefs[CONNECTIONS] = encodeConnections(state.connections)
         val default = state.defaultModel
         if (default == null) prefs.remove(DEFAULT) else prefs[DEFAULT] = default.connectionId + "\n" + default.modelId
-        val keys = state.keys.filterKeys { id -> state.connections.any { it.id == id } }
+        val keys = storedKeys(state)
         when {
             // An unreadable blob stays until a key is saved over it, so
             // toggling a favourite doesn't count as giving up on it.
@@ -230,9 +270,21 @@ internal class AgentStore(
             keys == previous && prefs[KEYS] != null -> Unit
             else -> {
                 val plain = JSONObject(keys).toString().toByteArray(Charsets.UTF_8)
-                val blob = Base64.getEncoder().encodeToString(cipher.encrypt(plain))
+                val sealed = try {
+                    cipher.encrypt(plain)
+                } catch (e: Exception) {
+                    // Nothing is to be read under the old Keystore key any
+                    // more, and a key the Keystore can't use (a damaged or
+                    // invalidated one) fails every new blob too: replace it.
+                    if (!overUnopened) throw e
+                    Log.w(TAG, "AI key blob can't be written; replacing its Keystore key (${e.javaClass.simpleName})")
+                    cipher.replaceKey()
+                    cipher.encrypt(plain)
+                }
+                val blob = Base64.getEncoder().encodeToString(sealed)
                 prefs[KEYS] = blob
                 opened = blob to keys
+                failing = null
             }
         }
     }
@@ -252,6 +304,10 @@ internal class AgentStore(
     @Volatile
     private var opened: Pair<String, Map<String, String>>? = null
 
+    /** A blob the Keystore couldn't open just now, and since when ([clock]) it has failed. */
+    @Volatile
+    private var failing: Pair<String, Long>? = null
+
     private fun decodeKeys(blob: String?): KeyRead {
         if (blob.isNullOrEmpty()) return KeyRead.Opened(emptyMap())
         opened?.let { (b, keys) -> if (b == blob) return KeyRead.Opened(keys) }
@@ -260,10 +316,17 @@ internal class AgentStore(
             val json = JSONObject(plain)
             val keys = json.keys().asSequence().associateWith { json.getString(it) }
             opened = blob to keys
+            failing = null
             KeyRead.Opened(keys)
         } catch (e: Exception) {
             Log.w(TAG, "AI provider keys can't be decrypted (${e.javaClass.simpleName})")
-            if (isPermanent(e)) KeyRead.Lost else KeyRead.Unavailable(IOException("AI provider keys unavailable", e))
+            if (isPermanent(e)) {
+                failing = null
+                KeyRead.Lost
+            } else {
+                if (failing?.first != blob) failing = blob to clock()
+                KeyRead.Unavailable(IOException("AI provider keys unavailable", e))
+            }
         }
     }
 
@@ -277,6 +340,7 @@ internal class AgentStore(
         private const val MODELS_PREFIX = "models:"
         private const val KEY_RETRY_MS = 2_000L
         private const val KEY_RETRY_MAX_MS = 60_000L
+        private const val KEY_GIVE_UP_MS = 10_000L
 
         /** The DataStore files' names, excluded from backup in `res/xml`. */
         const val FILE_NAME = "freedom_agent"
@@ -357,7 +421,8 @@ internal class AgentStore(
 
         fun create(context: Context): AgentStore {
             val app = context.applicationContext
-            return AgentStore(app.agentSettings, app.agentModels, AesGcmCipher(KeystoreAesKey(KEY_ALIAS)::get))
+            val key = KeystoreAesKey(KEY_ALIAS)
+            return AgentStore(app.agentSettings, app.agentModels, AesGcmCipher(replace = key::reset, key = key::get))
         }
     }
 }
