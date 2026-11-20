@@ -230,4 +230,33 @@ class FileChooserTest {
         assertEquals(null to listOf(captureUri), finish(file, ok = false, returned = cameraUri))
         assertFalse(file.exists())
     }
+
+    @Test
+    fun `only a pick that handed something back and attached nothing is a refusal`() {
+        // Cancelled, or attached: nothing to say.
+        assertEquals(UnattachedPick.NONE, unattachedPick(ok = false, attached = false, handedBack = false))
+        assertEquals(UnattachedPick.NONE, unattachedPick(ok = false, attached = false, handedBack = true))
+        assertEquals(UnattachedPick.NONE, unattachedPick(ok = true, attached = true, handedBack = false))
+        assertEquals(UnattachedPick.NONE, unattachedPick(ok = true, attached = true, handedBack = true))
+        // A URI handed back and refused (e.g. one of Freedom's own files).
+        assertEquals(UnattachedPick.REFUSED, unattachedPick(ok = true, attached = false, handedBack = true))
+        // A camera that said OK but saved nothing and handed back nothing: not a refused choice.
+        assertEquals(UnattachedPick.EMPTY, unattachedPick(ok = true, attached = false, handedBack = false))
+    }
+
+    @Test
+    fun `a camera that echoes our own capture uri and wrote nothing is empty-handed, not refused`() {
+        val file = tmp.newFile("IMG.jpg")
+        val (out, revoked) = finish(file, ok = true, returned = captureUri)
+        assertEquals(null, out)
+        assertEquals(listOf(captureUri), revoked)
+        assertFalse(captureHandedBack(captureUri, captureUri))
+        assertEquals(
+            UnattachedPick.EMPTY,
+            unattachedPick(ok = true, attached = out != null, handedBack = captureHandedBack(captureUri, captureUri)),
+        )
+        // A different URI the camera handed back (and Freedom refused) still counts.
+        assertTrue(captureHandedBack("content://com.camera/2", captureUri))
+        assertFalse(captureHandedBack(null, captureUri))
+    }
 }

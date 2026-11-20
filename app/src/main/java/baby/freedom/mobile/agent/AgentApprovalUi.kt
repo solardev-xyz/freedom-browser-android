@@ -177,6 +177,18 @@ private fun ApprovalBody(approval: AgentApproval) {
             )
         }
         is AgentAction.Press -> TargetRows(action.target)
+        // What Allow does comes first: a link's address can be long enough
+        // to push anything after it out of the card's scroll area.
+        is AgentAction.Upload -> {
+            Text(stringResource(R.string.agent_approve_upload_picker), style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
+            TargetRows(action.target)
+        }
+        is AgentAction.Download -> {
+            Text(stringResource(R.string.agent_approve_download_saves), style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
+            TargetRows(action.target)
+        }
         is AgentAction.Scroll -> action.target?.takeIf { it.role != "viewport" }?.let { TargetRows(it) }
         // Shown by PublishApprovalContent instead.
         is AgentAction.Publish -> Unit
@@ -242,6 +254,8 @@ private fun headline(action: AgentAction): String = when (action) {
         },
     )
     is AgentAction.Dialog -> stringResource(if (action.accept) R.string.agent_approve_dialog_ok else R.string.agent_approve_dialog_cancel)
+    is AgentAction.Upload -> stringResource(R.string.agent_approve_upload)
+    is AgentAction.Download -> stringResource(R.string.agent_approve_download)
     is AgentAction.Publish -> stringResource(R.string.agent_publish_headline)
 }
 

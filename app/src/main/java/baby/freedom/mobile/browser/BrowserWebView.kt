@@ -4694,7 +4694,13 @@ private fun buildRefreshableWebView(
                 fileChooserParams: FileChooserParams?,
             ): Boolean {
                 if (filePathCallback == null || fileChooserParams == null) return false
-                return fileChooser?.show(state.id, state.private, filePathCallback, fileChooserParams) ?: false
+                // The chooser an approved `browser_upload` opens (#600):
+                // still the user's picker; the agent hears only how it ended.
+                val agentUpload = baby.freedom.mobile.agent.AgentUploads.take(state.id)
+                val callback = agentUpload?.Callback(filePathCallback, context.contentResolver) ?: filePathCallback
+                val shown = fileChooser?.show(state.id, state.private, callback, fileChooserParams) ?: false
+                agentUpload?.opened?.complete(shown)
+                return shown
             }
 
             // A new window the page asked for (`target=_blank`,

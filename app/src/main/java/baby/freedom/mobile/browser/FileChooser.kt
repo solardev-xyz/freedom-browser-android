@@ -169,6 +169,7 @@ internal class FileChooser(
             )
         // show() already told WebView the callback is ours, so it must be answered.
         if (!started) {
+            baby.freedom.mobile.agent.AgentUploads.withdrawing(ask.callback)
             runCatching { ask.callback.onReceiveValue(null) }
             if (refused) permissions.noteUploadCameraRefused()
         }
@@ -281,6 +282,18 @@ internal class FileChooser(
         } else {
             null
         }
+        // Not the user's cancel (#600): what they chose may not be uploaded,
+        // or the picker or camera handed back nothing at all.
+        // A capture only ever takes the camera's own data URI (finishCapture);
+        // one that just echoes our EXTRA_OUTPUT back handed back nothing.
+        val data = result.data
+        val handedBack = if (p.captureFile != null) captureHandedBack(data?.data, p.captureUri!!)
+        else data?.data != null || (data?.clipData?.itemCount ?: 0) > 0
+        when (unattachedPick(result.resultCode == android.app.Activity.RESULT_OK, uris != null, handedBack)) {
+            UnattachedPick.REFUSED -> baby.freedom.mobile.agent.AgentUploads.refusing(p.callback)
+            UnattachedPick.EMPTY -> baby.freedom.mobile.agent.AgentUploads.emptyHanded(p.callback)
+            UnattachedPick.NONE -> Unit
+        }
         // The requesting tab may have been closed (its WebView destroyed)
         // while the activity was open.
         runCatching { p.callback.onReceiveValue(uris) }
@@ -336,12 +349,15 @@ internal class FileChooser(
     fun cancelPending() {
         awaitingCamera?.let { ask ->
             awaitingCamera = null
+            baby.freedom.mobile.agent.AgentUploads.withdrawing(ask.callback)
             runCatching { ask.callback.onReceiveValue(null) }
         }
         val p = pending ?: return
         pending = null
         p.captureUri?.let(::revokeCaptureGrant)
         p.captureFile?.delete()
+        // Not the user's cancel: Freedom Agent's upload (#600) must not read it as one.
+        baby.freedom.mobile.agent.AgentUploads.withdrawing(p.callback)
         runCatching { p.callback.onReceiveValue(null) }
     }
 
@@ -482,6 +498,39 @@ internal fun <U : Any> finishCapture(
     file.delete()
     if (ok && returned != null && uploadable(returned)) return returned
     return null
+}
+
+/**
+ * Whether a camera result handed back a file of its own: [returned] (its
+ * data URI) is set and isn't just [captureUri], our EXTRA_OUTPUT, echoed
+ * back. Some cameras echo it; when they wrote nothing to it, nothing was
+ * captured ([UnattachedPick.EMPTY]), not a file Freedom refused.
+ */
+internal fun <U : Any> captureHandedBack(returned: U?, captureUri: U): Boolean =
+    returned != null && returned != captureUri
+
+/** Why a picker or camera result attached nothing, beyond the user's cancel; see [unattachedPick]. */
+internal enum class UnattachedPick {
+    /** Attached something, or the user cancelled. */
+    NONE,
+
+    /** Something was handed back, and Freedom refused all of it (see [isUploadableUri]). */
+    REFUSED,
+
+    /** The activity said done ([ok]) but handed back nothing (a camera that saved no file). */
+    EMPTY,
+}
+
+/**
+ * For a picker or camera result: [ok] whether it said done, [attached]
+ * whether anything goes to the page, [handedBack] whether the result
+ * carried any URI at all (a capture written to its own file carries
+ * none, and is [attached]).
+ */
+internal fun unattachedPick(ok: Boolean, attached: Boolean, handedBack: Boolean): UnattachedPick = when {
+    !ok || attached -> UnattachedPick.NONE
+    handedBack -> UnattachedPick.REFUSED
+    else -> UnattachedPick.EMPTY
 }
 
 /** Where private tabs' captures go under [cacheDir] (#468). */

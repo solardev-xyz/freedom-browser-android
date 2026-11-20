@@ -35,9 +35,11 @@ class BackupRulesTest {
         "../agent/AgentStore.kt" to "freedom_agent_models",
     )
 
-    /** Plain files beside them: the Swarm manifests' record of which Swarm grants they own. */
+    /** Plain files beside them: the Swarm manifests' record of which Swarm grants they own, and the agent's downloads. */
     private val files = mapOf(
         "../browser/SwarmProviderBridge.kt" to "swarm-manifests.json",
+        // Which downloads each Freedom Agent chat made (#600), excluded like the chats themselves.
+        "../agent/AgentFiles.kt" to "agent/downloads.json",
         // Freedom Agent's publication journal (#597): it names the chats, which stay behind.
         "../agent/SwarmPublishTool.kt" to "agent-publications.json",
     )
@@ -133,6 +135,7 @@ class BackupRulesTest {
         "app/src/main/java/baby/freedom/mobile/browser/Publish.kt" to "filesDir, \"publish/history.json\")",
         // Excluded above, with the grants it owns.
         "app/src/main/java/baby/freedom/mobile/browser/SwarmProviderBridge.kt" to "File(app.filesDir, \"swarm-manifests.json\")",
+        "app/src/main/java/baby/freedom/mobile/agent/AgentFiles.kt" to "File(app.filesDir, \"agent/downloads.json\")",
         // Excluded above, with the chats it names.
         "app/src/main/java/baby/freedom/mobile/agent/SwarmPublishTool.kt" to "filesDir, \"agent-publications.json\")",
     )
