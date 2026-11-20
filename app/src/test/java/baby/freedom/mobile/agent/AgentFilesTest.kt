@@ -28,7 +28,19 @@ internal class FakeFiles(dir: File) : AgentFilesPort {
 
     override suspend fun askWhereToSave() = askWhere
     override suspend fun row(rowId: Long) = rows[rowId]
-    override suspend fun settled(rowId: Long) = rows[rowId]
+    /** Held open while set: the download is still running. */
+    var running: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    val cancelled = ArrayList<Long>()
+
+    override suspend fun settled(rowId: Long): DownloadEntry? {
+        running?.await()
+        return rows[rowId]
+    }
+
+    override fun cancel(rowId: Long) {
+        cancelled += rowId
+    }
+
     override fun present(row: DownloadEntry) = row.contentUri != null
     override val records = AgentDownloadRecords(File(dir, "downloads.json"))
     override fun describe(picked: UploadIntent.Result.Picked) = this.picked

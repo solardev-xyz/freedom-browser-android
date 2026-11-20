@@ -22,7 +22,11 @@ internal sealed interface AgentAction {
     /** Tap a file input (browser_upload, #600): the user picks the file in Android's picker. */
     data class Upload(val target: PageTarget) : AgentAction
 
-    /** Tap a download link (browser_download, #600): that one file is saved without another prompt. */
+    /**
+     * Tap a download link (browser_download, #600): the download that tap
+     * starts on the link's site is saved without another prompt
+     * ([DownloadIntentMatch]); one from any other site waits for the user.
+     */
     data class Download(val target: PageTarget) : AgentAction
 
     /**

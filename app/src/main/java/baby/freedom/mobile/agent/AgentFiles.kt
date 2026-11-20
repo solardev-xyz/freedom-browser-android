@@ -496,6 +496,9 @@ internal interface AgentFilesPort {
     /** Row [rowId] once it stops running (completed, failed, cancelled, paused), or null once it's removed. */
     suspend fun settled(rowId: Long): DownloadEntry?
 
+    /** Stops row [rowId]'s download: the agent's turn that started it was stopped. */
+    fun cancel(rowId: Long)
+
     /** Whether a completed row's file is still there. Blocking. */
     fun present(row: DownloadEntry): Boolean
 
@@ -525,6 +528,8 @@ internal object AgentFiles {
         override suspend fun settled(rowId: Long): DownloadEntry? = DownloadManager.get(app).downloads
             .map { rows -> rows.firstOrNull { it.id == rowId } }
             .first { it == null || it.status != DownloadStatus.RUNNING }
+
+        override fun cancel(rowId: Long) = DownloadManager.get(app).cancel(rowId)
 
         override fun present(row: DownloadEntry): Boolean {
             val uri = (row.contentUri ?: row.saveTo)?.let(Uri::parse) ?: return false

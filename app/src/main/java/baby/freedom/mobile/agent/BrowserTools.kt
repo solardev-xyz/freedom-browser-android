@@ -391,6 +391,8 @@ internal class BrowserToolset(
         val now = ownedTab(tab.id, readable = true)
         val fresh = target(now, ref, describeAs, key)
         ApprovalBinding.check(approval, bindingOf(now), fresh)?.let { throw refusalError(it, started = false) }
+        // A download held before this step isn't this step's to report ([afterAction]).
+        AgentDownloads.takeHeld(tab.id)
         return Run(now, ref.record, ref, approval)
     }
 
@@ -639,7 +641,12 @@ internal class BrowserToolset(
                     "The file chooser closed before the user chose (another page opened one, or the screen went " +
                         "away). Nothing was attached.",
                 )
-                is UploadIntent.Result.Picked -> withContext(Dispatchers.IO) { port.describe(result) }
+                is UploadIntent.Result.Picked -> {
+                    // The pick reached the page either way; the agent hears of it only
+                    // if the chat still holds the tab, on the page the card named.
+                    onMain { stillBound(run.approval, started = true) }
+                    withContext(Dispatchers.IO) { port.describe(result) }
+                }
             }
             // The page's own word that its input took the file(s): the receipt itself is the provider's.
             delay(100)
@@ -719,6 +726,17 @@ internal class BrowserToolset(
             )
             // Then its start: at once, or the user's answer to the offer when they choose where to save.
             intent.start.await()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Stopped between the claim and the row: a download that starts on the
+            // approval alone stops too. One the user accepts in the offer prompt is theirs.
+            if (direct && intent.claimed.isCompleted) {
+                intent.start.invokeOnCompletion {
+                    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                    (runCatching { intent.start.getCompleted() }.getOrNull() as? DownloadIntent.Start.Started)
+                        ?.let { port.cancel(it.rowId) }
+                }
+            }
+            throw e
         } finally {
             AgentDownloads.disarm(intent)
         }
@@ -745,8 +763,13 @@ internal class BrowserToolset(
         }
         val fileName = port.row(started.rowId)?.fileName.orEmpty()
         val record = port.records.add(sessionId, started.rowId, fileName, DownloadIntentMatch.originOf(started.url).orEmpty())
-        // Stop ends the wait, not the download, which goes on in Freedom's downloads list.
-        val row = port.settled(started.rowId)
+        // Stopping the turn stops its download too (desktop's cancelAgentDownloads).
+        val row = try {
+            port.settled(started.rowId)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            port.cancel(started.rowId)
+            throw e
+        }
         val receipt = withContext(Dispatchers.IO) { DownloadReceipt.of(record, row, port::present) }
         when (row?.status) {
             DownloadStatus.COMPLETED -> if (!receipt.available) {

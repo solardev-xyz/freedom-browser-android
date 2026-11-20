@@ -2,6 +2,7 @@ package baby.freedom.mobile.agent
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -992,5 +993,47 @@ class BrowserToolsTest {
         host.onScript = { if (it == "describe") host.control.put("target", "https://example.com/" + "a".repeat(4096)) }
         assertEquals("ELEMENT_NOT_INTERACTABLE", tools.call("browser_download", JSONObject().put("ref", ref)).code())
         assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `a pick made after the user took the tab back is not reported to the agent`() = runBlocking {
+        fileInput()
+        host.duringTap = {
+            val intent = AgentUploads.take(1)!!
+            intent.opened.complete(true)
+            AgentTabs.release(1)
+            intent.result.complete(UploadIntent.Result.Picked(emptyList(), object : android.content.ContentResolver(null) {}))
+        }
+        val tools = toolset()
+        val out = tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("POLICY_DENIED", out.code())
+        assertFalse(out.output.contains("photo.jpg"))
+    }
+
+    @Test
+    fun `a download held before a step isn't reported with it`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        // The page's own download (or the user's), before the agent's click.
+        assertNull(AgentDownloads.claim(1, "https://example.com/earlier.zip"))
+        val tools = toolset()
+        val out = tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools)))
+        assertFalse(out.isError)
+        assertFalse(out.result().has("heldDownload"))
+    }
+
+    @Test
+    fun `stopping the turn stops the download it started`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "running")
+        files.running = kotlinx.coroutines.CompletableDeferred()
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(42) }
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        val job = launch { tools.call("browser_download", JSONObject().put("ref", ref)) }
+        while (files.records.of("chat").isEmpty()) kotlinx.coroutines.yield()
+        job.cancel()
+        job.join()
+        assertEquals(listOf(42L), files.cancelled)
     }
 }
