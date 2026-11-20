@@ -470,7 +470,7 @@ class NameRegistrarTest {
         val r = registrar()
         val check = r.check("freedom.eth", NameContracts.YEAR)
         val op = r.start(check, Intent.REGISTER, me, 0)
-        assertEquals(op.id, r.start(check, Intent.REGISTER, someoneElse, 1).id)
+        assertEquals(op.id, r.start(check, Intent.REGISTER, me, 0).id)
         r.dispatch(r.plan(op.id)) {
             try {
                 r.dismiss(op.id)
@@ -490,6 +490,67 @@ class NameRegistrarTest {
         assertEquals(State.PENDING, r.get(again.id)!!.state)
         r.dismiss(again.id)
         assertEquals(emptyList<NameOperation>(), r.operations.value)
+    }
+
+    @Test
+    fun `starting a name with an open operation under a different choice says so instead of handing that one back`() = runBlocking {
+        val r = registrar()
+        val oneYear = r.check("freedom.eth", NameContracts.YEAR)
+        val op = r.start(oneYear, Intent.REGISTER, me, 0)
+        val other = listOf<suspend () -> NameOperation>(
+            { r.start(oneYear, Intent.REGISTER, someoneElse, 1) },
+            { r.start(r.check("freedom.eth", 3 * NameContracts.YEAR), Intent.REGISTER, me, 0) },
+        )
+        for (attempt in other) {
+            try {
+                attempt()
+                fail("handed back an operation for another choice")
+            } catch (e: NameException) {
+                assertEquals(NameException.Code.CONFLICT, e.code)
+            }
+        }
+        assertEquals(listOf(op.id), r.operations.value!!.map { it.id })
+        // Dismissed, the new choice starts.
+        r.dismiss(op.id)
+        val three = r.start(r.check("freedom.eth", 3 * NameContracts.YEAR), Intent.REGISTER, someoneElse, 1)
+        assertEquals(3 * NameContracts.YEAR, three.duration)
+        assertEquals(someoneElse, three.account)
+    }
+
+    @Test
+    fun `a reveal in its premium window goes at the reviewed value while the premium decays`() = runBlocking {
+        chain.premium = BigInteger.TEN.pow(17)
+        val r = registrar()
+        val op = r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        r.dispatch(r.plan(op.id), sent(hash1))
+        chain.commitments[op.commitment!!] = BigInteger.valueOf(chain.timestamp)
+        chain.mine(hash1)
+        r.refresh(op.id)
+        chain.timestamp += 61
+        assertEquals(State.READY, r.refresh(op.id)!!.state)
+        val reveal = r.plan(op.id)
+        assertEquals(NameContracts.withBuffer(chain.nftFee + chain.premium), reveal.value)
+        // A block later the premium is a little lower: the reviewed value still pays it, the contract refunds the rest.
+        chain.block++
+        chain.timestamp += 12
+        chain.premium = chain.premium - BigInteger.valueOf(1_000_000_000)
+        chain.simulated.clear()
+        assertEquals(NameRegistrar.Dispatched.Sent(hash2), r.dispatch(reveal, sent(hash2)))
+        // Checked at the value that's actually sent.
+        assertEquals(reveal.value, chain.simulated.single().second)
+        assertEquals(State.PENDING, r.get(op.id)!!.state)
+    }
+
+    @Test
+    fun `an eth renewal whose oracle price fell during the review goes at the reviewed value`() = runBlocking {
+        chain.available["eth"] = false
+        chain.owner["eth"] = me
+        chain.expiry["eth"] = BigInteger.valueOf(chain.timestamp + 5000)
+        val r = registrar()
+        val op = r.start(r.check("freedom.eth", NameContracts.YEAR), Intent.RENEW, me, 0)
+        val plan = r.plan(op.id)
+        chain.base = chain.base - BigInteger.ONE
+        assertEquals(NameRegistrar.Dispatched.Sent(hash1), r.dispatch(plan, sent(hash1)))
     }
 
     @Test
@@ -557,6 +618,47 @@ class NameRegistrarTest {
             r.wipe()
             assertEquals(emptyList<NameOperation>(), NameJournal.FileBacked(file).load())
             assertTrue(dir.listFiles()!!.none { it.name.contains("unreadable") })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a journal with an entry that doesn't read back is copied aside before the next save drops it`() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("names").toFile()
+        try {
+            val file = java.io.File(dir, "operations.json")
+            val maker = registrar()
+            val good = maker.start(maker.check("freedom.wei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+            val json = NameJournalCodec.encode(listOf(good))
+            // A newer app's state, say: this one can't decode it.
+            json.getJSONArray("operations").put(NameJournalCodec.encode(good.copy(id = "name_" + "1".repeat(24))).put("state", "SOMETHING_NEW"))
+            val original = json.toString()
+            file.writeText(original)
+            val r = registrar(NameJournal.FileBacked(file))
+            assertEquals(listOf(good.id), r.operations.value!!.map { it.id })
+            val aside = dir.listFiles()!!.filter { it.name.startsWith("operations.json.unreadable-") }
+            assertEquals(original, aside.single().readText())
+            // Read again before anything is saved: still one copy.
+            NameJournal.FileBacked(file).load()
+            assertEquals(1, dir.listFiles()!!.count { it.name.startsWith("operations.json.unreadable-") })
+            r.wipe()
+            assertTrue(dir.listFiles()!!.none { it.name.contains("unreadable") })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a journal of another version is set aside whole`() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("names").toFile()
+        try {
+            val file = java.io.File(dir, "operations.json")
+            file.writeText("""{"version":2,"operations":[]}""")
+            val r = registrar(NameJournal.FileBacked(file))
+            assertEquals(emptyList<NameOperation>(), r.operations.value)
+            assertFalse(file.exists())
+            assertEquals(1, dir.listFiles()!!.count { it.name.startsWith("operations.json.unreadable-") })
         } finally {
             dir.deleteRecursively()
         }

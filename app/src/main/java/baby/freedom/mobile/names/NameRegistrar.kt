@@ -3,6 +3,7 @@ package baby.freedom.mobile.names
 import android.content.Context
 import android.util.Log
 import baby.freedom.mobile.R
+import baby.freedom.mobile.browser.shortAddress
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.WalletRpc
@@ -113,13 +114,22 @@ class NameRegistrar internal constructor(
      * owned) by [account] — the wallet's [accountIndex]: saved [State.READY]
      * at its first step. A registration's secret and commitment are on
      * flash before this returns, so no commit can go out without them.
-     * An open operation for the same name is returned instead of a second.
+     * An open operation for the same name is returned instead of a second
+     * when it's the same choice (intent, account, term); any other choice
+     * is refused ([NameException.Code.CONFLICT]) naming the open one, which
+     * the user finishes or dismisses first — never silently swapped in.
      */
     suspend fun start(check: Check, intent: Intent, account: String, accountIndex: Int): NameOperation {
         loaded.await()
         val parsed = check.parsed
         checkDuration(parsed.space, check.duration)
-        _operations.value.orEmpty().firstOrNull { it.name == parsed.name && !it.state.terminal }?.let { return it }
+        _operations.value.orEmpty().firstOrNull { it.name == parsed.name && !it.state.terminal }?.let { open ->
+            // The same choice carries on where it is; a different one (account, term, register or renew) is told why it can't start.
+            if (open.intent == intent && open.account.equals(account, ignoreCase = true) && open.duration == check.duration) return open
+            val years = Strings.plural(R.plurals.namereg_years, (open.duration / NameContracts.YEAR).toInt(), (open.duration / NameContracts.YEAR).toInt())
+            val text = if (open.registering) R.string.namereg_error_open_registration else R.string.namereg_error_open_renewal
+            refuse(NameException.Code.CONFLICT, Strings.get(text, open.name, shortAddress(open.account), years))
+        }
         if (intent == Intent.REGISTER && !check.canRegister) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_no_longer_available))
         if (intent == Intent.RENEW && !check.canRenew) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_cannot_renew))
         val idBytes = ByteArray(12).also(random::nextBytes)
@@ -171,6 +181,13 @@ class NameRegistrar internal constructor(
         val quotedWei: BigInteger?,
         val contract: Role,
     ) {
+        /**
+         * This (freshly built) step is [reviewed]'s transaction at a price
+         * no higher than it was: same call, and [reviewed]'s value pays it.
+         */
+        fun coveredBy(reviewed: Plan) = to.equals(reviewed.to, ignoreCase = true) && data.contentEquals(reviewed.data) &&
+            step == reviewed.step && value <= reviewed.value
+
         /** Same transaction: what's signed is what was reviewed. */
         fun sameTransaction(other: Plan) = to.equals(other.to, ignoreCase = true) && data.contentEquals(other.data) && value == other.value
 
@@ -191,7 +208,15 @@ class NameRegistrar internal constructor(
         build(op)
     }
 
-    private suspend fun build(op: NameOperation): Plan {
+    /**
+     * [op]'s current step from the chain at its latest block. With
+     * [reviewed] (Confirm), a step whose price only fell since the review
+     * keeps the reviewed value — a NameNFT premium decays every block, and
+     * an `.eth` price follows its oracle — and is checked (balance,
+     * simulation) at that value: the contracts refund what's over the
+     * price, so the reviewed value still pays it. A dearer one isn't.
+     */
+    private suspend fun build(op: NameOperation, reviewed: Plan? = null): Plan {
         val parsed = NameContracts.parse(op.name)
         if (parsed.space != op.space || !parsed.topLevel) refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_inconsistent))
         checkDuration(parsed.space, op.duration)
@@ -207,10 +232,11 @@ class NameRegistrar internal constructor(
                 refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_inconsistent))
             }
         }
-        val plan = when (op.intent) {
+        val built = when (op.intent) {
             Intent.REGISTER -> buildRegister(op, parsed, state, s)
             Intent.RENEW -> buildRenew(op, parsed, state, s)
         }
+        val plan = if (reviewed != null && built.coveredBy(reviewed)) built.copy(value = reviewed.value) else built
         // An account that can't pay is told so, not that the contract would refuse.
         if (plan.value.signum() > 0) {
             val held = chain.balance(op.account, s)
@@ -325,7 +351,9 @@ class NameRegistrar internal constructor(
      * Sends [plan] (which the user just approved) through [send] — the
      * wallet's [WalletSender.submitAndAwaitBroadcast] of the reviewed
      * quote. First builds the step again from the chain as it is now and
-     * refuses if anything in the transaction changed; then saves the
+     * refuses if anything in the transaction changed — except a price that
+     * only fell, which the reviewed value still pays ([Plan.coveredBy]: a
+     * premium decays every block, the contract refunds the rest); then saves the
      * operation as dispatching (on flash) before [send] runs. Runs in
      * this object's scope, so leaving the screen can't cut it between
      * those two.
@@ -341,7 +369,7 @@ class NameRegistrar internal constructor(
             var op = get(plan.operationId) ?: refuse(NameException.Code.INVALID, Strings.get(R.string.namereg_error_gone))
             if (op.state != State.READY || op.revision != plan.revision) refuse(NameException.Code.CONFLICT, Strings.get(R.string.namereg_error_changed))
             val fresh = try {
-                readsGuarded { build(op) }
+                readsGuarded { build(op, reviewed = plan) }
             } catch (e: NameException) {
                 // A dearer reveal stays ready, to be quoted for a fresh approval.
                 if (e.code == NameException.Code.UNVERIFIED || e.code == NameException.Code.UNAVAILABLE || e.code == NameException.Code.FUNDS) throw e

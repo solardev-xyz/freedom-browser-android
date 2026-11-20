@@ -177,7 +177,11 @@ interface NameJournal {
     /** False when the write didn't reach flash; the caller acts as if nothing was saved. */
     fun save(operations: List<NameOperation>): Boolean
 
-    /** Deletes any unreadable journal set aside by [load] (Remove wallet: it names the wallet's addresses too). */
+    /**
+     * Deletes every journal [load] set aside — a wholly unreadable one, or a
+     * copy of one with entries that didn't read back (Remove wallet: they
+     * name the wallet's addresses too).
+     */
     fun forgetSetAside() {}
 
     /** In memory, for tests. */
@@ -196,14 +200,55 @@ interface NameJournal {
 
     class FileBacked(private val file: File) : NameJournal {
         override fun load(): List<NameOperation> = try {
-            if (file.exists()) NameJournalCodec.decode(JSONObject(file.readText())) else emptyList()
+            if (file.exists()) {
+                val decoded = NameJournalCodec.decodeAll(JSONObject(file.readText()))
+                // Some entries didn't read back (a newer app's state, a damaged field): a copy is
+                // kept aside before the next save writes the file without them — one may hold a
+                // paid commitment's secret.
+                if (decoded.dropped > 0) {
+                    Log.w(TAG, "${decoded.dropped} unreadable name journal entries kept aside")
+                    // No copy, no partial load: the whole file is then set aside below instead
+                    // (nothing lost, though its readable operations wait there too).
+                    keepCopyAside()
+                }
+                decoded.operations
+            } else {
+                emptyList()
+            }
         } catch (e: Exception) {
             Log.w(TAG, "unreadable name journal: ${e.javaClass.simpleName}")
             // Kept aside rather than overwritten: it may hold a paid commitment's secret.
-            runCatching { file.renameTo(File(file.parentFile, "${file.name}.unreadable-${System.currentTimeMillis()}")) }
+            runCatching { file.renameTo(setAside()) }
             emptyList()
         } catch (e: StackOverflowError) {
+            Log.w(TAG, "unreadable name journal: too deeply nested")
+            runCatching { file.renameTo(setAside()) }
             emptyList()
+        }
+
+        private fun setAside() = File(file.parentFile, "${file.name}.unreadable-${System.currentTimeMillis()}")
+
+        /**
+         * A copy of the journal as it is, on flash before the next save can
+         * write it without the entries that didn't read back; once — a copy
+         * already set aside with the same bytes is enough.
+         */
+        private fun keepCopyAside() {
+            val bytes = file.readBytes()
+            val dir = file.parentFile
+            val kept = dir?.listFiles { f -> f.name.startsWith("${file.name}.unreadable-") }.orEmpty()
+            if (kept.any { it.length() == bytes.size.toLong() && it.readBytes().contentEquals(bytes) }) return
+            val aside = setAside()
+            try {
+                FileOutputStream(aside).use { out ->
+                    out.write(bytes)
+                    out.fd.sync()
+                }
+                check(FileSendJournal.syncDirectory(dir)) { "directory not synced" }
+            } catch (e: Exception) {
+                aside.delete()
+                throw e
+            }
         }
 
         override fun save(operations: List<NameOperation>): Boolean = try {
@@ -269,16 +314,22 @@ internal object NameJournalCodec {
         .put("message", o.message ?: JSONObject.NULL)
         .put("revision", o.revision)
 
+    /** What [decodeAll] read: every operation that came back whole, and how many didn't. */
+    class Decoded(val operations: List<NameOperation>, val dropped: Int)
+
     /**
      * Every operation that reads back whole, each on its own (one broken
      * entry doesn't drop the others). One saved mid-dispatch comes back
      * [NameOperation.State.DISPATCH_UNKNOWN]: the app stopped after handing
      * it to the wallet, which is never permission to send it again.
+     * Another version's file, or one without its list, is refused whole
+     * ([IllegalStateException]) so the caller keeps it rather than saving
+     * over it; [Decoded.dropped] counts the entries left out.
      */
-    fun decode(json: JSONObject): List<NameOperation> {
-        if (json.optInt("version") != VERSION) return emptyList()
-        val a = json.optJSONArray("operations") ?: return emptyList()
-        return (0 until minOf(a.length(), MAX)).mapNotNull { i ->
+    fun decodeAll(json: JSONObject): Decoded {
+        check(json.optInt("version") == VERSION) { "name journal version ${json.opt("version")}" }
+        val a = json.optJSONArray("operations") ?: error("name journal without operations")
+        val operations = (0 until minOf(a.length(), MAX)).mapNotNull { i ->
             try {
                 operation(a.getJSONObject(i)).let {
                     if (it.state == NameOperation.State.DISPATCHING) it.copy(state = NameOperation.State.DISPATCH_UNKNOWN) else it
@@ -287,7 +338,10 @@ internal object NameJournalCodec {
                 null
             }
         }
+        return Decoded(operations, a.length() - operations.size)
     }
+
+    fun decode(json: JSONObject): List<NameOperation> = decodeAll(json).operations
 
     private val ID = Regex("^name_[0-9a-f]{24}$")
     private val HASH = Regex("^0x[0-9a-fA-F]{64}$")

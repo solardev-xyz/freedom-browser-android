@@ -30,6 +30,10 @@
     <string name="namereg_error_save">Couldn\'t save on this phone. Nothing was sent. Check the free space and try again.</string>
     <string name="namereg_error_gone">That registration isn\'t on this phone any more.</string>
     <string name="namereg_error_not_ready">This step isn\'t ready to send yet.</string>
+    <!-- %1$s: the name, %2$s: a short account address, %3$s: years like "1 year" -->
+    <string name="namereg_error_open_registration">%1$s already has an open registration, paid from %2$s for %3$s. Finish or dismiss it below to start a different one.</string>
+    <!-- %1$s: the name, %2$s: a short account address, %3$s: years like "1 year" -->
+    <string name="namereg_error_open_renewal">%1$s already has an open renewal, paid from %2$s for %3$s. Finish or dismiss it below to start a different one.</string>
     <string name="namereg_error_busy">This is being sent right now. Wait for it to finish.</string>
     <string name="namereg_error_inconsistent">This saved registration doesn\'t match its name. Dismiss it and start again.</string>
     <string name="namereg_send_busy">Another wallet transaction is still going out. Wait for it, then review this again.</string>
