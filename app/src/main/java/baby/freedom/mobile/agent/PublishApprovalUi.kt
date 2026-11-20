@@ -56,13 +56,16 @@ internal fun publishAllowed(action: AgentAction.Publish, acknowledged: Collectio
  * sheet: the fixed public-and-permanent notice, what the pre-publish
  * check found, each secret with its own "Publish this anyway" box, the
  * stamp it would use, and the text that goes out (all of it up to
- * [PUBLISH_PREVIEW_CHARS], and how much more there is). [settle] is the sheet's
+ * [PUBLISH_PREVIEW_CHARS], and how much more there is; a finding past
+ * that shows the text around it in its own row, [findingContext]). [settle] is the sheet's
  * guarded answer. What was found and the stamp come first, so the reason
  * the button is off shows without scrolling past a long text.
  */
 @Composable
 internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction.Publish, tap: ArmedTapGuard, settle: (ApprovalOutcome) -> Unit) {
     val acknowledged = remember(approval.id) { mutableStateListOf<String>() }
+    // Worked out once per card: counting code points across a long text on every recomposition would be wasted.
+    val contexts = remember(approval.id) { action.findings.associate { it.id to findingContext(action.text, it) } }
     Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.SmartToy, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -95,7 +98,7 @@ internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction
             if (action.findings.any { it.blocking }) {
                 Text(stringResource(R.string.agent_publish_findings_blocking), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
             }
-            for (f in action.findings) FindingRow(f, findingContext(action.text, f), f.id in acknowledged) { on -> if (on) acknowledged.add(f.id) else acknowledged.remove(f.id) }
+            for (f in action.findings) FindingRow(f, contexts[f.id], f.id in acknowledged) { on -> if (on) acknowledged.add(f.id) else acknowledged.remove(f.id) }
         }
 
         Spacer(Modifier.height(12.dp))
@@ -209,15 +212,16 @@ private fun FindingRow(f: PublicationScan.Finding, context: String?, ticked: Boo
 }
 
 /**
- * The text around [f] when it lies past the [PUBLISH_PREVIEW_CHARS] the
- * card previews, so what the user ticks can be looked at first; null for
- * one inside the preview (or one with no place in the text). The same
- * characters the preview would show, [ApprovalText.flatten]ed, so nothing
- * in it hides.
+ * The text around [f] when it isn't wholly inside the
+ * [PUBLISH_PREVIEW_CHARS] the card previews, so what the user ticks can
+ * be looked at first; null for one the preview shows in full (or one with
+ * no place in the text: a whole-file finding). The same characters the
+ * preview would show, [ApprovalText.flatten]ed, so nothing in it hides.
  */
 internal fun findingContext(text: String, f: PublicationScan.Finding): String? {
     val at = f.at ?: return null
-    if (at !in text.indices || text.codePointCount(0, at) < PUBLISH_PREVIEW_CHARS - FINDING_CONTEXT_BEFORE) return null
+    val until = (f.until ?: at).coerceIn(at, text.length)
+    if (at !in text.indices || text.codePointCount(0, until) <= PUBLISH_PREVIEW_CHARS) return null
     var start = maxOf(0, at - FINDING_CONTEXT_BEFORE)
     if (start > 0 && Character.isLowSurrogate(text[start])) start--
     var end = minOf(text.length, at + FINDING_CONTEXT_AFTER)

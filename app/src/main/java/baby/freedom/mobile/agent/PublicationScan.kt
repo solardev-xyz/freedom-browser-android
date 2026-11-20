@@ -54,8 +54,9 @@ internal object PublicationScan {
         val shown: String = excerpt,
         val words: Int? = null,
         val chars: Int? = null,
-        /** Where the value starts in the scanned text (a UTF-16 index), for the card's context past its preview. */
+        /** Where the value starts and ends in the scanned text (UTF-16 indices), for the card's context past its preview. */
         val at: Int? = null,
+        val until: Int? = null,
     )
 
     /** A redacted value: what may be [shown], and how many [words] or [chars] the whole had. */
@@ -566,7 +567,8 @@ internal object PublicationScan {
                     val finding = Finding(
                         path = path, kind = rule.kind, rule = rule.id, label = rule.label, line = lines.of(match.index),
                         excerpt = redact(rule.id, match.value), blocking = rule.kind == Kind.Secret,
-                        shown = r.shown, words = r.words, chars = r.chars, at = match.index,
+                        shown = r.shown, words = r.words, chars = r.chars,
+                        at = match.index, until = match.index + match.value.length,
                     )
                     findings += finding
                     spans[finding] = match.index until match.index + match.value.length

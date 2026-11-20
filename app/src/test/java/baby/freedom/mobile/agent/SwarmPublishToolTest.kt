@@ -238,7 +238,9 @@ class SwarmPublishToolTest {
         assertTrue(asked.isEmpty())
         assertTrue(backend.started.isEmpty())
         assertFalse(journal.begin(earlier.copy(publicationId = AgentPublication.newId(), state = AgentPublication.UPLOADING)))
-        journal.deleteAll()
+        // Status says it can't tell, not "nothing published".
+        val status = tools().call(SwarmPublishTools.STATUS, JSONObject())
+        assertEquals(ToolError.CAPABILITY_UNAVAILABLE, status.code())
         journal.deleteSession("chat")
         assertEquals(0, store.saves)
         assertEquals(listOf(earlier), store.saved)
@@ -247,6 +249,30 @@ class SwarmPublishToolTest {
         publish("hello")
         assertEquals(1, (asked.single().action as AgentAction.Publish).earlierUnknown)
         assertTrue(store.saved.any { it.publicationId == earlier.publicationId })
+    }
+
+    @Test
+    fun `deleting every chat replaces an unreadable journal, so publishing works again`() {
+        store.saved = listOf(
+            AgentPublication(
+                publicationId = AgentPublication.newId(), sessionId = "chat", state = AgentPublication.OUTCOME_UNKNOWN, dispatched = true,
+                bytes = 5, contentType = "text/plain", batchId = batch.id, createdAt = 1,
+            ),
+        )
+        store.unreadable = true
+        journal.deleteAll()
+        assertEquals(emptyList<AgentPublication>(), store.saved)
+        assertEquals(1, store.saves)
+        publish("hello")
+        assertEquals(1, asked.size)
+        assertEquals(0, (asked.single().action as AgentAction.Publish).earlierUnknown)
+    }
+
+    @Test
+    fun `svg published as text reaches the third-party check through the tool`() {
+        publish("<svg><script src=\"https://tracker.example.net/t.js\"></script></svg>", contentType = "image/svg+xml")
+        val f = (asked.single().action as AgentAction.Publish).findings.single()
+        assertEquals("third-party-script" to "https://tracker.example.net", f.rule to f.excerpt)
     }
 
     @Test
@@ -412,6 +438,10 @@ class SwarmPublishToolTest {
         assertTrue(context, context.contains(github) && context.contains("deploy with") && context.startsWith("…"))
         // One inside the preview needs none: the preview shows it.
         assertNull(findingContext(github + " " + filler, PublicationScan.scanText("Text", github).single()))
+        // One that starts inside it but runs past the cut gets its context too.
+        val straddling = "y".repeat(PUBLISH_PREVIEW_CHARS - 10) + " " + github
+        val f2 = PublicationScan.scanText("Text", straddling).single()
+        assertTrue(findingContext(straddling, f2)!!.contains(github))
     }
 
     @Test

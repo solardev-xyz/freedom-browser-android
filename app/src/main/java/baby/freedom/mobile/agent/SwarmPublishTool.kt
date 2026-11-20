@@ -272,11 +272,13 @@ internal class AgentPublications(
         store.save(_records.value.values.toList())
     }
 
+    /** Every receipt goes; a journal that can't be read is replaced by an empty one, as asked. */
     fun deleteAll() = synchronized(lock) {
         ensureLoaded()
-        if (!loaded || _records.value.isEmpty()) return@synchronized
+        if (loaded && _records.value.isEmpty()) return@synchronized
+        if (!store.save(emptyList())) return@synchronized
         _records.value = emptyMap()
-        store.save(emptyList())
+        loaded = true
     }
 
     /** Finished records go first; one still uploading is never dropped to make room. */
@@ -420,14 +422,7 @@ internal class SwarmPublishTools(
         }
 
         val journal = journal()
-        journal.ensureLoaded()
-        if (!journal.readable) {
-            throw ToolError(
-                ToolError.CAPABILITY_UNAVAILABLE,
-                "Freedom couldn't read its record of earlier publications, so it can't tell whether one may already be " +
-                    "on Swarm. Nothing was uploaded.",
-            )
-        }
+        requireReadable(journal, "Nothing was uploaded.")
         // One upload at a time per chat: an earlier one still going is reported, not repeated.
         journal.forSession(sessionId).firstOrNull { !it.terminal }?.let { pending ->
             return ok(
@@ -575,8 +570,20 @@ internal class SwarmPublishTools(
         return ok(JSONObject().put("publication", now.receipt()).apply { stillGoing(now)?.let { put("note", it) } })
     }
 
+    /** A journal that can't be read answers neither "nothing published" nor a new upload. */
+    private fun requireReadable(journal: AgentPublications, then: String) {
+        journal.ensureLoaded()
+        if (!journal.readable) {
+            throw ToolError(
+                ToolError.CAPABILITY_UNAVAILABLE,
+                "Freedom couldn't read its record of publications, so it can't tell whether one may already be on Swarm. $then",
+            )
+        }
+    }
+
     private suspend fun status(a: JSONObject): ToolOutcome {
         val journal = journal()
+        requireReadable(journal, "Do not publish again; ask the user.")
         val id = a.opt("publicationId")
         if (id == null || id == JSONObject.NULL) {
             val list = journal.forSession(sessionId).map { it.receipt() }

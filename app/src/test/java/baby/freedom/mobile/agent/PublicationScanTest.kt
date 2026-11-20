@@ -430,7 +430,7 @@ class PublicationScanTest {
         )
         assertTrue(findings.none { it.blocking })
         assertFalse(findings.toString().contains("SECRET_TOKEN"))
-        // Only text published as HTML is checked.
+        // Only text published as markup (HTML, XHTML, SVG) is checked.
         assertTrue(PublicationScan.scanPublication("Text", page.toByteArray(), "text/plain").none { it.kind == Kind.ThirdParty })
     }
 
