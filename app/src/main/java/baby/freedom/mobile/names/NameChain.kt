@@ -129,6 +129,9 @@ class NameChain(
 
     suspend fun snapshot(): Snapshot = reads.latest()
 
+    /** The snapshot at block [number]: the state as that block left it. */
+    suspend fun snapshotAt(number: Long): Snapshot = reads.at(number)
+
     /**
      * A snapshot no earlier than the block [receipt] was mined in: a node
      * whose latest view hasn't caught up must not have the state checked
@@ -151,6 +154,9 @@ class NameChain(
      * changes hands. [contenthash] in hex (`0x` when none), [address]
      * (zero when none) and the asked [text] keys, each at most
      * [NameContracts.MAX_RECORD_BYTES]; all null with an unsupported resolver.
+     * A record over that bound is left out of [contenthash]/[text] and
+     * named in [tooLarge] (`contenthash`, or `text:` and its key) instead
+     * of failing the whole read: the name's other records still read.
      */
     data class Records(
         val manager: String,
@@ -164,6 +170,7 @@ class NameChain(
         val contenthash: String? = null,
         val address: String? = null,
         val text: Map<String, String> = emptyMap(),
+        val tooLarge: Set<String> = emptySet(),
     )
 
     /**
@@ -198,6 +205,7 @@ class NameChain(
         val records = keys?.let {
             val resolver = address(Role.REGISTRY, NameContracts.registryResolverData(parsed.node), s)
             val supported = resolver.equals(Role.RESOLVER.address, ignoreCase = true)
+            val big = HashSet<String>()
             Records(
                 manager = manager,
                 recordOwner = if (wrapped) owner else manager,
@@ -205,9 +213,10 @@ class NameChain(
                 supportedResolver = supported,
                 active = !manager.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true) && (expiry == null || expiry > BigInteger.valueOf(s.timestamp)),
                 fuses = fuses,
-                contenthash = if (supported) bytesRecord(Role.RESOLVER, NameContracts.contenthashData(parsed), s) else null,
+                contenthash = if (supported) bytesRecord(Role.RESOLVER, NameContracts.contenthashData(parsed), s, big) else null,
                 address = if (supported) address(Role.RESOLVER, NameContracts.addressData(parsed), s) else null,
-                text = if (supported) keys.associateWith { k -> textRecord(Role.RESOLVER, NameContracts.textData(parsed, k), s) } else emptyMap(),
+                text = if (supported) texts(Role.RESOLVER, parsed, keys, s, big) else emptyMap(),
+                tooLarge = big,
             )
         }
         return State(parsed, s, available, owner, expiry, wrapped, wrapperExpiry, records)
@@ -225,6 +234,7 @@ class NameChain(
         val owner = if (label.isNotEmpty()) address(role, NameContracts.ownerOfData(parsed.tokenId), s) else NameContracts.ZERO_ADDRESS
         val records = keys?.let {
             val resolved = address(role, NameContracts.addressData(parsed), s)
+            val big = HashSet<String>()
             Records(
                 manager = owner,
                 recordOwner = owner,
@@ -234,25 +244,33 @@ class NameChain(
                 active = !resolved.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true),
                 epoch = uint(role, NameContracts.nftRecordVersionData(parsed.tokenId), s),
                 parentEpoch = NameAbi.wordUint(record[4]),
-                contenthash = bytesRecord(role, NameContracts.contenthashData(parsed), s),
+                contenthash = bytesRecord(role, NameContracts.contenthashData(parsed), s, big),
                 address = resolved,
-                text = keys.associateWith { k -> textRecord(role, NameContracts.textData(parsed, k), s) },
+                text = texts(role, parsed, keys, s, big),
+                tooLarge = big,
             )
         }
         return State(parsed, s, available, owner, expiresAt, records = records)
     }
 
-    /** A `bytes` record in hex, refused past [NameContracts.MAX_RECORD_BYTES]. */
-    private suspend fun bytesRecord(role: Role, data: ByteArray, s: Snapshot): String {
+    /** The contenthash in hex; null past [NameContracts.MAX_RECORD_BYTES], named `contenthash` in [tooLarge]. */
+    private suspend fun bytesRecord(role: Role, data: ByteArray, s: Snapshot, tooLarge: MutableSet<String>): String? {
         val b = NameAbi.dynamicBytes(NameAbi.words(reads.call(role.address, data, s.block)) ?: malformed(), 0) ?: malformed()
-        if (b.size > NameContracts.MAX_RECORD_BYTES) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_too_large))
+        if (b.size > NameContracts.MAX_RECORD_BYTES) {
+            tooLarge += TOO_LARGE_CONTENTHASH
+            return null
+        }
         return NameContracts.hex(b)
     }
 
-    private suspend fun textRecord(role: Role, data: ByteArray, s: Snapshot): String {
-        val b = NameAbi.dynamicBytes(NameAbi.words(reads.call(role.address, data, s.block)) ?: malformed(), 0) ?: malformed()
-        if (b.size > NameContracts.MAX_RECORD_BYTES) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_too_large))
-        return String(b, Charsets.UTF_8)
+    /** [keys]' text records; one past [NameContracts.MAX_RECORD_BYTES] is left out and named in [tooLarge]. */
+    private suspend fun texts(role: Role, parsed: ParsedName, keys: List<String>, s: Snapshot, tooLarge: MutableSet<String>): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (k in keys) {
+            val b = NameAbi.dynamicBytes(NameAbi.words(reads.call(role.address, NameContracts.textData(parsed, k), s.block)) ?: malformed(), 0) ?: malformed()
+            if (b.size > NameContracts.MAX_RECORD_BYTES) tooLarge += TOO_LARGE_TEXT + k else out[k] = String(b, Charsets.UTF_8)
+        }
+        return out
     }
 
     /**
@@ -317,6 +335,10 @@ class NameChain(
     }
 
     companion object {
+        /** [Records.tooLarge]'s entries: the contenthash, and `text:` with a text record's key. */
+        const val TOO_LARGE_CONTENTHASH = "contenthash"
+        const val TOO_LARGE_TEXT = "text:"
+
         fun commitRole(space: NameSpace): Role = if (space == NameSpace.ETH) Role.CONTROLLER else Role.nft(space)
 
         internal fun quantity(v: Any?): BigInteger? = (v as? String)?.takeIf { it.startsWith("0x") && it.length > 2 }

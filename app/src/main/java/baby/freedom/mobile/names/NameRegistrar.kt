@@ -129,14 +129,18 @@ class NameRegistrar internal constructor(
         loaded.await()
         val parsed = check.parsed
         checkDuration(parsed.space, check.duration)
-        _operations.value.orEmpty().firstOrNull { it.name == parsed.name && !it.state.terminal }?.let { open ->
-            // The same choice carries on where it is; a different one (account, term, register or renew) is told why it can't start.
-            if (open.intent == intent && open.account.equals(account, ignoreCase = true) && open.duration == check.duration) return open
-            if (open.intent.recordWrite) refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
-            val years = Strings.plural(R.plurals.namereg_years, (open.duration / NameContracts.YEAR).toInt(), (open.duration / NameContracts.YEAR).toInt())
-            val text = if (open.registering) R.string.namereg_error_open_registration else R.string.namereg_error_open_renewal
-            refuse(NameException.Code.CONFLICT, Strings.said(text, open.name, shortAddress(open.account), years))
+        // The same choice carries on where it is; a different one (account, term, register or renew) is told why it can't start.
+        val existing = { open: NameOperation ->
+            if (open.intent == intent && open.account.equals(account, ignoreCase = true) && open.duration == check.duration) {
+                open
+            } else {
+                if (open.intent.recordWrite) refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
+                val years = Strings.plural(R.plurals.namereg_years, (open.duration / NameContracts.YEAR).toInt(), (open.duration / NameContracts.YEAR).toInt())
+                val text = if (open.registering) R.string.namereg_error_open_registration else R.string.namereg_error_open_renewal
+                refuse(NameException.Code.CONFLICT, Strings.said(text, open.name, shortAddress(open.account), years))
+            }
         }
+        openOn(parsed.name)?.let { return existing(it) }
         if (intent == Intent.REGISTER && !check.canRegister) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_no_longer_available))
         if (intent == Intent.RENEW && !check.canRenew) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_cannot_renew))
         val idBytes = ByteArray(12).also(random::nextBytes)
@@ -171,7 +175,7 @@ class NameRegistrar internal constructor(
         } else {
             op = op.copy(beforeExpiry = check.state.expiry, beforeWrapperExpiry = check.state.wrapperExpiry, wrapped = check.state.wrapped)
         }
-        return save(op, expectedRevision = null)
+        return saveNew(op, existing)
     }
 
     /**
@@ -225,16 +229,21 @@ class NameRegistrar internal constructor(
         loaded.await()
         checkRecord(intent, record, reference)
         val parsed = NameContracts.parse(input)
-        _operations.value.orEmpty().firstOrNull { it.name == parsed.name && !it.state.terminal }?.let { open ->
-            if (open.intent == intent && open.record == record && open.account.equals(account, ignoreCase = true)) return open
-            refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
+        val existing = { open: NameOperation ->
+            if (open.intent == intent && open.record == record && open.account.equals(account, ignoreCase = true)) {
+                open
+            } else {
+                refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
+            }
         }
+        openOn(parsed.name)?.let { return existing(it) }
         val op = readsGuarded {
             val s = chain.snapshot()
             val state = chain.inspect(parsed, s, recordKeys(record))
             val r = recordsOf(state)
             authorize(parsed, r, account, s)
-            val before = currentValue(r, record)
+            // Only the record being written must be readable: another one over the size bound doesn't stop it.
+            val before = currentValue(r, record) ?: refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_too_large))
             if (holds(before, record)) refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_record_unchanged))
             val idBytes = ByteArray(12).also(random::nextBytes)
             NameOperation(
@@ -256,7 +265,7 @@ class NameRegistrar internal constructor(
                 reference = reference,
             )
         }
-        return save(op, expectedRevision = null)
+        return saveNew(op, existing)
     }
 
     /**
@@ -666,7 +675,29 @@ class NameRegistrar internal constructor(
             }
             !ok -> op.copy(state = State.FAILED, message = Strings.get(R.string.namereg_state_reverted))
             op.step == Step.COMMIT -> commitmentWindow(op.copy(step = Step.REVEAL, commitHash = hash, transactionHash = null), s)
-            else -> verifyEffect(op, s) ?: op.copy(state = State.VERIFICATION_NEEDED, message = Strings.get(R.string.namereg_state_verification_needed))
+            else -> (if (op.step == Step.RECORD) recordAtReceipt(op, receipt) else null) ?: verifyEffect(op, s) ?: op.copy(state = State.VERIFICATION_NEEDED, message = Strings.get(R.string.namereg_state_verification_needed))
+        }
+    }
+
+    /**
+     * [op], a record write mined with a success [receipt], completed if
+     * the record held its value at the block the receipt was mined in.
+     * Checked there, not only at the latest block: another app can set
+     * the record again before the next refresh, and a write that landed
+     * must not then wait as unverified for good. Null when that block's
+     * state doesn't show it, or can't be read (a node that pruned it, a
+     * read only one server vouches for, any other refusal): the latest
+     * block is asked then. Desktop checks only the latest block.
+     */
+    private suspend fun recordAtReceipt(op: NameOperation, receipt: org.json.JSONObject): NameOperation? {
+        val mined = NameChain.quantity(receipt.opt("blockNumber"))?.toLong() ?: return null
+        // Best effort: whatever that read refuses (a revert, a pruned state, a malformed answer) leaves the latest block to judge.
+        return try {
+            verifyEffect(op, chain.snapshotAt(mined))
+        } catch (e: ChainRpcException) {
+            null
+        } catch (e: NameException) {
+            null
         }
     }
 
@@ -708,6 +739,12 @@ class NameRegistrar internal constructor(
         val hash = op.transactionHash
         if (hash != null && op.state == State.DISPATCH_UNKNOWN) {
             undisputedReceipt(hash)?.let { return mined(op, hash, it) }
+        }
+        // A record write left unverified after its receipt (written by an older version, or whose mined block
+        // couldn't be read then) is judged by that receipt's block again, not only by the latest one.
+        if (hash != null && op.state == State.VERIFICATION_NEEDED && op.step == Step.RECORD) {
+            undisputedReceipt(hash)?.takeIf { NameChain.quantity(it.opt("status")) == BigInteger.ONE }
+                ?.let { recordAtReceipt(op, it) }?.let { return it }
         }
         return byEffect(op, s)
     }
@@ -832,6 +869,21 @@ class NameRegistrar internal constructor(
      */
     private suspend fun save(op: NameOperation, expectedRevision: Int?): NameOperation = writing.withLock { saveLocked(op, expectedRevision) }
 
+    /** [name]'s unresolved operation, if it has one: at most one is open per name. */
+    private fun openOn(name: String) = _operations.value.orEmpty().firstOrNull { it.name == name && !it.state.terminal }
+
+    /**
+     * Saves the new [op] unless its name got an open operation while [op]
+     * was being built (the chain reads suspend, and another chat or the
+     * Names page may prepare the same name meanwhile): checked again under
+     * the writing lock, that one goes to [existing] — returned when it's
+     * the same choice, else refused — so a name never has two open.
+     */
+    private suspend fun saveNew(op: NameOperation, existing: (NameOperation) -> NameOperation): NameOperation = writing.withLock {
+        openOn(op.name)?.let { return@withLock existing(it) }
+        saveLocked(op, expectedRevision = null)
+    }
+
     /** [holdUnsaved]: when the disk refuses, the list here takes [op] anyway, and it still throws. */
     private suspend fun saveLocked(op: NameOperation, expectedRevision: Int?, holdUnsaved: Boolean = false): NameOperation {
         val current = _operations.value.orEmpty()
@@ -883,15 +935,15 @@ class NameRegistrar internal constructor(
         /** The text key a record write reads ([NameChain.inspect]'s keys): none but a text record's own. */
         internal fun recordKeys(record: NameRecord): List<String> = listOfNotNull(record.key)
 
-        /** What [record]'s slot holds in [r]: the contenthash in hex, the address, the text ("" when unset). */
-        internal fun currentValue(r: NameChain.Records, record: NameRecord): String = when (record.kind) {
-            NameRecord.Kind.CONTENTHASH -> r.contenthash.orEmpty().lowercase()
+        /** What [record]'s slot holds in [r]: the contenthash in hex, the address, the text ("" when unset); null when it is over [NameContracts.MAX_RECORD_BYTES]. */
+        internal fun currentValue(r: NameChain.Records, record: NameRecord): String? = when (record.kind) {
+            NameRecord.Kind.CONTENTHASH -> if (NameChain.TOO_LARGE_CONTENTHASH in r.tooLarge) null else r.contenthash.orEmpty().lowercase()
             NameRecord.Kind.ADDRESS -> r.address.orEmpty().lowercase()
-            NameRecord.Kind.TEXT -> r.text[record.key].orEmpty()
+            NameRecord.Kind.TEXT -> if (NameChain.TOO_LARGE_TEXT + record.key in r.tooLarge) null else r.text[record.key].orEmpty()
         }
 
         /** Whether [current] (from [currentValue]) already is [record]'s new value. */
-        internal fun holds(current: String, record: NameRecord): Boolean = when (record.kind) {
+        internal fun holds(current: String?, record: NameRecord): Boolean = current != null && when (record.kind) {
             NameRecord.Kind.CONTENTHASH, NameRecord.Kind.ADDRESS -> current == record.value.lowercase()
             NameRecord.Kind.TEXT -> current == record.value
         }
@@ -908,7 +960,8 @@ class NameRegistrar internal constructor(
          * it: a website a Swarm [reference]'s contenthash, a cleared one
          * `0x`, an address one exact non-zero address (checksummed), a text
          * record a key of 1–128 and a value of up to 2048 characters with no
-         * control or format characters. [address], [key] and [value] are the
+         * control or format characters (a value may hold ZWNJ, ZWJ and tag
+         * characters, which emoji are built from). [address], [key] and [value] are the
          * caller's input for the intent; the others are ignored.
          */
         fun recordFor(intent: Intent, reference: String? = null, address: String? = null, key: String? = null, value: String? = null): NameRecord =
@@ -922,7 +975,7 @@ class NameRegistrar internal constructor(
                 }
                 Intent.SET_TEXT -> {
                     if (key.isNullOrEmpty() || key.length > NameContracts.MAX_TEXT_KEY || value == null || value.length > NameContracts.MAX_TEXT_VALUE ||
-                        CONTROL_OR_FORMAT.containsMatchIn(key + value)
+                        CONTROL_OR_FORMAT.containsMatchIn(key) || TEXT_VALUE_REFUSED.containsMatchIn(value)
                     ) {
                         refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_text_record))
                     }
@@ -932,6 +985,13 @@ class NameRegistrar internal constructor(
             }
 
         private val CONTROL_OR_FORMAT = Regex("[\\p{Cc}\\p{Cf}]")
+
+        /**
+         * A text value's refused characters: control and format, but not
+         * ZWNJ, ZWJ or the tag characters (U+E0020–E007F), which real
+         * values need — family and couple emoji, subdivision flags.
+         */
+        private val TEXT_VALUE_REFUSED = Regex("[\\p{Cc}\\p{Cf}&&[^\\u200C\\u200D\\x{E0020}-\\x{E007F}]]")
 
         /** A saved record write's record matches its intent ([recordFor]'s rules), else refused. */
         private fun checkRecord(op: NameOperation) = checkRecord(op.intent, op.record, op.reference)

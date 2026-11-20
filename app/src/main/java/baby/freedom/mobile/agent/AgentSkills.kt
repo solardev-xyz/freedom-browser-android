@@ -104,11 +104,14 @@ internal class SkillReadTool(private val skills: AgentSkills) : AgentTool {
             ?: return ToolError(ToolError.INVALID_ARGUMENT, "path must be a string").outcome("read")
         val text = skills.read(path)
             ?: return ToolError(ToolError.POLICY_DENIED, "Freedom Agent can read only bundled skill files").outcome("read")
-        val offset = (arguments.opt("offset") as? Number)?.toInt()?.coerceAtLeast(1) ?: 1
-        val limit = (arguments.opt("limit") as? Number)?.toInt()?.coerceAtLeast(1)
+        // Clamped as Doubles: Number.toInt() wraps a Long past Int.MAX_VALUE to a small or negative count.
+        fun count(key: String) = (arguments.opt(key) as? Number)?.toDouble()?.coerceIn(1.0, Int.MAX_VALUE.toDouble())?.toInt()
+        val offset = count("offset") ?: 1
+        val limit = count("limit")
         val lines = text.lines()
         if (offset > lines.size) return ToolError(ToolError.INVALID_ARGUMENT, "Offset $offset is beyond end of file (${lines.size} lines total)").outcome("read")
-        val end = if (limit == null) lines.size else minOf(lines.size, offset - 1 + limit)
+        // In Long: a huge limit (Int.MAX_VALUE, 1e12) must not wrap past the end into a negative index.
+        val end = if (limit == null) lines.size else minOf(lines.size.toLong(), offset - 1L + limit).toInt()
         return ToolOutcome(lines.subList(offset - 1, end).joinToString("\n"))
     }
 }

@@ -12,7 +12,9 @@ import java.security.SecureRandom
 import java.util.Base64
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
@@ -806,6 +808,10 @@ class NameRegistrarTest {
             { NameRegistrar.recordFor(Intent.SET_TEXT, key = "k".repeat(129), value = "x") },
             { NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "x".repeat(2049)) },
             { NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "a\u202Eb") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "a\u200Bb") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "a\uFEFFb") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "a\uDB40\uDC01b") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "u\u200Drl", value = "x") },
             { NameRegistrar.recordFor(Intent.SET_TEXT, key = "u\nrl", value = "x") },
             { NameRegistrar.recordFor(Intent.SET_WEBSITE, reference = "zz") },
         )) {
@@ -823,5 +829,82 @@ class NameRegistrarTest {
         val tampered = op.copy(intent = Intent.SET_WEBSITE)
         val r2 = registrar(NameJournal.Memory(listOf(tampered)))
         refused(NameException.Code.UNSUPPORTED) { r2.plan(op.id) }
+    }
+
+    @Test
+    fun `a text value may hold the joiners and tag characters emoji are built from`() {
+        // Family (ZWJ), a Persian word with ZWNJ, and Scotland's flag (tag characters U+E0067… U+E007F).
+        for (value in listOf("\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67", "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
+            "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F")) {
+            assertEquals(value, NameRegistrar.recordFor(Intent.SET_TEXT, key = "description", value = value).value)
+        }
+    }
+
+    @Test
+    fun `two prepares on one name at once leave one open operation`() = runBlocking {
+        ownWei()
+        val r = registrar()
+        fun text(v: String) = NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = v)
+        // Both pass the open-operation check, then wait inside their chain reads together.
+        chain.gate = CompletableDeferred()
+        val a = async { runCatching { r.startRecord("alice.wei", Intent.SET_TEXT, text("a"), me, 0, chat = "chat-1") } }
+        val b = async { runCatching { r.startRecord("alice.wei", Intent.SET_TEXT, text("b"), me, 0, chat = "chat-2") } }
+        chain.openGate(readers = 2)
+        val results = listOf(a.await(), b.await())
+        assertEquals(1, results.count { it.isSuccess })
+        assertEquals(NameException.Code.CONFLICT, (results.single { it.isFailure }.exceptionOrNull() as NameException).code)
+        assertEquals(1, r.operations.value!!.count { it.name == "alice.wei" && !it.state.terminal })
+
+        // The same choice, prepared twice at once, is one operation handed to both.
+        r.dismiss(results.single { it.isSuccess }.getOrThrow().id)
+        chain.gate = CompletableDeferred()
+        val c = async { r.startRecord("alice.wei", Intent.SET_TEXT, text("c"), me, 0) }
+        val d = async { r.startRecord("alice.wei", Intent.SET_TEXT, text("c"), me, 0) }
+        chain.openGate(readers = 2)
+        assertEquals(c.await().id, d.await().id)
+        assertEquals(1, r.operations.value!!.count { it.name == "alice.wei" && !it.state.terminal })
+    }
+
+    @Test
+    fun `a mined record write is checked at its receipt's block, so a later change doesn't leave it unverified`() = runBlocking {
+        ownWei()
+        val r = registrar()
+        val record = NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "new")
+        val op = r.startRecord("alice.wei", Intent.SET_TEXT, record, me, 0)
+        r.dispatch(r.plan(op.id), sent(hash1))
+        chain.mine(hash1)
+        // The write landed at its block; another app changed the record again before this refresh.
+        chain.textAt[chain.block] = mapOf("wei" to mapOf("url" to "new"))
+        chain.text["wei"] = hashMapOf("url" to "someone else's")
+        chain.block++
+        assertEquals(State.COMPLETED, r.refresh(op.id)!!.state)
+
+        // One left unverified (its block's state not shown then) is judged by that block again on the next refresh.
+        chain.text["wei"] = hashMapOf()
+        val next = r.startRecord("alice.wei", Intent.SET_TEXT, record, me, 0)
+        r.dispatch(r.plan(next.id), sent(hash2))
+        chain.mine(hash2)
+        val mined = chain.block
+        assertEquals(State.VERIFICATION_NEEDED, r.refresh(next.id)!!.state)
+        chain.block++
+        assertEquals(State.VERIFICATION_NEEDED, r.refresh(next.id)!!.state)
+        chain.textAt[mined] = mapOf("wei" to mapOf("url" to "new"))
+        assertEquals(State.COMPLETED, r.refresh(next.id)!!.state)
+    }
+
+    @Test
+    fun `a record over 8 KiB doesn't stop a write to another, and is refused only as its own write`() = runBlocking {
+        ownWei()
+        chain.contenthash["wei"] = "0x" + "ab".repeat(NameContracts.MAX_RECORD_BYTES + 1)
+        val r = registrar()
+        val op = r.startRecord("alice.wei", Intent.SET_TEXT, NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "new"), me, 0)
+        r.plan(op.id)
+        r.dismiss(op.id)
+        refused(NameException.Code.UNSUPPORTED) { r.startRecord("alice.wei", Intent.CLEAR_WEBSITE, NameRegistrar.recordFor(Intent.CLEAR_WEBSITE), me, 0) }
+        // A record that grew past the bound after it was prepared changed: never sent.
+        chain.contenthash["wei"] = "0x"
+        val set = r.startRecord("alice.wei", Intent.SET_TEXT, NameRegistrar.recordFor(Intent.SET_TEXT, key = "big", value = "x"), me, 0)
+        chain.text["wei"] = hashMapOf("big" to "y".repeat(NameContracts.MAX_RECORD_BYTES + 1))
+        refused(NameException.Code.STALE) { r.plan(set.id) }
     }
 }

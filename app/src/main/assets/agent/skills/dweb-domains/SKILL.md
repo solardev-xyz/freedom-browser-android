@@ -67,8 +67,12 @@ second purchase. Renewing changes expiry, not ownership or records.
 ## Stop, restart and uncertain results
 
 Stop/decline prevents future sends; it cannot undo submitted transactions.
-Known IDs survive conversation deletion/restart on this phone. After compaction
-or interruption, inspect domain_operation_status before preparing anything new.
+Known IDs survive an app restart on this phone, but only the conversation that
+prepared an operation can read or run it. One started on the wallet's Names
+page, or by another or a deleted conversation, is refused here; it still exists:
+the user follows and finishes it on the Names page. Never tell the user such an
+operation is gone. After compaction or interruption, inspect
+domain_operation_status before preparing anything new.
 A timeout, missing transaction response or provider failure is not proof of no
 effect. Never resend dispatch_unknown, failed verification or a successful write
 whose fresh name resolution is delayed. Report the actual state and reconcile:

@@ -55,6 +55,12 @@ class AgentSkillsTest {
         assertTrue(all.output.startsWith("# WNS .wei"))
         val one = tool.run(JSONObject().put("path", "/freedom-agent/skills/dweb-domains/wei.md").put("offset", 1).put("limit", 1))
         assertEquals("# WNS .wei", one.output)
+        // A huge limit reads to the end instead of wrapping into a negative index and failing the turn.
+        for (huge in listOf<Number>(Int.MAX_VALUE, 1e12, Long.MAX_VALUE)) {
+            val rest = tool.run(JSONObject().put("path", "/freedom-agent/skills/dweb-domains/wei.md").put("offset", 2).put("limit", huge))
+            assertFalse(rest.output, rest.isError)
+            assertEquals(all.output.lines().drop(1).joinToString("\n"), rest.output)
+        }
         val denied = tool.run(JSONObject().put("path", "/etc/hosts"))
         assertTrue(denied.isError)
         assertTrue(denied.output.startsWith("[POLICY_DENIED]"))

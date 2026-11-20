@@ -32,6 +32,21 @@ internal class FakeNameChain : NameReads {
     val addr = HashMap<String, String>()
     val text = HashMap<String, HashMap<String, String>>()
     val recordVersion = HashMap<String, BigInteger>()
+    /** Text records as an earlier block left them, by block; [text] for any other. */
+    val textAt = HashMap<Long, Map<String, Map<String, String>>>()
+    /** When set, a read of the latest block waits for it: two callers can be held mid-read together. */
+    var gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    /** How many reads are waiting at [gate]. */
+    val atGate = java.util.concurrent.atomic.AtomicInteger()
+
+    /** Lets every read waiting at [gate] go on, once [readers] are there. */
+    suspend fun openGate(readers: Int) {
+        while (atGate.get() < readers) kotlinx.coroutines.yield()
+        val g = gate!!
+        gate = null
+        atGate.set(0)
+        g.complete(Unit)
+    }
     /** (owner, operator) pairs the public resolver approves for all names. */
     val approvedForAll = HashSet<Pair<String, String>>()
 
@@ -44,6 +59,10 @@ internal class FakeNameChain : NameReads {
     }
 
     override suspend fun latest(): NameChain.Snapshot {
+        gate?.let {
+            atGate.incrementAndGet()
+            it.await()
+        }
         check()
         return NameChain.Snapshot(block, timestamp)
     }
@@ -114,7 +133,7 @@ internal class FakeNameChain : NameReads {
                 val live = (expiry[k] ?: BigInteger.ZERO) > BigInteger.valueOf(timestamp)
                 ret(addr(if (!live) NameContracts.ZERO_ADDRESS else addr[k] ?: owner[k] ?: NameContracts.ZERO_ADDRESS))
             }
-            s("text(bytes32,string)") || s("text(uint256,string)") -> str(text[key(role)]?.get(NameAbi.dynamicString(words, 1)!!) ?: "")
+            s("text(bytes32,string)") || s("text(uint256,string)") -> str((textAt[block] ?: text)[key(role)]?.get(NameAbi.dynamicString(words, 1)!!) ?: "")
             s("isApprovedForAll(address,address)") ->
                 ret(bool((NameAbi.wordAddress(words[0])!! to NameAbi.wordAddress(words[1])!!).let { (o, op) -> approvedForAll.any { it.first.equals(o, true) && it.second.equals(op, true) } }))
             s("isApprovedFor(address,bytes32,address)") -> ret(bool(false))

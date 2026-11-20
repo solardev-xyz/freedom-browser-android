@@ -20,9 +20,11 @@ import baby.freedom.mobile.wallet.WalletAccountList
 import baby.freedom.mobile.wallet.WalletSender
 import java.math.BigInteger
 import java.security.SecureRandom
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.After
@@ -372,7 +374,12 @@ class DomainToolsTest {
         assertFalse(prep.output, prep.output.contains(page.id.removePrefix("name_")))
         assertEquals("INVALID_ARGUMENT", code(run("domain_execute", """{"operationId":"$pageId"}""")))
         assertEquals("INVALID_ARGUMENT", code(run("domain_execute", """{"operationId":"$pageId","resume":true}""")))
-        assertEquals("INVALID_ARGUMENT", code(run("domain_operation_status", """{"operationId":"$pageId"}""")))
+        val watched = run("domain_operation_status", """{"operationId":"$pageId"}""")
+        assertEquals("INVALID_ARGUMENT", code(watched))
+        // Refused, but not called missing: the model mustn't tell the user a paid commit doesn't exist.
+        assertTrue(watched.output, watched.output.contains("still on this phone") && watched.output.contains("Names page"))
+        assertFalse(watched.output, watched.output.contains("not on this phone"))
+        assertTrue(run("domain_operation_status", """{"operationId":"domain_${"f".repeat(24)}"}""").output.contains("not on this phone"))
         assertTrue(asked.isEmpty())
         assertTrue(wallet.prepared.isEmpty())
         assertFalse(registrar.get(page.id)!!.declined)
@@ -382,6 +389,7 @@ class DomainToolsTest {
         assertEquals("POLICY_DENIED", code(run("domain_prepare", """{"name":"other.gwei","intent":"register"}""")))
         assertEquals("INVALID_ARGUMENT", code(run("domain_execute", """{"operationId":"$other"}""")))
         assertEquals("INVALID_ARGUMENT", code(run("domain_operation_status", """{"operationId":"$other"}""")))
+        assertTrue(run("domain_execute", """{"operationId":"$other"}""").output.contains("still on this phone"))
         assertTrue(asked.isEmpty())
         assertEquals("ready", json(run("domain_operation_status", """{"operationId":"$other"}""", session = "chat-2")).getString("state"))
 
@@ -429,6 +437,63 @@ class DomainToolsTest {
     }
 
     @Test
+    fun `a text value built from joiners and tag characters is prepared, saved whole and shown escaped on the sheet`() {
+        ownWei()
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"
+        val prep = json(run("domain_prepare", JSONObject().put("name", "alice.wei").put("intent", "set_text").put("key", "description").put("value", family).toString()))
+        assertEquals(family, prep.getJSONObject("record").getString("value"))
+        val op = registrar.get("name_" + prep.getString("operationId").removePrefix("domain_"))!!
+        assertEquals(family, baby.freedom.mobile.names.NameJournalCodec.decode(baby.freedom.mobile.names.NameJournalCodec.encode(listOf(op))).single().record!!.value)
+        json(run("domain_execute", """{"operationId":"${prep.getString("operationId")}"}"""))
+        // The joiners are written as they are, and shown on the review as escapes: the user sees every code point approved.
+        assertEquals("\uD83D\uDC68\\u200D\uD83D\uDC69\\u200D\uD83D\uDC67", asked.single().review.rows.single { it.label == "New" }.value)
+    }
+
+    @Test
+    fun `two chats preparing one name at once, one gets it and the other is refused without its id`() = runBlocking {
+        ownWei()
+        // Both pass the open-operation check, then wait inside the registrar's chain reads together.
+        chain.gate = CompletableDeferred()
+        val args = """{"name":"alice.wei","intent":"set_text","key":"url","value":"new"}"""
+        val one = async { tools("chat-1")["domain_prepare"]!!.run(JSONObject(args)) }
+        val two = async { tools("chat-2")["domain_prepare"]!!.run(JSONObject(args)) }
+        chain.openGate(readers = 2)
+        val results = listOf(one.await(), two.await())
+        val won = results.single { !it.isError }
+        val lost = results.single { it.isError }
+        assertEquals(lost.output, "POLICY_DENIED", code(lost))
+        val id = JSONObject(won.output).getString("operationId")
+        assertFalse(lost.output, lost.output.contains(id.removePrefix("domain_")))
+        // The winner's operation stays open and its own: the loser neither took it over nor dropped it.
+        val open = registrar.operations.value!!.single { it.name == "alice.wei" && !it.state.terminal }
+        assertEquals(id, DomainToolset.publicId(open.id))
+        assertEquals(State.READY, open.state)
+        val winner = if (results[0] === won) "chat-1" else "chat-2"
+        assertEquals(winner, open.chat)
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `one record over 8 KiB is named, not read, and doesn't stop the others or a write to another`() {
+        ownWei()
+        chain.contenthash["wei"] = "0x" + "ab".repeat(NameContracts.MAX_RECORD_BYTES + 1)
+        chain.text["wei"] = hashMapOf("url" to "https://alice.example", "big" to "x".repeat(NameContracts.MAX_RECORD_BYTES + 1))
+        val out = json(run("domain_inspect", """{"name":"alice.wei","textKeys":["url","big"]}"""))
+        val records = out.getJSONObject("records")
+        assertTrue(records.isNull("contenthash"))
+        assertEquals("https://alice.example", records.getJSONObject("text").getString("url"))
+        assertFalse(records.getJSONObject("text").has("big"))
+        assertEquals(listOf("contenthash", "text:big"), records.getJSONArray("tooLarge").let { a -> (0 until a.length()).map(a::getString) })
+        // A text record can still be set beside the large contenthash; the large record itself can't be.
+        assertEquals("ready", json(run("domain_prepare", """{"name":"alice.wei","intent":"set_text","key":"url","value":"new"}""")).getString("state"))
+        chain.owner["gwei"] = me.address
+        chain.expiry["gwei"] = BigInteger.valueOf(chain.timestamp + NameContracts.YEAR)
+        chain.text["gwei"] = hashMapOf("big" to "x".repeat(NameContracts.MAX_RECORD_BYTES + 1))
+        val big = run("domain_prepare", """{"name":"alice.gwei","intent":"set_text","key":"big","value":"x"}""")
+        assertTrue(big.output, big.isError && big.output.contains("too large", ignoreCase = true))
+    }
+
+    @Test
     fun `a renewal and a cleared website are each one sheet with the price or nothing sent`() {
         ownWei()
         val renew = json(run("domain_prepare", """{"name":"alice.wei","intent":"renew"}"""))
@@ -444,6 +509,8 @@ class DomainToolsTest {
         val clear = json(run("domain_prepare", """{"name":"alice.gwei","intent":"clear_website"}"""))
         assertEquals("0x", clear.getJSONObject("record").getString("value"))
         assertEquals("0xe40101fa011b20" + "ab".repeat(32), clear.getString("previous"))
+        // previous is the controller's own value: it reaches the model labelled untrusted, as inspect's records do.
+        assertEquals(DomainToolset.PREVIOUS_UNTRUSTED, clear.getString("untrusted"))
         json(run("domain_execute", """{"operationId":"${clear.getString("operationId")}"}"""))
         assertEquals(BigInteger.ZERO, asked.last().quote.request.amount)
         assertEquals(NameContracts.Role.GWEI.address, asked.last().quote.request.to)
