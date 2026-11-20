@@ -14,8 +14,8 @@
 # flags (CURL, HTTP_SERVER and USE_MCL off): curl, libuv and llhttp belong
 # to the server and the curl transport, mcl is the alternative to blst, and
 # tommath isn't used by the verifier. That split was read off the link
-# line of `ninja c4` at v3.0.0 (and again at v3.0.3); a new directory under libs/ fails here until
-# someone checks the same for it.
+# line of `ninja c4` at v3.0.0 (and again at v3.0.3); a new directory
+# under libs/ fails here until someone checks the same for it.
 set -euo pipefail
 
 SRC="$(cd "${1:?usage: $0 <colibri-stateless checkout>}" && pwd)"
