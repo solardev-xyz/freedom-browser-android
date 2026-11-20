@@ -189,8 +189,13 @@ internal class AgentLoop(
         if (cut == 0) cut = open.size
         val toSummarise = open.subList(0, cut)
         var conversation = toSummarise.joinToString("\n\n") { "[User]: ${it.userText}\n\n[Assistant]: ${it.assistantText}" }
-        // The summary request itself must fit: keep the newest part of an over-long one.
-        val budget = (limits.window - limits.reserve) * 3
+        // The summary request itself must fit the window, with its
+        // instructions and the previous summary: an over-long one keeps
+        // its newest part.
+        val budget = maxOf(
+            0,
+            (limits.window - limits.reserve) * 4 - UPDATE_SUMMARIZATION_PROMPT.length - 200 - (summary?.text?.length ?: 0),
+        )
         if (conversation.length > budget) conversation = conversation.takeLast(budget)
         val prompt = buildString {
             append("<conversation>\n").append(conversation).append("\n</conversation>\n\n")
