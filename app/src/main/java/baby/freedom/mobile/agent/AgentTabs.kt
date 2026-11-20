@@ -18,10 +18,16 @@ import androidx.compose.runtime.mutableStateMapOf
 internal object AgentTabs {
     private val holders = mutableStateMapOf<Long, String>()
 
+    /** Held popup -> the held tab whose page opened it ([popupOpened]). */
+    private val openers = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
     /** The chat holding [tabId], or null. */
     fun holder(tabId: Long): String? = holders[tabId]
 
     fun isHeld(tabId: Long): Boolean = tabId in holders
+
+    /** The held tab whose page opened held popup [tabId], or null. */
+    fun opener(tabId: Long): Long? = openers[tabId]
 
     /** The tabs [sessionId] holds, in the order they were taken. */
     fun heldBy(sessionId: String): List<Long> = holders.entries.filter { it.value == sessionId }.map { it.key }
@@ -43,12 +49,13 @@ internal object AgentTabs {
      */
     fun popupOpened(openerId: Long, popupId: Long, private: Boolean) {
         val chat = holders[openerId] ?: return
-        hold(popupId, chat, private)
+        if (hold(popupId, chat, private)) openers[popupId] = openerId
     }
 
     /** The user takes [tabId] back: the agent can't touch it any more. */
     fun release(tabId: Long) {
         holders.remove(tabId)
+        openers.remove(tabId)
         AgentApprovals.withdrawTab(tabId)
     }
 
@@ -61,5 +68,8 @@ internal object AgentTabs {
     }
 
     /** For tests. */
-    internal fun clear() = holders.clear()
+    internal fun clear() {
+        holders.clear()
+        openers.clear()
+    }
 }

@@ -688,8 +688,12 @@ internal class BrowserToolset(
      * and only a download of that exact link ([DownloadIntentMatch]) is saved
      * without the usual prompt (or offered, when the user asks where to save
      * each file, as set when the intent is armed). Any other download the
-     * page starts waits for the user. The card shows that address in full;
-     * one it can't show as it is isn't asked about.
+     * page starts waits for the user: one that ends the wait (another
+     * address, or a window the page opened) is the result; one that comes
+     * after the approved download started is said with its result
+     * (`heldDownload`). The card shows that address in full; one it can't
+     * show as it is isn't asked about. A download that starts on the
+     * approval alone stops if the turn stops or it can't be recorded.
      */
     private suspend fun download(rawRef: String): ToolOutcome {
         val port = files() ?: throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Downloads are unavailable right now.")
@@ -768,64 +772,87 @@ internal class BrowserToolset(
             AgentDownloads.disarm(intent)
         }
         // Reported here; not again with the next step.
-        if (start == DownloadIntent.Start.Unapproved) AgentDownloads.takeHeld(tab.id)
-        val started = when (start) {
-            is DownloadIntent.Start.Started -> start
-            DownloadIntent.Start.Unapproved -> throw ToolError(
-                ToolError.APPROVAL_REQUIRED,
-                "The page attempted an unapproved download (not the approved link itself: another address, or the " +
-                    "link redirected elsewhere). It waits for the user in Freedom's download prompt. Do not retry the " +
-                    "click or the download; tell the user it is waiting for their answer.",
-            )
-            DownloadIntent.Start.Declined -> throw ToolError(
-                ToolError.DOWNLOAD_CANCELLED_BY_USER,
-                "The user cancelled this download. Do not retry it unless the user explicitly asks again.",
-            )
-            DownloadIntent.Start.NotQueued -> throw ToolError(
-                ToolError.CAPABILITY_UNAVAILABLE,
-                "Freedom's download prompt didn't take this download: the user refused this tab's earlier downloads, " +
-                    "or too many are waiting. Ask the user to download it themselves.",
-            )
-            DownloadIntent.Start.TakenBack -> throw ToolError(ToolError.POLICY_DENIED, "The user took the tab back; the download is theirs now.")
-            DownloadIntent.Start.Failed -> throw ToolError(
-                ToolError.CAPABILITY_UNAVAILABLE,
-                "Freedom couldn't start this download (it couldn't be listed). Ask the user to download it themselves.",
-            )
+        if (start == DownloadIntent.Start.Unapproved || start == DownloadIntent.Start.InPopup) AgentDownloads.takeHeld(tab.id)
+        val started = try {
+            when (start) {
+                is DownloadIntent.Start.Started -> start
+                DownloadIntent.Start.Unapproved -> throw ToolError(
+                    ToolError.APPROVAL_REQUIRED,
+                    "The page attempted an unapproved download (not the approved link itself: another address, or the " +
+                        "link redirected elsewhere). It waits for the user in Freedom's download prompt. Do not retry the " +
+                        "click or the download; tell the user it is waiting for their answer.",
+                )
+                DownloadIntent.Start.InPopup -> throw ToolError(
+                    ToolError.APPROVAL_REQUIRED,
+                    "The download started in a new window the page opened, not from the approved link in this tab. It " +
+                        "waits for the user in Freedom's download prompt and was not saved. Do not retry the click or the " +
+                        "download; tell the user it is waiting for their answer.",
+                )
+                DownloadIntent.Start.Declined -> throw ToolError(
+                    ToolError.DOWNLOAD_CANCELLED_BY_USER,
+                    "The user cancelled this download. Do not retry it unless the user explicitly asks again.",
+                )
+                DownloadIntent.Start.NotQueued -> throw ToolError(
+                    ToolError.CAPABILITY_UNAVAILABLE,
+                    "Freedom's download prompt didn't take this download: the user refused this tab's earlier downloads, " +
+                        "or too many are waiting. Ask the user to download it themselves.",
+                )
+                DownloadIntent.Start.TakenBack -> throw ToolError(ToolError.POLICY_DENIED, "The user took the tab back; the download is theirs now.")
+                DownloadIntent.Start.Failed -> throw ToolError(
+                    ToolError.CAPABILITY_UNAVAILABLE,
+                    "Freedom couldn't start this download (it couldn't be listed). Ask the user to download it themselves.",
+                )
+            }
+        } catch (e: ToolError) {
+            // A second download that met no intent waits for the user too.
+            throw if (AgentDownloads.takeHeld(tab.id)) e.withNote(HELD_DOWNLOAD_NOTE) else e
         }
         // Stopping the turn from here on stops its download too (desktop's
         // cancelAgentDownloads), wherever the Stop lands: one that started on
-        // the approval alone. One the user accepted in the offer prompt is theirs.
+        // the approval alone. So does any failure to record or follow it, so
+        // nothing the agent started runs on unreported. One the user accepted
+        // in the offer prompt is theirs.
         val (record, row) = try {
             val fileName = port.row(started.rowId)?.fileName.orEmpty()
             val record = port.records.add(sessionId, started.rowId, fileName, DownloadIntentMatch.originOf(started.url).orEmpty())
             record to port.settled(started.rowId)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            if (direct) port.cancel(started.rowId)
+        } catch (e: Throwable) {
+            if (direct) runCatching { port.cancel(started.rowId) }
             throw e
         }
         val receipt = withContext(Dispatchers.IO) { DownloadReceipt.of(record, row, port::present) }
-        when (row?.status) {
-            DownloadStatus.COMPLETED -> if (!receipt.available) {
-                throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "The browser reported completion but the downloaded file is unavailable.")
+        // Another download the page started meanwhile (a second address after
+        // the approved one, a window it opened) waits for the user: said with
+        // this result, since the next step's start clears it unreported.
+        val heldToo = AgentDownloads.takeHeld(tab.id)
+        try {
+            when (row?.status) {
+                DownloadStatus.COMPLETED -> if (!receipt.available) {
+                    throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "The browser reported completion but the downloaded file is unavailable.")
+                }
+                DownloadStatus.CANCELLED -> throw ToolError(
+                    ToolError.DOWNLOAD_CANCELLED_BY_USER,
+                    "The user cancelled this download. Do not retry it unless the user explicitly asks again.",
+                )
+                DownloadStatus.PAUSED -> throw ToolError(
+                    ToolError.CAPABILITY_UNAVAILABLE,
+                    "The download paused part way (the connection was lost) and waits in Freedom's downloads list for the " +
+                        "user to resume it. Check it later with browser_list_downloads (${receipt.artifactId}); do not " +
+                        "start it again.",
+                )
+                null -> throw ToolError(
+                    ToolError.DOWNLOAD_CANCELLED_BY_USER,
+                    "The user removed this download from Freedom's downloads list before it finished. Do not retry it " +
+                        "unless the user explicitly asks again.",
+                )
+                else -> throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "The download did not complete successfully.")
             }
-            DownloadStatus.CANCELLED -> throw ToolError(
-                ToolError.DOWNLOAD_CANCELLED_BY_USER,
-                "The user cancelled this download. Do not retry it unless the user explicitly asks again.",
-            )
-            DownloadStatus.PAUSED -> throw ToolError(
-                ToolError.CAPABILITY_UNAVAILABLE,
-                "The download paused part way (the connection was lost) and waits in Freedom's downloads list for the " +
-                    "user to resume it. Check it later with browser_list_downloads (${receipt.artifactId}); do not " +
-                    "start it again.",
-            )
-            null -> throw ToolError(
-                ToolError.DOWNLOAD_CANCELLED_BY_USER,
-                "The user removed this download from Freedom's downloads list before it finished. Do not retry it " +
-                    "unless the user explicitly asks again.",
-            )
-            else -> throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "The download did not complete successfully.")
+        } catch (e: ToolError) {
+            throw if (heldToo) e.withNote(HELD_DOWNLOAD_NOTE) else e
         }
-        return ok(JSONObject().put("artifact", receipt.json()))
+        val result = JSONObject().put("artifact", receipt.json())
+        if (heldToo) result.put("heldDownload", HELD_DOWNLOAD_NOTE)
+        return ok(result)
     }
 
     /** `browser_list_downloads` (#600): the receipts of this chat's downloads, newest first. */
@@ -1133,6 +1160,9 @@ internal class ToolError(
     /** The user's own Don't allow, which ends the turn ([ToolOutcome.declined]); never a withdrawal. */
     private val declined: Boolean = false,
 ) : Exception(message) {
+    /** The same error, with [note] said after it. */
+    fun withNote(note: String) = ToolError(code, "$message $note", declined)
+
     fun outcome(operation: String): ToolOutcome {
         val recovery = recoveryFor(code)
         val text = "[$code] $message\nRecovery: " + JSONObject().put("action", recovery.first).put("instruction", recovery.second).apply {

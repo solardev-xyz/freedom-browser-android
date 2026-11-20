@@ -159,13 +159,17 @@ class BrowserToolsTest {
 
     private val files = FakeFiles(java.nio.file.Files.createTempDirectory("agent-files").toFile())
 
-    private fun toolset(session: String = "chat", approvals: ChatApprovals = ChatApprovals.AskEveryTime) = BrowserToolset(
+    private fun toolset(
+        session: String = "chat",
+        approvals: ChatApprovals = ChatApprovals.AskEveryTime,
+        filesPort: AgentFilesPort = files,
+    ) = BrowserToolset(
         session,
         browser = { host },
         ask = { a -> asked += a; answer(a) },
         pageScript = { "PAGE" },
         approvals = approvals,
-        files = { files },
+        files = { filesPort },
     )
 
     /** A chat in [mode] whose classifier answers [check], recording what it was given. */
@@ -1110,6 +1114,87 @@ class BrowserToolsTest {
         val out = tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools)))
         assertEquals("POLICY_DENIED", out.code())
         assertFalse(out.output.contains("photo.jpg"))
+    }
+
+    @Test
+    fun `a second download the approved tap starts is reported with the saved one`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "completed")
+        host.duringTap = {
+            AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(42)
+            // The link's handler then sends the page to another file: the user's to answer.
+            assertNull(AgentDownloads.claim(1, "https://example.com/other.zip"))
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertFalse(out.output, out.isError)
+        assertEquals("report.pdf", out.result().getJSONObject("artifact").getString("filename"))
+        assertTrue(out.result().getString("heldDownload").contains("download prompt"))
+        // Said once, not again with the next step.
+        assertFalse(AgentDownloads.takeHeld(1))
+    }
+
+    @Test
+    fun `a second download is reported with a refused approved one too`() = runBlocking {
+        downloadLink()
+        files.askWhere = true
+        host.duringTap = {
+            val claim = AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!
+            assertNull(AgentDownloads.claim(1, "https://example.com/other.zip"))
+            claim.declined()
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("DOWNLOAD_CANCELLED_BY_USER", out.code())
+        assertTrue(out.output, out.output.contains("no approval covered"))
+        assertFalse(AgentDownloads.takeHeld(1))
+    }
+
+    @Test
+    fun `an approved download that can't be recorded is stopped`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "running")
+        files.onRow = { throw IllegalStateException("database is locked") }
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(42) }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertTrue(out.isError)
+        assertEquals(listOf(42L), files.cancelled)
+        assertTrue(files.records.of("chat").isEmpty())
+    }
+
+    @Test
+    fun `an approved download that can't be followed once recorded is stopped`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "running")
+        val failing = object : AgentFilesPort by files {
+            override suspend fun settled(rowId: Long): baby.freedom.mobile.data.DownloadEntry? = throw IllegalStateException("database is locked")
+        }
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(42) }
+        val tools = toolset(filesPort = failing)
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertTrue(out.isError)
+        assertEquals(listOf(42L), files.cancelled)
+    }
+
+    @Test
+    fun `a download the approved link starts in a new window is reported as waiting, not as none`() = runBlocking {
+        downloadLink()
+        host.add(page(2))
+        host.duringTap = {
+            // The link's handler window.open()s the file: the popup is held with its opener.
+            AgentTabs.popupOpened(1, 2, private = false)
+            assertNull(AgentDownloads.claim(2, "https://example.com/files/report.pdf"))
+        }
+        val tools = toolset()
+        val began = System.nanoTime()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("APPROVAL_REQUIRED", out.code())
+        assertTrue(out.output, out.output.contains("new window"))
+        // Answered as it happened, not after the start wait ran out.
+        assertTrue((System.nanoTime() - began) / 1_000_000 < 5_000)
+        assertTrue(files.records.of("chat").isEmpty())
+        assertFalse(AgentDownloads.takeHeld(1))
     }
 
     @Test

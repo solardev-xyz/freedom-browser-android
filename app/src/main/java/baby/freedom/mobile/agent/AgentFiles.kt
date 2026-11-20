@@ -96,7 +96,8 @@ internal interface AgentDownloadClaim {
  * agent's tap on the link. One per tab, used once: the first download
  * the tab's pages start afterwards either matches it ([DownloadIntentMatch])
  * or ends it as [Start.Unapproved], and is then held for the user like
- * any page download.
+ * any page download. So does one from a window a page in the tab opened
+ * (held by the chat with it), whatever its address: [Start.InPopup].
  */
 internal class DownloadIntent(
     val sessionId: String,
@@ -117,6 +118,13 @@ internal class DownloadIntent(
 
         /** Offered, and the prompt refused it: the tab's downloads are blocked, or too many wait. */
         data object NotQueued : Start
+
+        /**
+         * A window the tab's page opened (one the chat holds with it) started
+         * a download while this one waited: held for the user like any
+         * unapproved download, and the end of this intent.
+         */
+        data object InPopup : Start
 
         /** The user took the tab back before its download came: theirs now. */
         data object TakenBack : Start
@@ -146,6 +154,10 @@ internal object AgentDownloads {
     @Volatile
     internal var holderOf: (Long) -> String? = { AgentTabs.holder(it) }
 
+    /** The held tab whose page opened a held popup; [AgentTabs] outside tests. */
+    @Volatile
+    internal var openerOf: (Long) -> Long? = { AgentTabs.opener(it) }
+
     /** Arms [intent] on its tab; false if one is already armed there. */
     @Synchronized
     fun arm(intent: DownloadIntent): Boolean {
@@ -173,13 +185,26 @@ internal object AgentDownloads {
      * download an armed intent approved, which consumes it. Any other
      * download from a tab the agent holds is left to the usual offer
      * (held for the user) and noted for the agent ([takeHeld]); one that
-     * met an armed intent and didn't match also ends that intent.
+     * met an armed intent and didn't match also ends that intent. One from
+     * a popup the chat holds with its opener is noted on the opener too,
+     * and ends an intent armed there ([DownloadIntent.Start.InPopup]): the
+     * approved tap's link may have opened that window.
      */
     @Synchronized
     fun claim(tabId: Long, url: String): AgentDownloadClaim? {
         val intent = armed[tabId]
         if (intent == null) {
-            if (holderOf(tabId) != null) held += tabId
+            val holder = holderOf(tabId) ?: return null
+            held += tabId
+            val opener = openerOf(tabId)
+            if (opener != null && opener != tabId && holderOf(opener) == holder) {
+                held += opener
+                val waiting = armed[opener]
+                if (waiting != null && waiting.sessionId == holder) {
+                    armed.remove(opener)
+                    waiting.start.complete(DownloadIntent.Start.InPopup)
+                }
+            }
             return null
         }
         armed.remove(tabId)

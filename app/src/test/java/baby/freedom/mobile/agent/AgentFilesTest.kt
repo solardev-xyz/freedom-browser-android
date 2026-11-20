@@ -72,6 +72,7 @@ class AgentFilesTest {
     fun tearDown() {
         AgentDownloads.clear()
         AgentDownloads.holderOf = { AgentTabs.holder(it) }
+        AgentDownloads.openerOf = { AgentTabs.opener(it) }
         dir.deleteRecursively()
     }
 
@@ -182,6 +183,33 @@ class AgentFilesTest {
         assertFalse(i.claimed.isCompleted)
         // Nor does the approved one, coming after, slip through.
         assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+    }
+
+    @Test
+    fun `a download from a window the tab's page opened ends the tab's intent and is noted on both`() {
+        AgentDownloads.holderOf = { if (it == 1L || it == 2L) "chat" else null }
+        AgentDownloads.openerOf = { if (it == 2L) 1L else null }
+        val i = intent()
+        assertTrue(AgentDownloads.arm(i))
+        // Even the approved address, from the popup, is the user's to answer.
+        assertNull(AgentDownloads.claim(2, "https://example.com/a.zip"))
+        assertEquals(DownloadIntent.Start.InPopup, i.start.getCompleted())
+        assertFalse(i.claimed.isCompleted)
+        assertTrue(AgentDownloads.takeHeld(1))
+        assertTrue(AgentDownloads.takeHeld(2))
+        // Used up: nothing armed on the opener any more.
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+    }
+
+    @Test
+    fun `a popup another chat holds doesn't end this chat's intent`() {
+        AgentDownloads.holderOf = { when (it) { 1L -> "chat"; 2L -> "other"; else -> null } }
+        AgentDownloads.openerOf = { if (it == 2L) 1L else null }
+        val i = intent()
+        assertTrue(AgentDownloads.arm(i))
+        assertNull(AgentDownloads.claim(2, "https://example.com/a.zip"))
+        assertFalse(i.start.isCompleted)
+        assertFalse(AgentDownloads.takeHeld(1))
     }
 
     @Test
