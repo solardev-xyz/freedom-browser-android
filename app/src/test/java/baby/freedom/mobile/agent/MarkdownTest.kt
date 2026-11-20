@@ -88,11 +88,48 @@ class MarkdownTest {
         assertEquals(pieces.dropLast(1), grown.take(pieces.size - 1))
         // No line breaks: cut at a space; none at all: anywhere but a surrogate pair.
         val words = (1..1_000).joinToString(" ") { "word$it" }
-        assertEquals(words, Markdown.chunks(words).joinToString(" "))
+        // The space stays at the end of its piece.
+        assertEquals(words, Markdown.chunks(words).joinToString(""))
         val emoji = "x" + "\uD83D\uDE00".repeat(3_000)
         val cut = Markdown.chunks(emoji)
         assertEquals(emoji, cut.joinToString(""))
         assertTrue(cut.none { it.last().isHighSurrogate() || it.first().isLowSurrogate() })
+    }
+
+    @Test
+    fun `a long paragraph is never cut inside bold, code, a link or an escape, and keeps its spaces (R2-M1)`() {
+        // Spans everywhere, so most windows end inside one.
+        val unit = "plain **bold words here** and `code span here` then [a link](https://x.example/a b) and \\* *it alic* "
+        val para = unit.repeat(400)
+        val pieces = Markdown.chunks(para)
+        assertTrue(pieces.size > 1)
+        assertEquals(para, pieces.joinToString(""))
+        // Each piece styled on its own reads as the whole paragraph does.
+        assertEquals(text(para), pieces.joinToString("") { text(it) })
+        val whole = Markdown.inline(para, palette)
+        val styled = pieces.map { Markdown.inline(it, palette) }
+        assertEquals(whole.spanStyles.size, styled.sumOf { it.spanStyles.size })
+        // A span longer than a piece is cut at its end, not inside it.
+        val long = "x".repeat(1_500) + " **" + "y".repeat(3_000) + "** tail" + " z".repeat(1_500)
+        val cut = Markdown.chunks(long)
+        assertEquals(long, cut.joinToString(""))
+        assertTrue(cut.any { it.startsWith("**") && it.endsWith("**") })
+        // A line with no space at all (minified text): cut anywhere outside a
+        // span and away from markers, so the pieces still read as the whole.
+        for (unitNoSpace in listOf("a_b`c`d**e**f\\*g*h*i[j](k)l!m_", "x*", "_y", "`z`", "\\`")) {
+            val flat = unitNoSpace.repeat(4_000 / unitNoSpace.length + 2_000)
+            val flatPieces = Markdown.chunks(flat)
+            assertTrue(flatPieces.size > 1)
+            assertEquals(flat, flatPieces.joinToString(""))
+            assertEquals(text(flat), flatPieces.joinToString("") { text(it) })
+            assertEquals(
+                Markdown.inline(flat, palette).spanStyles.size,
+                flatPieces.sumOf { Markdown.inline(it, palette).spanStyles.size },
+            )
+        }
+        // Code blocks have no inline Markdown: cut as plain text.
+        val code = "`" + "a ".repeat(3_000)
+        assertEquals(code, Markdown.chunks(code, inline = false).joinToString(""))
     }
 
     @Test

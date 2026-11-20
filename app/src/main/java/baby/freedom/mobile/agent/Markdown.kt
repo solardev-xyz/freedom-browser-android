@@ -43,14 +43,35 @@ import androidx.compose.ui.unit.dp
  */
 
 internal sealed interface MdBlock {
-    data class Paragraph(val text: String) : MdBlock
-    data class Heading(val level: Int, val text: String) : MdBlock
+    /**
+     * The block's text in [Markdown.chunks], worked out once per block: a
+     * reply that grows keeps its unchanged blocks (the same objects), so
+     * only the one still growing is cut again.
+     */
+    val chunks: List<String>
+
+    data class Paragraph(val text: String) : MdBlock {
+        override val chunks by lazy(LazyThreadSafetyMode.NONE) { Markdown.chunks(text) }
+    }
+    data class Heading(val level: Int, val text: String) : MdBlock {
+        override val chunks by lazy(LazyThreadSafetyMode.NONE) { Markdown.chunks(text) }
+    }
 
     /** A list item: [marker] is `•` or its number, [depth] its nesting. */
-    data class Item(val marker: String, val depth: Int, val text: String) : MdBlock
-    data class Quote(val text: String) : MdBlock
-    data class Code(val text: String) : MdBlock
-    data object Rule : MdBlock
+    data class Item(val marker: String, val depth: Int, val text: String) : MdBlock {
+        override val chunks by lazy(LazyThreadSafetyMode.NONE) { Markdown.chunks(text) }
+    }
+    data class Quote(val text: String) : MdBlock {
+        override val chunks by lazy(LazyThreadSafetyMode.NONE) { Markdown.chunks(text) }
+    }
+
+    /** No inline Markdown in code: cut as plain text. */
+    data class Code(val text: String) : MdBlock {
+        override val chunks by lazy(LazyThreadSafetyMode.NONE) { Markdown.chunks(text, inline = false) }
+    }
+    data object Rule : MdBlock {
+        override val chunks = listOf("")
+    }
 }
 
 /**
@@ -222,7 +243,7 @@ internal object Markdown {
                 is MdBlock.Code -> block.text
                 MdBlock.Rule -> ""
             }
-            val parts = if (chunked) chunks(text) else listOf(text)
+            val parts = if (chunked) block.chunks else listOf(text)
             parts.forEachIndexed { c, part -> out += MdPiece(b, c, block, part, c == parts.size - 1) }
         }
         return out
@@ -232,29 +253,97 @@ internal object Markdown {
     const val CHUNK = 2_000
 
     /**
-     * [text] in pieces of at most [CHUNK] characters, cut at a line end
-     * where there is one (the line break is the cut), else at a space,
-     * else anywhere but inside a surrogate pair. Each piece is its own
-     * [Text], so a long block that grows lays out only its last piece
-     * again. A cut piece only ever depends on the text before its end,
-     * so pieces already there stay the same as the text grows.
+     * [text] in pieces of about [CHUNK] characters, cut at a line end
+     * where there is one (the line break is the cut), else after a space
+     * (which stays at the end of its piece), else anywhere but inside a
+     * surrogate pair. With [inline] (any block but code, whose pieces are
+     * each parsed for inline Markdown on their own), never inside an
+     * inline span (bold, italic, code, a link, an escape), so none is
+     * split into two pieces that each show its markers as typed: a span
+     * longer than a piece is cut at its end instead. Each piece is its
+     * own [Text], so a long block that grows lays out only its last piece
+     * again. A cut only moves when the text after it closes a span
+     * across it, within [MAX_SPAN]; otherwise pieces already there stay
+     * the same as the text grows.
      */
-    fun chunks(text: String): List<String> {
+    fun chunks(text: String, inline: Boolean = true): List<String> {
         if (text.length <= CHUNK) return listOf(text)
         val out = ArrayList<String>()
+        // The block's inline spans, [start, end) pairs, in one scan: a cut
+        // is never inside one, so each piece's own scan matches this one.
+        var spans = IntArray(0)
+        var count = 0
+        if (inline) {
+            val finder = Finder(text)
+            var i = 0
+            while (i < text.length) {
+                val e = spanEnd(text, i, finder)
+                if (e < 0) {
+                    i++
+                } else {
+                    if (count + 2 > spans.size) spans = spans.copyOf(maxOf(64, spans.size * 2))
+                    spans[count++] = i
+                    spans[count++] = e
+                    i = e
+                }
+            }
+        }
+        // inside[k - start]: text[k] lies inside a span (after its first character).
+        val inside = BooleanArray(CHUNK + 1)
+        var sp = 0
         var start = 0
         while (text.length - start > CHUNK) {
             val limit = start + CHUNK
-            var cut = text.lastIndexOf('\n', limit)
-            if (cut <= start) cut = text.lastIndexOf(' ', limit)
-            if (cut > start) {
-                out += text.substring(start, cut)
-                start = cut + 1
-            } else {
-                cut = if (text[limit - 1].isHighSurrogate()) limit - 1 else limit
-                out += text.substring(start, cut)
-                start = cut
+            inside.fill(false)
+            while (sp < count && spans[sp + 1] <= start) sp += 2
+            // The end of the span over [limit], if one runs past it.
+            var over = -1
+            var j = sp
+            while (j < count && spans[j] < limit) {
+                val e = spans[j + 1]
+                for (k in spans[j] + 1 until minOf(e, limit + 1)) inside[k - start] = true
+                if (e > limit) over = e
+                j += 2
             }
+            // The last [ch] in (start, limit] outside a span; −1 if none. Only
+            // this piece's own window is scanned, never back to the text's start.
+            fun last(ch: Char): Int {
+                var k = limit
+                while (k > start && (text[k] != ch || inside[k - start])) k--
+                return if (k > start) k else -1
+            }
+            val line = last('\n')
+            if (line > start) {
+                out += text.substring(start, line)
+                start = line + 1
+                continue
+            }
+            val space = last(' ')
+            if (space > start) {
+                out += text.substring(start, space + 1)
+                start = space + 1
+                continue
+            }
+            val cut = when {
+                over >= 0 -> over
+                else -> {
+                    // Anywhere outside a span, but not next to a marker (a piece
+                    // starting `_` could open what mid-word wouldn't) or in a
+                    // surrogate pair; failing that, anywhere but a surrogate pair.
+                    fun clean(k: Int) = !inside[k - start] && !text[k - 1].isHighSurrogate() &&
+                        (!inline || (text[k - 1] !in MARKERS && text[k] !in MARKERS))
+                    var k = limit
+                    while (k > start + 1 && !clean(k)) k--
+                    when {
+                        k > start + 1 -> k
+                        text[limit - 1].isHighSurrogate() -> limit - 1
+                        else -> limit
+                    }
+                }
+            }
+            if (cut >= text.length) break
+            out += text.substring(start, cut)
+            start = cut
         }
         out += text.substring(start)
         return out
@@ -313,74 +402,63 @@ internal object Markdown {
             return@buildAnnotatedString
         }
         val finder = Finder(text)
-        fun find(needle: String, from: Int) = finder.find(needle, from)
         var i = 0
         val n = text.length
         while (i < n) {
             val c = text[i]
+            val end = spanEnd(text, i, finder)
             when {
-                c == '\\' && i + 1 < n && text[i + 1] in ESCAPABLE -> {
-                    append(text[i + 1])
-                    i += 2
+                end < 0 -> append(c)
+                c == '\\' -> append(text[i + 1])
+                c == '`' -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = palette.code)) {
+                    append(text, i + 1, end - 1)
                 }
-                c == '`' -> {
-                    val end = find("`", i + 1)
-                    if (end < 0) {
-                        append(c)
-                        i++
-                    } else {
-                        withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = palette.code)) {
-                            append(text, i + 1, end)
-                        }
-                        i = end + 1
-                    }
-                }
-                (c == '*' || c == '_') && text.startsWith("$c$c", i) -> {
-                    val end = find("$c$c", i + 2)
-                    if (end <= i + 2) {
-                        append(c)
-                        i++
-                    } else {
-                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(inline(text.substring(i + 2, end), palette, depth + 1)) }
-                        i = end + 2
-                    }
-                }
-                // `_` only around words, so snake_case stays as it is.
-                (c == '*' || (c == '_' && (i == 0 || !text[i - 1].isLetterOrDigit()))) &&
-                    i + 1 < n && !text[i + 1].isWhitespace() -> {
-                    val end = finder.closer(c, i + 1)
-                    if (end < 0) {
-                        append(c)
-                        i++
-                    } else {
-                        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(inline(text.substring(i + 1, end), palette, depth + 1)) }
-                        i = end + 1
-                    }
-                }
-                (c == '[' || (c == '!' && i + 1 < n && text[i + 1] == '[')) -> {
-                    val open = if (c == '!') i + 1 else i
-                    val close = find("](", open + 1)
-                    val end = if (close < 0) -1 else find(")", close + 2)
-                    if (close < 0 || end < 0 || text.substring(open + 1, close).contains('\n')) {
-                        append(c)
-                        i++
-                    } else {
-                        val label = text.substring(open + 1, close)
-                        val address = text.substring(close + 2, end).trim()
-                        withStyle(SpanStyle(color = palette.link, textDecoration = TextDecoration.Underline)) {
-                            append(inline(label.ifEmpty { address }, palette, depth + 1))
-                        }
-                        if (address.isNotEmpty() && address != label) {
-                            withStyle(SpanStyle(color = palette.muted)) { append(" ($address)") }
-                        }
-                        i = end + 1
-                    }
-                }
+                (c == '*' || c == '_') && text.startsWith("$c$c", i) ->
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(inline(text.substring(i + 2, end - 2), palette, depth + 1)) }
+                c == '*' || c == '_' ->
+                    withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(inline(text.substring(i + 1, end - 1), palette, depth + 1)) }
                 else -> {
-                    append(c)
-                    i++
+                    val open = if (c == '!') i + 1 else i
+                    val close = finder.find("](", open + 1)
+                    val label = text.substring(open + 1, close)
+                    val address = text.substring(close + 2, end - 1).trim()
+                    withStyle(SpanStyle(color = palette.link, textDecoration = TextDecoration.Underline)) {
+                        append(inline(label.ifEmpty { address }, palette, depth + 1))
+                    }
+                    if (address.isNotEmpty() && address != label) {
+                        withStyle(SpanStyle(color = palette.muted)) { append(" ($address)") }
+                    }
                 }
             }
+            i = if (end < 0) i + 1 else end
+        }
+    }
+
+    /**
+     * Where the inline span opening at [i] of [text] ends (exclusive): an
+     * escape, a code span, bold, italic or a link; −1 if none opens
+     * there, and the character is shown as typed. The one test both
+     * [inline] and [chunks] use, so a cut never lands inside a span.
+     */
+    private fun spanEnd(text: String, i: Int, finder: Finder): Int {
+        val n = text.length
+        val c = text[i]
+        return when {
+            c == '\\' -> if (i + 1 < n && text[i + 1] in ESCAPABLE) i + 2 else -1
+            c == '`' -> finder.find("`", i + 1).let { if (it < 0) -1 else it + 1 }
+            (c == '*' || c == '_') && text.startsWith("$c$c", i) ->
+                finder.find("$c$c", i + 2).let { if (it <= i + 2) -1 else it + 2 }
+            // `_` only around words, so snake_case stays as it is.
+            (c == '*' || (c == '_' && (i == 0 || !text[i - 1].isLetterOrDigit()))) &&
+                i + 1 < n && !text[i + 1].isWhitespace() ->
+                finder.closer(c, i + 1).let { if (it < 0) -1 else it + 1 }
+            c == '[' || (c == '!' && i + 1 < n && text[i + 1] == '[') -> {
+                val open = if (c == '!') i + 1 else i
+                val close = finder.find("](", open + 1)
+                val end = if (close < 0) -1 else finder.find(")", close + 2)
+                if (close < 0 || end < 0 || (open + 1 until close).any { text[it] == '\n' }) -1 else end + 1
+            }
+            else -> -1
         }
     }
 
@@ -439,6 +517,9 @@ internal object Markdown {
             return !(marker == '_' && after != null && after.isLetterOrDigit())
         }
     }
+
+    /** Characters an inline span can start or end with. */
+    private const val MARKERS = "\\`*_[]()!"
 
     private const val ESCAPABLE = "\\`*_{}[]()#+-.!>|~"
 }

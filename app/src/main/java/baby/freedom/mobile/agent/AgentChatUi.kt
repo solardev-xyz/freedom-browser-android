@@ -1,6 +1,7 @@
 package baby.freedom.mobile.agent
 
 import android.content.Context
+import android.os.SystemClock
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -45,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -54,6 +56,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -101,6 +107,9 @@ internal fun modelChoices(state: AgentState, discovered: Map<String, List<AgentM
 
 /** How long a just-shown Stop ignores taps. */
 private const val STOP_ARM_MS = 500L
+
+/** How soon after a send returns its turn's Stop still counts as just replacing Send. */
+private const val SEND_SETTLE_MS = 1_000L
 
 private val ComposerSaver = Saver<MutableState<String>, String>(
     // A long draft isn't kept across a process restart: the saved state
@@ -200,6 +209,8 @@ private fun ChatView(
     var draft by rememberSaveable(saver = ComposerSaver) { mutableStateOf("") }
     var picked by rememberSaveable(sessionId, saver = ModelRefSaver) { mutableStateOf(null) }
     var sendFailed by remember { mutableStateOf(false) }
+    // When the last send came back: its turn's Stop can show a frame later.
+    val sentAt = remember { mutableLongStateOf(Long.MIN_VALUE / 2) }
     // The chat's own model, else the one picked, else the default; only one still offered.
     val sessionModel = session?.let { s -> s.connectionId?.let { c -> s.modelId?.let { ModelRef(c, it) } } }
     val model = listOfNotNull(picked, sessionModel, defaultModel).firstOrNull { ref -> choices.any { it.ref == ref } }
@@ -227,8 +238,27 @@ private fun ChatView(
     val listState = rememberLazyListState()
     // Follows the reply as it grows while the list is at its end; a user
     // who scrolls up to read stays where they are until they scroll back
-    // down, or send.
+    // down, or send. Following stops at the drag's (or fling's) first move
+    // up, not once it ends: a jump to the end while the finger is still
+    // down would be waiting on the drag, and land the moment it lets go.
     var follow by remember(sessionId) { mutableStateOf(true) }
+    val stopFollowing = remember(sessionId) {
+        object : NestedScrollConnection {
+            // Only the user's own scrolling comes through here; the jumps
+            // to the end below don't.
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y > 0f) follow = false
+                return Offset.Zero
+            }
+
+            // A drag or fling down that runs into the end: following again,
+            // even if the reply grows before the fling settles.
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (available.y < 0f) follow = true
+                return Offset.Zero
+            }
+        }
+    }
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
             if (!scrolling) follow = !listState.canScrollForward
@@ -256,7 +286,7 @@ private fun ChatView(
             val palette = markdownPalette()
             LazyColumn(
                 state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
+                modifier = Modifier.weight(1f).fillMaxWidth().nestedScroll(stopFollowing),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
             ) {
                 itemsIndexed(rows, key = { _, row -> row.key }) { i, row ->
@@ -300,11 +330,16 @@ private fun ChatView(
                 val running = live != null
                 // Stop takes the place of Send the moment a turn starts: a
                 // double-tap's second tap must not land on it and stop the
-                // reply it just sent.
-                var stopArmed by remember(live?.turnId) { mutableStateOf(false) }
+                // reply it just sent. Only a turn this page just sent: one
+                // already running when the chat is opened stops at once.
+                var stopArmed by remember(live?.turnId) {
+                    mutableStateOf(!sending.value && SystemClock.uptimeMillis() - sentAt.longValue > SEND_SETTLE_MS)
+                }
                 LaunchedEffect(live?.turnId) {
-                    delay(STOP_ARM_MS)
-                    stopArmed = true
+                    if (!stopArmed) {
+                        delay(STOP_ARM_MS)
+                        stopArmed = true
+                    }
                 }
                 if (running) {
                     FilledIconButton(
@@ -334,6 +369,7 @@ private fun ChatView(
                                         onStarted(id)
                                     }
                                 } finally {
+                                    sentAt.longValue = SystemClock.uptimeMillis()
                                     sending.value = false
                                 }
                             }
