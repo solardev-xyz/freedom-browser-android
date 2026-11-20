@@ -622,7 +622,9 @@ fun BrowserScreen(
     // Freedom Agent's chat (#574): offered only while AI is on, never
     // from a private tab, and closed when AI is turned off.
     var showAgent by rememberSaveable { mutableStateOf(false) }
-    val aiOn by remember(context) { baby.freedom.mobile.agent.agentAiOn(context) }.collectAsState(initial = false)
+    // Null until the stored switch is read: an Activity recreated with the
+    // chat open must not take "not read yet" for "off" and close it.
+    val aiOn by remember(context) { baby.freedom.mobile.agent.agentAiOn(context) }.collectAsState(initial = null)
     var addressFocused by remember { mutableStateOf(false) }
     // Ctrl+L (#270): the address field takes focus once it's composed.
     var addressFocusRequested by remember { mutableStateOf(false) }
@@ -710,7 +712,7 @@ fun BrowserScreen(
     val overlayShown = showSettings || showNodes || nodeDetail != null || showLogs != null || showWallet || walletRequest != null ||
         linkSend != null ||
         showTabSwitcher ||
-        showHistory || showBookmarks || showDownloads || (showAgent && aiOn)
+        showHistory || showBookmarks || showDownloads || (showAgent && aiOn != false)
     // The menu's Nodes & networks sub-line (#416): only while a node has
     // failed, read off the overview's own rows. Remembered, so the menu
     // gets the same (usually null) note however often the peers change.
@@ -2857,7 +2859,7 @@ fun BrowserScreen(
                     },
                     onNewTab = openNewTab,
                     onNewPrivateTab = newPrivateTab,
-                    onOpenAgent = if (aiOn && !state.private) {
+                    onOpenAgent = if (aiOn == true && !state.private) {
                         { showAgent = true }
                     } else {
                         null

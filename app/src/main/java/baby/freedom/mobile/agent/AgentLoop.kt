@@ -91,7 +91,9 @@ internal class AgentLoop(
     /**
      * Runs one turn for [userText] after [history] (finished turns, by
      * position, which [summary] may already cover in part). [onText]
-     * gets the turn's whole reply text each time it grows; [onCompacted]
+     * gets the turn's whole reply text each time it grows, as a buffer
+     * valid only during the call (copying a long reply on every piece
+     * would cost more than the reply); [onCompacted]
      * the new summary whenever the conversation is compacted, to keep.
      * Cancelling the caller stops it wherever it is (a stream, a tool, a
      * compaction).
@@ -100,7 +102,7 @@ internal class AgentLoop(
         history: List<HistoryTurn>,
         summary: Summary?,
         userText: String,
-        onText: (String) -> Unit,
+        onText: (CharSequence) -> Unit,
         onCompacted: suspend (Summary) -> Unit,
     ): TurnOutcome {
         var currentSummary = summary
@@ -131,7 +133,7 @@ internal class AgentLoop(
                     first = false
                 }
                 text.append(delta)
-                onText(text.toString())
+                onText(text)
             }
             val result = when (outcome) {
                 is StepOutcome.Failed -> return TurnOutcome(text.toString(), outcome.error)
@@ -270,12 +272,39 @@ Keep each section concise. Preserve exact file paths, function names, and error 
         const val SUMMARIZATION_PROMPT = "The messages above are a conversation to summarize. Create a structured " +
             "context checkpoint summary that another LLM will use to continue the work.\n\nUse this EXACT format:\n\n" + FORMAT
 
+        private const val UPDATE_FORMAT = """## Goal
+[Preserve existing goals, add new ones if the task expanded]
+
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
+
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work - update based on progress]
+
+### Blocked
+- [Current blockers - remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages."""
+
         const val UPDATE_SUMMARIZATION_PROMPT = "The messages above are NEW conversation messages to incorporate into " +
             "the existing summary provided in <previous-summary> tags.\n\nUpdate the existing structured summary with " +
             "new information. RULES:\n- PRESERVE all existing information from the previous summary\n- ADD new " +
             "progress, decisions, and context from the new messages\n- UPDATE the Progress section: move items from " +
             "\"In Progress\" to \"Done\" when completed\n- UPDATE \"Next Steps\" based on what was accomplished\n- " +
             "PRESERVE exact file paths, function names, and error messages\n- If something is no longer relevant, you " +
-            "may remove it\n\nUse this EXACT format:\n\n" + FORMAT
+            "may remove it\n\nUse this EXACT format:\n\n" + UPDATE_FORMAT
     }
 }

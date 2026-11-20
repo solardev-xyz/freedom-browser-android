@@ -50,6 +50,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -115,9 +116,11 @@ private val ModelRefSaver = Saver<MutableState<ModelRef?>, String>(
  * off while it's up.
  */
 @Composable
-internal fun AgentChatPage(aiOn: Boolean, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
-    LaunchedEffect(aiOn) { if (!aiOn) onDismiss() }
-    if (!aiOn) return
+internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
+    // [aiOn] null: the switch isn't read yet (just after a rotation); only
+    // a definite off closes the page.
+    LaunchedEffect(aiOn) { if (aiOn == false) onDismiss() }
+    if (aiOn != true) return
     val context = LocalContext.current
     val chats = remember(context) { AgentChats.get(context) }
     val providers = remember(context) { AgentProviders.get(context) }
@@ -207,10 +210,21 @@ private fun ChatView(
     }
 
     val listState = rememberLazyListState()
-    // Follows the reply as it grows, and a new message.
-    LaunchedEffect(turns.size, live?.text?.length) {
-        val last = turns.size - 1
-        if (last >= 0) listState.scrollToItem(last, Int.MAX_VALUE / 2)
+    // Follows the reply as it grows while the list is at its end; a user
+    // who scrolls up to read stays where they are until they scroll back
+    // down, or send.
+    var follow by remember(sessionId) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) follow = !listState.canScrollForward
+        }
+    }
+    LaunchedEffect(turns.size) {
+        follow = true
+        if (turns.isNotEmpty()) listState.scrollToItem(turns.size - 1, Int.MAX_VALUE / 2)
+    }
+    LaunchedEffect(live?.text?.length) {
+        if (follow && turns.isNotEmpty()) listState.scrollToItem(turns.size - 1, Int.MAX_VALUE / 2)
     }
     Column(Modifier.fillMaxSize()) {
         if (turns.isEmpty()) {

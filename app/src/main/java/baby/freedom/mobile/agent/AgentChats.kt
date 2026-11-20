@@ -132,7 +132,8 @@ internal class AgentChats(
 
     private suspend fun runTurn(turn: ChatTurn, model: ModelRef) {
         val started = clock()
-        var latest = ""
+        // The loop's buffer: read (copied) only when shown or saved.
+        var latest: CharSequence = ""
         var lastShown = 0L
         var lastSaved = started
         var outcome: TurnOutcome? = null
@@ -162,12 +163,20 @@ internal class AgentChats(
                             // At most every [SHOW_EVERY_MS]: each update re-renders the reply.
                             if (now - lastShown >= SHOW_EVERY_MS) {
                                 lastShown = now
-                                _live.update { it + (turn.sessionId to Live(turn.sessionId, turn.id, text)) }
+                                val shown = text.toString()
+                                // Only while this turn is still the session's
+                                // live one: a late piece must never bring back
+                                // an entry the turn's wind-down already removed.
+                                _live.update { m ->
+                                    if (m[turn.sessionId]?.turnId != turn.id) m
+                                    else m + (turn.sessionId to Live(turn.sessionId, turn.id, shown))
+                                }
                             }
                             // Now and then on disk too, so a stopped app keeps most of it.
                             if (now - lastSaved >= SAVE_EVERY_MS) {
                                 lastSaved = now
-                                scope.launch { runCatching { dao.saveProgress(turn.id, text) } }
+                                val saved = text.toString()
+                                scope.launch { runCatching { dao.saveProgress(turn.id, saved) } }
                             }
                         },
                         onCompacted = { s -> withContext(NonCancellable) { dao.setSummary(turn.sessionId, s.text, s.through) } },
@@ -176,9 +185,11 @@ internal class AgentChats(
             }
         } catch (e: CancellationException) {
             // Stop, or the chat was deleted: what came so far is kept.
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Anything (an out-of-memory on a huge reply too): the turn still
+            // ends, and its session stops counting as running.
             Log.w(TAG, "a chat turn failed (${e.javaClass.simpleName})")
-            outcome = TurnOutcome(latest, ChatError.BadReply)
+            outcome = TurnOutcome(runCatching { latest.toString() }.getOrDefault(""), ChatError.BadReply)
         } finally {
             withContext(NonCancellable) {
                 val o = outcome
@@ -189,7 +200,10 @@ internal class AgentChats(
                     else -> ChatStatus.FAILED
                 }
                 try {
-                    dao.finishTurn(turn.id, o?.text ?: latest, status, clock() - started, o?.error?.name)
+                    // After a Stop, a piece OkHttp was handing on at that
+                    // instant may still be landing in the buffer.
+                    val text = o?.text ?: runCatching { latest.toString() }.getOrDefault("")
+                    dao.finishTurn(turn.id, text, status, clock() - started, o?.error?.name)
                 } catch (e: Exception) {
                     Log.w(TAG, "saving a chat reply failed (${e.javaClass.simpleName})")
                 }

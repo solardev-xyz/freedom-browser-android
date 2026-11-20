@@ -223,8 +223,9 @@ class AgentChatsTest {
         val body = bodies.last()
         assertFalse(body.getBoolean("store"))
         val input = body.getJSONArray("input")
-        assertEquals("function_call_output", input.getJSONObject(2).getString("type"))
-        assertEquals("call_1", input.getJSONObject(2).getString("call_id"))
+        assertEquals("system", input.getJSONObject(0).getString("role"))
+        assertEquals("function_call_output", input.getJSONObject(3).getString("type"))
+        assertEquals("call_1", input.getJSONObject(3).getString("call_id"))
     }
 
     @Test
@@ -276,6 +277,51 @@ class AgentChatsTest {
     }
 
     @Test
+    fun `Stop in the middle of a fast stream leaves nothing running, whatever was still buffered`() = runBlocking {
+        val model = connectOllama()
+        val chunks = Array(20_000) { chatText("w$it ") }
+        // Many small pieces, quickly: some are always already buffered when Stop lands.
+        route("/v1/chat/completions", { sse(*chunks, chatStop).throttleBody(4_096, 1, TimeUnit.MILLISECONDS) })
+        val id = chats.send(null, "hi", model)!!
+        withTimeout(10_000) { while ((chats.live.value[id]?.text?.length ?: 0) < 50) delay(1) }
+        withTimeout(2_000) { chats.stop(id) }
+        delay(300)
+        assertTrue(chats.live.value.isEmpty())
+        val turn = dao.turns(id).single()
+        assertEquals(ChatStatus.CANCELLED, turn.status)
+        assertTrue(turn.assistantText.startsWith("w0 w1 "))
+        assertEquals(0, gate.inFlight())
+        // And the chat takes the next message.
+        route("/v1/chat/completions", { sse(chatText("ok"), chatStop) })
+        assertEquals(id, chats.send(id, "again", model))
+        assertEquals("ok", awaitDone(id).assistantText)
+    }
+
+    @Test
+    fun `a server that stops sending ends the answer as timed out, keeping what came`() = runBlocking {
+        val gate2 = RequestGate()
+        val p2 = AgentProviders(
+            AgentStore(MemoryStore(), MemoryStore(), AesGcmCipher { aes }),
+            gate2,
+            ProviderClient(gate2, streamIdleMs = 300),
+        )
+        assertTrue(p2.setEnabled(true))
+        val model = ModelRef(p2.saveLan(ProviderCatalog.OLLAMA, null, "", base, key = null)!!, "llama3")
+        val dao2 = MemoryChatDao()
+        val c2 = AgentChats(dao2, p2, "{{identity}}", scope = scope)
+        route("/v1/chat/completions", { stalled() })
+        val id = c2.send(null, "hi", model)!!
+        val turn = withTimeout(10_000) {
+            while (id in c2.live.value) delay(10)
+            dao2.turns(id).single()
+        }
+        assertEquals(ChatStatus.FAILED, turn.status)
+        assertEquals(ChatError.TimedOut.name, turn.error)
+        assertEquals("Part", turn.assistantText)
+        assertEquals(0, gate2.inFlight())
+    }
+
+    @Test
     fun `turning AI off ends a running answer and says why`() = runBlocking {
         val model = connectOllama()
         route("/v1/chat/completions", { stalled() })
@@ -320,7 +366,7 @@ class AgentChatsTest {
     }
 
     @Test
-    fun `a provider that's gone, or a key that can't be read, is said before anything is sent`() = runBlocking {
+    fun `a provider that's gone is said before anything is sent`() = runBlocking {
         connectOllama()
         val turn = awaitDone(chats.send(null, "hi", ModelRef("nope", "m"))!!)
         assertEquals(ChatError.NoModel.name, turn.error)

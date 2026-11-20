@@ -52,6 +52,13 @@ class MarkdownTest {
     }
 
     @Test
+    fun `rules and headings`() {
+        assertEquals(listOf(MdBlock.Rule, MdBlock.Rule, MdBlock.Rule), Markdown.parse("---\n* * *\n   ___"))
+        assertEquals(listOf(MdBlock.Heading(3, "Title")), Markdown.parse("### Title ##"))
+        assertEquals(listOf(MdBlock.Paragraph("#hashtag\n####### seven")), Markdown.parse("#hashtag\n####### seven"))
+    }
+
+    @Test
     fun `list nesting is capped`() {
         assertEquals(Markdown.MAX_DEPTH, (Markdown.parse(" ".repeat(40) + "- deep").single() as MdBlock.Item).depth)
     }
@@ -71,5 +78,24 @@ class MarkdownTest {
         assertEquals("the docs (https://example.org/a)", text("[the docs](https://example.org/a)"))
         assertEquals("https://x.example", text("[https://x.example](https://x.example)"))
         assertEquals("logo (https://evil.example/t.png)", text("![logo](https://evil.example/t.png)"))
+    }
+
+    @Test
+    fun `unmatched markers in a megabyte reply don't make rendering quadratic`() {
+        val pathological = listOf(
+            "[".repeat(500_000), "*a ".repeat(200_000), "`x".repeat(250_000), "**".repeat(250_000),
+            "* ".repeat(250_000), "_a ".repeat(200_000), "#".repeat(500_000), "# " + "#".repeat(500_000),
+            " ".repeat(500_000) + "- x", "- " + "a".repeat(1_000_000), "1. " + " ".repeat(500_000) + "x",
+            "[a](" + "b".repeat(500_000),
+            // Emphasis nested as deep as it goes.
+            (0 until 50_000).joinToString("") { if (it % 2 == 0) "**x " else "_y " } +
+                (0 until 50_000).joinToString("") { if (it % 2 == 0) "x_ " else "y** " },
+        )
+        for (reply in pathological) {
+            val start = System.nanoTime()
+            Markdown.parse(reply).forEach { if (it is MdBlock.Paragraph) Markdown.inline(it.text, palette) }
+            val ms = (System.nanoTime() - start) / 1_000_000
+            org.junit.Assert.assertTrue("${reply.take(4)}…: $ms ms", ms < 3_000)
+        }
     }
 }

@@ -177,5 +177,5 @@
     <string name="agent_error_too_long">This chat is too long for the model. Start a new chat.</string>
     <string name="agent_error_too_many_steps">The agent took too many steps and was stopped.</string>
     <string name="agent_error_ai_off">Stopped: AI was turned off.</string>
-    <string name="agent_error_key_changed">Stopped: the provider\'s key or address changed.</string>
+    <string name="agent_error_key_changed">Stopped: the provider\'s key or address changed, or the provider was removed.</string>
 </resources>

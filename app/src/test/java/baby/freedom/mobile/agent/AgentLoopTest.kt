@@ -43,7 +43,7 @@ class AgentLoopTest {
         summary: Summary? = null,
         compacted: MutableList<Summary> = ArrayList(),
         shown: MutableList<String> = ArrayList(),
-    ) = runBlocking { loop.run(history, summary, "what time is it?", { shown += it }, { compacted += it }) }
+    ) = runBlocking { loop.run(history, summary, "what time is it?", { shown += it.toString() }, { compacted += it }) }
 
     @Test
     fun `a tool call runs, its result goes back, and the texts of both steps join`() {

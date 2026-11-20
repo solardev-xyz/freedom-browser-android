@@ -215,6 +215,11 @@ internal object AgentWire {
 
     private fun responsesBody(r: StepRequest): JSONObject {
         val input = JSONArray()
+        // As Pi sends it: a leading instruction message, not `instructions`
+        // (which Pi keeps for the ChatGPT sign-in's Codex endpoint). `system`
+        // rather than Pi's `developer` for reasoning models: every
+        // Responses provider here takes it, and OpenAI reads it as `developer`.
+        if (r.system.isNotEmpty()) input.put(JSONObject().put("role", "system").put("content", r.system))
         for (item in r.items) when (item) {
             is ChatItem.User -> input.put(JSONObject().put("role", "user").put("content", item.text))
             is ChatItem.Assistant -> {
@@ -243,7 +248,6 @@ internal object AgentWire {
             .put("store", false)
             .put("max_output_tokens", r.maxTokens)
             .apply {
-                if (r.system.isNotEmpty()) put("instructions", r.system)
                 if (r.tools.isNotEmpty()) put(
                     "tools",
                     JSONArray(

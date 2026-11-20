@@ -52,10 +52,8 @@ internal sealed interface MdBlock {
 }
 
 internal object Markdown {
-    private val HEADING = Regex("^(#{1,6})\\s+(.*?)\\s*#*\\s*$")
     private val BULLET = Regex("^(\\s*)[-*+]\\s+(.*)$")
     private val NUMBERED = Regex("^(\\s*)(\\d{1,9})[.)]\\s+(.*)$")
-    private val RULE = Regex("^\\s{0,3}([-*_])(\\s*\\1){2,}\\s*$")
     private val FENCE = Regex("^\\s{0,3}(```+|~~~+)")
 
     /** The deepest list nesting drawn: past it, items line up with the deepest. */
@@ -89,14 +87,13 @@ internal object Markdown {
             }
             when {
                 line.isBlank() -> flush()
-                RULE.matches(line) -> {
+                isRule(line) -> {
                     flush()
                     out += MdBlock.Rule
                 }
-                HEADING.matches(line) -> {
+                heading(line) != null -> {
                     flush()
-                    val m = HEADING.find(line)!!
-                    out += MdBlock.Heading(m.groupValues[1].length, m.groupValues[2])
+                    out += heading(line)!!
                 }
                 line.trimStart().startsWith(">") -> {
                     if (paragraph.isNotEmpty()) flush()
@@ -129,6 +126,36 @@ internal object Markdown {
         return out
     }
 
+    // Plain scans, not regular expressions: a reply line can be a
+    // megabyte of `*`, and a backtracking pattern recurses per character.
+
+    /** `---`, `***` or `___` (spaces between allowed), up to three spaces in. */
+    private fun isRule(line: String): Boolean {
+        val lead = line.length - line.trimStart().length
+        val body = line.trim()
+        if (lead > 3 || body.isEmpty()) return false
+        val c = body[0]
+        if (c != '-' && c != '*' && c != '_') return false
+        var count = 0
+        for (ch in body) {
+            when {
+                ch == c -> count++
+                ch == ' ' || ch == '\t' -> Unit
+                else -> return false
+            }
+        }
+        return count >= 3
+    }
+
+    /** `#`–`######`, a space, then the text, without closing `#`s. */
+    private fun heading(line: String): MdBlock.Heading? {
+        var level = 0
+        while (level < line.length && line[level] == '#') level++
+        if (level !in 1..6 || level >= line.length || !line[level].isWhitespace()) return null
+        val text = line.substring(level).trim().trimEnd('#').trimEnd()
+        return MdBlock.Heading(level, text)
+    }
+
     private fun depthOf(indent: String): Int =
         (indent.replace("\t", "    ").length / 2).coerceIn(0, MAX_DEPTH)
 
@@ -141,7 +168,18 @@ internal object Markdown {
      * text followed by its address), with `\` escapes. Unmatched markers
      * stay as typed.
      */
-    fun inline(text: String, palette: Palette): AnnotatedString = buildAnnotatedString {
+    fun inline(text: String, palette: Palette): AnnotatedString = inline(text, palette, 0)
+
+    /** Emphasis nested past this many levels is shown as typed, so no reply can recurse deep. */
+    private const val MAX_NESTING = 8
+
+    private fun inline(text: String, palette: Palette, depth: Int): AnnotatedString = buildAnnotatedString {
+        if (depth > MAX_NESTING) {
+            append(text)
+            return@buildAnnotatedString
+        }
+        val finder = Finder(text)
+        fun find(needle: String, from: Int) = finder.find(needle, from)
         var i = 0
         val n = text.length
         while (i < n) {
@@ -152,7 +190,7 @@ internal object Markdown {
                     i += 2
                 }
                 c == '`' -> {
-                    val end = text.indexOf('`', i + 1)
+                    val end = find("`", i + 1)
                     if (end < 0) {
                         append(c)
                         i++
@@ -164,31 +202,31 @@ internal object Markdown {
                     }
                 }
                 (c == '*' || c == '_') && text.startsWith("$c$c", i) -> {
-                    val end = text.indexOf("$c$c", i + 2)
+                    val end = find("$c$c", i + 2)
                     if (end <= i + 2) {
                         append(c)
                         i++
                     } else {
-                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(inline(text.substring(i + 2, end), palette)) }
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(inline(text.substring(i + 2, end), palette, depth + 1)) }
                         i = end + 2
                     }
                 }
                 // `_` only around words, so snake_case stays as it is.
                 (c == '*' || (c == '_' && (i == 0 || !text[i - 1].isLetterOrDigit()))) &&
                     i + 1 < n && !text[i + 1].isWhitespace() -> {
-                    val end = closing(text, c, i + 1)
+                    val end = finder.closer(c, i + 1)
                     if (end < 0) {
                         append(c)
                         i++
                     } else {
-                        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(inline(text.substring(i + 1, end), palette)) }
+                        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(inline(text.substring(i + 1, end), palette, depth + 1)) }
                         i = end + 1
                     }
                 }
                 (c == '[' || (c == '!' && i + 1 < n && text[i + 1] == '[')) -> {
                     val open = if (c == '!') i + 1 else i
-                    val close = text.indexOf("](", open + 1)
-                    val end = if (close < 0) -1 else text.indexOf(')', close + 2)
+                    val close = find("](", open + 1)
+                    val end = if (close < 0) -1 else find(")", close + 2)
                     if (close < 0 || end < 0 || text.substring(open + 1, close).contains('\n')) {
                         append(c)
                         i++
@@ -196,7 +234,7 @@ internal object Markdown {
                         val label = text.substring(open + 1, close)
                         val address = text.substring(close + 2, end).trim()
                         withStyle(SpanStyle(color = palette.link, textDecoration = TextDecoration.Underline)) {
-                            append(inline(label.ifEmpty { address }, palette))
+                            append(inline(label.ifEmpty { address }, palette, depth + 1))
                         }
                         if (address.isNotEmpty() && address != label) {
                             withStyle(SpanStyle(color = palette.muted)) { append(" ($address)") }
@@ -212,18 +250,60 @@ internal object Markdown {
         }
     }
 
-    /** Where a single [marker] closes after [from], not before whitespace; -1 if it doesn't. */
-    private fun closing(text: String, marker: Char, from: Int): Int {
-        var j = from
-        while (j < text.length) {
-            val k = text.indexOf(marker, j)
-            if (k < 0) return -1
-            val doubled = k + 1 < text.length && text[k + 1] == marker
-            val wordAfter = marker == '_' && k + 1 < text.length && text[k + 1].isLetterOrDigit()
-            if (!text[k - 1].isWhitespace() && !doubled && !wordAfter) return k
-            j = k + if (doubled) 2 else 1
+    /** How far after its opening a marker's close may be. */
+    const val MAX_SPAN = 4_000
+
+    /**
+     * Finds closing markers in one text, each needle's text scanned once
+     * overall: a reply can be a megabyte of model-written text, and a
+     * plain search per unmatched `[` or `*` would make every re-render
+     * quadratic in it.
+     */
+    private class Finder(val text: String) {
+        private val last = HashMap<String, IntArray>()
+
+        /** The first [needle] at or after [from] (−1: none), within [MAX_SPAN]. */
+        fun find(needle: String, from: Int): Int {
+            val c = last.getOrPut(needle) { intArrayOf(-1, -2) }
+            // [from, c[1]] had no other occurrence before c[1] (or none at all, −1).
+            val found = if (c[0] in 0..from && (c[1] == -1 || c[1] >= from)) {
+                c[1]
+            } else {
+                text.indexOf(needle, from).also { c[0] = from; c[1] = it }
+            }
+            return if (found < 0 || found - from > MAX_SPAN) -1 else found
         }
-        return -1
+
+        private val closers = HashMap<Char, IntArray>()
+
+        /**
+         * Where a single [marker] (`*` or `_`) at or after [from] can
+         * close an emphasis, within [MAX_SPAN]; −1 if none. Whether a
+         * position can close doesn't depend on where the emphasis opened,
+         * so it's cached the same way as [find].
+         */
+        fun closer(marker: Char, from: Int): Int {
+            val c = closers.getOrPut(marker) { intArrayOf(-1, -2) }
+            val found = if (c[0] in 0..from && (c[1] == -1 || c[1] >= from)) {
+                c[1]
+            } else {
+                var k = text.indexOf(marker, from)
+                while (k >= 0 && !closes(marker, k)) k = text.indexOf(marker, k + 1)
+                c[0] = from
+                c[1] = k
+                k
+            }
+            return if (found < 0 || found - from > MAX_SPAN) -1 else found
+        }
+
+        /** Not after whitespace or another [marker], not before one, and `_` not inside a word. */
+        private fun closes(marker: Char, k: Int): Boolean {
+            if (k == 0) return false
+            val before = text[k - 1]
+            val after = text.getOrNull(k + 1)
+            if (before.isWhitespace() || before == marker || after == marker) return false
+            return !(marker == '_' && after != null && after.isLetterOrDigit())
+        }
     }
 
     private const val ESCAPABLE = "\\`*_{}[]()#+-.!>|~"

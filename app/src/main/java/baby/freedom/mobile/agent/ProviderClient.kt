@@ -152,7 +152,8 @@ internal sealed interface ProviderReply {
  * server (and so no pooled idle connections, which only a retry makes
  * safe to reuse), no cookies or cache, a direct connection (no system proxy) and
  * an overall deadline per call ([OkHttpClient.callTimeout]: DNS, connect,
- * sending, waiting and reading the body, all together). `localhost` is
+ * sending, waiting and reading the body, all together), except a chat's
+ * stream ([stream]), which has an idle deadline instead. `localhost` is
  * answered here with the loopback addresses, never asked of DNS, so the
  * name [ProviderUrls] treats as this phone is this phone.
  *
@@ -162,6 +163,8 @@ internal sealed interface ProviderReply {
 internal class ProviderClient(
     private val gate: RequestGate,
     http: OkHttpClient = DEFAULT_HTTP,
+    /** How long a chat's stream may go without a byte; tests shorten it. */
+    streamIdleMs: Long = STREAM_IDLE_MS,
 ) {
     /** [http], noting on each request when it reached a connected server. */
     private val http: OkHttpClient = http.newBuilder().addNetworkInterceptor(SENT).build()
@@ -169,7 +172,7 @@ internal class ProviderClient(
     /** The same, for a chat's streamed answers: no whole-call deadline, but an idle one. */
     private val streamHttp: OkHttpClient = this.http.newBuilder()
         .callTimeout(0, TimeUnit.MILLISECONDS)
-        .readTimeout(STREAM_IDLE_MS, TimeUnit.MILLISECONDS)
+        .readTimeout(streamIdleMs, TimeUnit.MILLISECONDS)
         .build()
 
     /**
@@ -286,7 +289,14 @@ internal class ProviderClient(
 
                     override fun onResponse(call: Call, response: Response) {
                         val end = try {
-                            response.use { readEvents(it, onEvent) }
+                            // Events already buffered when the call is cancelled
+                            // (Stop, the gate) are never handed on.
+                            response.use {
+                                readEvents(it) { e, d ->
+                                    if (call.isCanceled()) throw IOException("cancelled")
+                                    onEvent(e, d)
+                                }
+                            }
                         } catch (e: WireException) {
                             StreamEnd.Wire(e.error)
                         } catch (e: SseReader.TooLarge) {
