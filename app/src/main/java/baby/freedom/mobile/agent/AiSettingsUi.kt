@@ -87,7 +87,8 @@ import kotlinx.coroutines.launch
  * Settings → AI (#573): the "Enable AI features" switch, and under it
  * Models & providers — connect a hosted provider with an API key or a
  * server on the network by URL, pick favourite models and the default
- * one, and Test connection. No chat yet (#574).
+ * one, and Test connection. Voice dictation's page (#578) is in
+ * DictationSettingsUi.kt.
  */
 
 private val AI_SECTION: String get() = Strings.get(R.string.agent_section_ai)
@@ -102,7 +103,7 @@ internal fun aiPageSummary(state: AgentState): String = when {
 private fun enableSubtitle(on: Boolean) =
     Strings.get(if (on) R.string.agent_enable_on else R.string.agent_enable_off)
 
-/** The AI card's rows, for settings search. Models & providers is a row only while AI is on. */
+/** The AI card's rows, for settings search. Models & providers and Voice dictation are rows only while AI is on. */
 internal fun aiSectionRows(state: AgentState): List<SettingsRow> = listOfNotNull(
     settingsRow(
         "ai-enabled", Strings.get(R.string.agent_enable), enableSubtitle(state.enabled),

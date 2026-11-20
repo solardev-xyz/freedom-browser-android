@@ -38,6 +38,8 @@ class DictationTest {
     fun `the language follows the app's unless one is picked`() {
         assertEquals("de-AT", dictationLanguage(null, Locale.forLanguageTag("de-AT")))
         assertEquals("fr", dictationLanguage("fr", Locale.forLanguageTag("de-AT")))
+        // A regional preference's extension isn't passed on.
+        assertEquals("en-US", dictationLanguage(null, Locale.forLanguageTag("en-US-u-mu-celsius")))
     }
 
     @Test
@@ -93,11 +95,73 @@ class DictationTest {
         }
     }
 
+    /** Blocks [Dictation] scheduled with its deadline, run by the test. */
+    private val later = mutableListOf<Pair<Long, () -> Unit>>()
+
     private fun setUp(kind: RecognizerKind = RecognizerKind.OnDevice): Triple<Dictation, FakeRecognizer, () -> String> {
         val fake = FakeRecognizer()
         var draft = ""
-        val d = Dictation(kind, { fake }, setDraft = { draft = it })
+        val d = Dictation(kind, { fake }, setDraft = { draft = it }, after = { ms, block -> later += ms to block })
         return Triple(d, fake) { draft }
+    }
+
+    @Test
+    fun `an empty final after partials keeps what was shown`() {
+        val (d, fake, draft) = setUp()
+        d.start("", "en")
+        fake.last.partial("book a table")
+        d.finish()
+        fake.last.final("")
+        assertEquals("book a table", draft())
+        assertEquals(DictationStatus.Done, d.status.value)
+    }
+
+    @Test
+    fun `nothing more heard after partials isn't a failure`() {
+        val (d, fake, draft) = setUp()
+        d.start("", "en")
+        fake.last.partial("book a table")
+        fake.last.error(SpeechRecognizer.ERROR_NO_MATCH)
+        assertEquals("book a table", draft())
+        assertEquals(DictationStatus.Done, d.status.value)
+    }
+
+    @Test
+    fun `a client error answering our own stop ends quietly, one without a stop is a failure`() {
+        val (d, fake, _) = setUp()
+        d.start("", "en")
+        d.finish()
+        fake.last.error(SpeechRecognizer.ERROR_CLIENT)
+        assertEquals(DictationStatus.Idle, d.status.value)
+        d.start("", "en")
+        fake.last.error(SpeechRecognizer.ERROR_CLIENT)
+        assertEquals(DictationStatus.Failed(DictationFailure.Other, RecognizerKind.OnDevice), d.status.value)
+    }
+
+    @Test
+    fun `a recognizer that never answers the stop is let go after the deadline`() {
+        val (d, fake, draft) = setUp()
+        d.start("", "en")
+        fake.last.partial("hello")
+        d.finish()
+        assertTrue(d.listening)
+        assertEquals(Dictation.FINISH_DEADLINE_MS, later.single().first)
+        later.single().second()
+        assertFalse(d.listening)
+        assertTrue(fake.cancels > 0)
+        assertEquals("hello", draft())
+        assertEquals(DictationStatus.Done, d.status.value)
+    }
+
+    @Test
+    fun `a deadline from an earlier run doesn't end the next one`() {
+        val (d, fake, _) = setUp()
+        d.start("", "en")
+        d.finish()
+        fake.last.final("one")
+        d.start("one", "en")
+        later.single().second()
+        assertTrue(d.listening)
     }
 
     @Test
@@ -114,7 +178,7 @@ class DictationTest {
         assertEquals("Find cheap flights", draft())
         fake.last.final("cheap flights to Rome")
         assertEquals("Find cheap flights to Rome", draft())
-        assertEquals(DictationStatus.Idle, d.status.value)
+        assertEquals(DictationStatus.Done, d.status.value)
     }
 
     @Test

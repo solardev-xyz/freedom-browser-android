@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -85,7 +87,10 @@ internal val DICTATION_LANGUAGES = listOf("en", "de", "es", "fr", "it", "pt", "n
  * happens to be in.
  */
 internal fun dictationLanguage(override: String?, appLocale: Locale): String =
-    override?.takeIf { it in DICTATION_LANGUAGES } ?: appLocale.toLanguageTag().takeIf { it != "und" } ?: "en"
+    override?.takeIf { it in DICTATION_LANGUAGES }
+        // Without -u-… extensions (a regional preference's), which a recognizer may refuse.
+        ?: appLocale.stripExtensions().toLanguageTag().takeIf { it != "und" }
+        ?: "en"
 
 /** [base] with [spoken] after it, a space between when neither side has one. */
 internal fun joinDictated(base: String, spoken: String): String {
@@ -143,6 +148,9 @@ internal enum class DictationFailure {
 internal sealed interface DictationStatus {
     data object Idle : DictationStatus
 
+    /** The last run ended with text in the draft (said once to TalkBack). */
+    data object Done : DictationStatus
+
     /** Listening with [kind]; [hearing] once the recognizer is ready for speech. */
     data class Listening(val kind: RecognizerKind, val hearing: Boolean) : DictationStatus
 
@@ -184,6 +192,8 @@ internal class Dictation(
     val kind: RecognizerKind,
     private val create: (RecognizerKind) -> Recognizer?,
     private val setDraft: (String) -> Unit,
+    /** Runs a block later on the main thread: the deadline for a run asked to finish. */
+    private val after: (Long, () -> Unit) -> Unit = { ms, block -> Handler(Looper.getMainLooper()).postDelayed(block, ms) },
 ) {
     private val _status = MutableStateFlow<DictationStatus>(DictationStatus.Idle)
     val status: StateFlow<DictationStatus> = _status.asStateFlow()
@@ -191,6 +201,8 @@ internal class Dictation(
     private var recognizer: Recognizer? = null
     private var run = 0
     private var base = ""
+    private var heard = ""
+    private var finishing = false
 
     /** The draft as dictation last wrote it: any other value came from the user. */
     var written: String? = null
@@ -213,6 +225,8 @@ internal class Dictation(
         }
         val mine = ++run
         base = draft
+        heard = ""
+        finishing = false
         written = draft
         _status.value = DictationStatus.Listening(kind, hearing = false)
         val events = object : Recognizer.Events {
@@ -226,13 +240,25 @@ internal class Dictation(
 
             override fun final(text: String) {
                 if (mine != run || !listening) return
-                write(text)
-                end(DictationStatus.Idle)
+                // An empty final after partials keeps what was shown.
+                if (text.isNotBlank()) write(text)
+                end(if (heard.isNotBlank()) DictationStatus.Done else DictationStatus.Idle)
             }
 
             override fun error(code: Int) {
                 if (mine != run || !listening) return
-                end(DictationStatus.Failed(DictationFailure.of(code), kind))
+                Log.i(TAG, "speech recognizer error $code")
+                val failure = DictationFailure.of(code)
+                end(
+                    when {
+                        // Text shown already stays; nothing more to hear isn't a failure then.
+                        failure == DictationFailure.NoSpeech && heard.isNotBlank() -> DictationStatus.Done
+                        // The recognizer's answer to our own stop, not a failure.
+                        finishing && code == SpeechRecognizer.ERROR_CLIENT ->
+                            if (heard.isNotBlank()) DictationStatus.Done else DictationStatus.Idle
+                        else -> DictationStatus.Failed(failure, kind)
+                    },
+                )
             }
         }
         try {
@@ -246,10 +272,18 @@ internal class Dictation(
     /** Stops listening and keeps what's recognized from what was heard so far. */
     fun finish() {
         if (!listening) return
+        val mine = run
+        finishing = true
         try {
             recognizer?.stop()
         } catch (e: RuntimeException) {
-            end(DictationStatus.Idle)
+            end(if (heard.isNotBlank()) DictationStatus.Done else DictationStatus.Idle)
+            return
+        }
+        // A recognizer that never answers the stop doesn't keep the
+        // microphone, or the composer listening, for good.
+        after(FINISH_DEADLINE_MS) {
+            if (mine == run && listening) end(if (heard.isNotBlank()) DictationStatus.Done else DictationStatus.Idle)
         }
     }
 
@@ -278,9 +312,10 @@ internal class Dictation(
         _status.value = DictationStatus.Failed(DictationFailure.Permission, kind)
     }
 
-    /** Hides a failure's line. */
+    /** Hides a failure's (or a finished run's) line. */
     fun dismiss() {
-        if (_status.value is DictationStatus.Failed) _status.value = DictationStatus.Idle
+        val now = _status.value
+        if (now is DictationStatus.Failed || now == DictationStatus.Done) _status.value = DictationStatus.Idle
     }
 
     fun destroy() {
@@ -294,6 +329,7 @@ internal class Dictation(
     }
 
     private fun write(text: String) {
+        heard = text
         val next = joinDictated(base, text)
         written = next
         setDraft(next)
@@ -312,8 +348,11 @@ internal class Dictation(
         _status.value = next
     }
 
-    private companion object {
-        const val TAG = "Dictation"
+    companion object {
+        private const val TAG = "Dictation"
+
+        /** How long a run asked to finish waits for the recognizer's answer. */
+        const val FINISH_DEADLINE_MS = 5_000L
     }
 }
 

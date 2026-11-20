@@ -276,15 +276,17 @@
     <string name="agent_sign_in_save_failed">Signed in, but couldn\'t save it. Try again.</string>
 
     <!-- Voice dictation in the chat's composer (#578). -->
-    <string name="agent_dictate_on_device">Dictate. Speech is recognized on this phone.</string>
+    <string name="agent_dictate_on_device">Dictate with Android\'s on-device recognizer</string>
     <string name="agent_dictate_service">Dictate. Your phone\'s speech service may send the audio to its provider.</string>
     <string name="agent_dictate_stop">Stop dictating</string>
     <string name="agent_dictation_starting">Starting the microphone…</string>
-    <string name="agent_dictation_listening_on_device">Listening. Speech is recognized on this phone.</string>
+    <string name="agent_dictation_listening_on_device">Listening with Android\'s on-device recognizer.</string>
     <string name="agent_dictation_listening_service">Listening. Your phone\'s speech service may send the audio to its provider.</string>
     <string name="agent_dictation_no_speech">Didn\'t hear anything.</string>
     <string name="agent_dictation_permission">Freedom isn\'t allowed to use the microphone. Turn it on in Android settings.</string>
     <string name="agent_dictation_language">The recognizer doesn\'t have %1$s. Pick another language in Settings → AI → Voice dictation.</string>
+    <string name="agent_dictation_done">Added to your message.</string>
+    <string name="agent_dictation_on_device_failed">Android\'s on-device recognizer didn\'t answer. Try again.</string>
     <string name="agent_dictation_network">Couldn\'t reach your phone\'s speech service. Try again.</string>
     <string name="agent_dictation_busy">Another app is using speech recognition. Try again.</string>
     <string name="agent_dictation_audio">Couldn\'t read the microphone. Try again.</string>
@@ -294,10 +296,10 @@
     <string name="agent_dictation">Voice dictation</string>
     <string name="agent_dictation_keywords">microphone, speech, voice, speech recognition, language</string>
     <string name="agent_dictation_none">This phone has no speech recognizer.</string>
-    <string name="agent_dictation_summary_on_device">On this phone · %1$s</string>
+    <string name="agent_dictation_summary_on_device">On-device recognizer · %1$s</string>
     <string name="agent_dictation_summary_service">Phone\'s speech service · %1$s</string>
     <string name="agent_dictation_where">Where audio goes</string>
-    <string name="agent_dictation_where_on_device">Speech is recognized by Android\'s on-device recognizer, on this phone.</string>
+    <string name="agent_dictation_where_on_device">Dictation uses Android\'s on-device recognizer, which recognizes speech on this phone rather than through a speech service. Which recognizer that is depends on the phone.</string>
     <string name="agent_dictation_where_service">This phone has no on-device recognizer, so dictation uses its speech service, which may send the audio to its provider. Freedom never sends it anywhere else.</string>
     <string name="agent_dictation_where_none">This phone has no speech recognizer, so the chat has no microphone button.</string>
     <string name="agent_dictation_where_common">Dictated text goes into the message box for you to read and edit. Nothing is sent until you tap Send. The microphone is asked for the first time you tap it.</string>

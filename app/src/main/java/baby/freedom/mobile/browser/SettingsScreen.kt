@@ -329,7 +329,7 @@ internal fun SettingsScreen(
     val defaultBrowser = rememberDefaultBrowserState()
     val isDefaultBrowser = defaultBrowser.isDefault
     val passkeys = remember(context) { Passkeys.availability(context) }
-    // Settings → AI (#573), and its Models & providers page standing in for the list.
+    // Settings → AI (#573), and its Models & providers or Voice dictation (#578) page standing in for the list.
     val agentState by remember(context) { AgentProviders.get(context).state }.collectAsState(initial = AgentState())
     var aiProvidersOpen by rememberSaveable { mutableStateOf(false) }
     var aiDictationOpen by rememberSaveable { mutableStateOf(false) }

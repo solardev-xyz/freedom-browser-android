@@ -481,6 +481,13 @@ private fun MicButton(kind: RecognizerKind, status: DictationStatus, onClick: ()
 private fun DictationLine(status: DictationStatus, language: String, onOpenAndroidSettings: () -> Unit) {
     when (status) {
         DictationStatus.Idle -> Unit
+        // Said once by TalkBack: the microphone is let go of by then.
+        DictationStatus.Done -> Text(
+            stringResource(R.string.agent_dictation_done),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+        )
         is DictationStatus.Listening -> Text(
             stringResource(
                 when {
@@ -504,7 +511,13 @@ private fun DictationLine(status: DictationStatus, language: String, onOpenAndro
                         R.string.agent_dictation_language,
                         java.util.Locale.forLanguageTag(language).getDisplayName(locale),
                     )
-                    DictationFailure.Network -> stringResource(R.string.agent_dictation_network)
+                    DictationFailure.Network -> stringResource(
+                        if (status.kind == RecognizerKind.OnDevice) {
+                            R.string.agent_dictation_on_device_failed
+                        } else {
+                            R.string.agent_dictation_network
+                        },
+                    )
                     DictationFailure.Busy -> stringResource(R.string.agent_dictation_busy)
                     DictationFailure.Audio -> stringResource(R.string.agent_dictation_audio)
                     DictationFailure.Other -> stringResource(R.string.agent_dictation_failed)
