@@ -575,6 +575,7 @@ internal fun errorText(error: ChatError): Int = when (error) {
     ChatError.NoKey -> R.string.agent_error_no_key
     ChatError.BadUrl -> R.string.agent_error_bad_url
     ChatError.Unauthorized -> R.string.agent_error_unauthorized
+    ChatError.SignInAgain -> R.string.agent_error_sign_in_again
     ChatError.ModelNotFound -> R.string.agent_error_model_not_found
     ChatError.RateLimited -> R.string.agent_error_rate_limited
     ChatError.ServerError -> R.string.agent_error_server

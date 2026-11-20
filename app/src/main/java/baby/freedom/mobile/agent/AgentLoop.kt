@@ -16,6 +16,9 @@ internal enum class ChatError {
     NoKey,
     BadUrl,
     Unauthorized,
+
+    /** A subscription's sign-in has ended (#576): the provider refused to renew it. */
+    SignInAgain,
     ModelNotFound,
     RateLimited,
     ServerError,

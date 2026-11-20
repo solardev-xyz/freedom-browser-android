@@ -26,7 +26,10 @@ class ProviderCatalogTest {
     @Test
     fun `the providers, their wire formats and base URLs match desktop`() {
         assertEquals(
-            listOf("openai", "anthropic", "xai", "meta", "openrouter", "venice", "near-ai", "ollama", "openai-compatible"),
+            listOf(
+                "openai", "anthropic", "xai", "meta", "openai-codex", "meta-subscription", "openrouter", "venice", "near-ai",
+                "ollama", "openai-compatible",
+            ),
             ProviderCatalog.ALL.map { it.id },
         )
         assertEquals(WireFormat.OpenAiResponses, def("openai").wire)
@@ -45,8 +48,32 @@ class ProviderCatalogTest {
             assertTrue(def(id).bundled.isNotEmpty())
             assertTrue(def(id).bundled.any { it.id == def(id).defaultModelId })
         }
+        // The subscriptions (#576): desktop's base URLs, formats and defaults.
+        assertEquals(WireFormat.CodexResponses, def("openai-codex").wire)
+        assertEquals(
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.153.0",
+            def("openai-codex").catalogUrl,
+        )
+        assertTrue(def("openai-codex").catalogKey)
+        assertEquals("gpt-6-astra", def("openai-codex").defaultModelId)
+        assertEquals(WireFormat.OpenAiResponses, def("meta-subscription").wire)
+        assertEquals(def("meta").baseUrl, def("meta-subscription").baseUrl)
+        assertEquals(def("meta").bundled, def("meta-subscription").bundled)
+        assertEquals("muse-spark-1.3", def("meta-subscription").defaultModelId)
         // Every hosted base is https.
-        for (d in ProviderCatalog.ALL.filter { it.kind == ProviderKind.ApiKey }) assertTrue(d.baseUrl!!.startsWith("https://"))
+        for (d in ProviderCatalog.ALL.filter { it.kind != ProviderKind.Lan }) assertTrue(d.baseUrl!!.startsWith("https://"))
+    }
+
+    @Test
+    fun `chatgpt lists only the models codex offers for picking`() {
+        val list = JSONArray()
+            .put(JSONObject().put("slug", "gpt-6.1-sol").put("display_name", "GPT-6.1 Sol").put("visibility", "list"))
+            .put(JSONObject().put("slug", "codex-auto-review").put("visibility", "hide"))
+            .put(JSONObject().put("slug", "gpt-6-astra").put("visibility", "list"))
+            .put(JSONObject().put("slug", "gpt-6-astra").put("visibility", "list"))
+            .put(JSONObject().put("slug", "bad\u202Eid").put("visibility", "list"))
+        val models = ProviderCatalog.parseModels(def("openai-codex"), JSONObject().put("models", list).toString())
+        assertEquals(listOf(AgentModel("gpt-6.1-sol", "GPT-6.1 Sol"), AgentModel("gpt-6-astra", "GPT-6 Astra")), models)
     }
 
     @Test

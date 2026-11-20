@@ -2,10 +2,19 @@ package baby.freedom.mobile.agent
 
 import android.content.Context
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -14,13 +23,13 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /** What Refresh models came to. */
 internal enum class RefreshResult {
-    Done, NoKey, Unauthorized, NotFound, RateLimited, ServerError, Refused, Unreachable, TimedOut, TooLarge, Unusable,
+    Done, NoKey, SignInAgain, Unauthorized, NotFound, RateLimited, ServerError, Refused, Unreachable, TimedOut, TooLarge, Unusable,
     BadUrl, Cancelled, Failed,
 }
 
 /** What Test connection came to. Never anything the server wrote. */
 internal enum class TestResult {
-    Ok, NoKey, Unauthorized, ModelNotFound, RateLimited, ServerError, Refused, Unreachable, TimedOut, BadReply, BadUrl,
+    Ok, NoKey, SignInAgain, Unauthorized, ModelNotFound, RateLimited, ServerError, Refused, Unreachable, TimedOut, BadReply, BadUrl,
     Cancelled,
 }
 
@@ -44,9 +53,35 @@ internal class AgentProviders(
     private val client: ProviderClient = ProviderClient(gate),
     /** A hosted provider's API base; tests point it at a fake server. */
     private val hostedBase: (ProviderDefinition) -> String? = { it.baseUrl },
+    /** The subscription sign-ins (#576); tests point it at a fake server. */
+    private val auth: SubscriptionAuth = SubscriptionAuth(),
+    /** Wall clock, for a credential's expiry. */
+    private val wallClock: () -> Long = System::currentTimeMillis,
+    /** Where a sign-in runs: outliving the page that started it, while the user is in the browser. */
+    private val loginScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
     private val lock = Mutex()
     private var gateLoaded = false
+
+    /** One credential renewal at a time, never under [lock] (it goes to the network). */
+    private val refreshLock = Mutex()
+
+    /** The sign-in under way or just ended, if any; one at a time. */
+    private val _login = MutableStateFlow<LoginState?>(null)
+    val login: StateFlow<LoginState?> = _login.asStateFlow()
+    private val loginLock = Any()
+    private var loginJob: Job? = null
+
+    /** Bumped by every start and cancel: only the current sign-in may publish or save. */
+    private var loginGeneration = 0L
+
+    /**
+     * Subscriptions whose provider refused to renew them since they were
+     * signed in to: they need signing in again. In memory only: after a
+     * restart the next request finds out again.
+     */
+    private val _signedOut = MutableStateFlow<Set<String>>(emptySet())
+    val signedOut: StateFlow<Set<String>> = _signedOut.asStateFlow()
 
     val state: Flow<AgentState> = store.state
     val models: Flow<Map<String, List<AgentModel>>> = store.models
@@ -74,7 +109,10 @@ internal class AgentProviders(
 
     /** Turns AI on or off. Off cancels every provider request in flight first. */
     suspend fun setEnabled(on: Boolean): Boolean = locked { s ->
-        if (!on) gate.disable()
+        if (!on) {
+            gate.disable()
+            cancelLogin()
+        }
         val ok = store.edit { it.copy(enabled = on) }
         if (on && ok) gate.enable(s.connections.associate { it.id to it.revision })
         ok
@@ -184,6 +222,8 @@ internal class AgentProviders(
 
     /** Disconnects [connectionId]: its key, models, favourites and default go, and its requests are cancelled. */
     suspend fun remove(connectionId: String): Boolean = locked { s ->
+        // Signing out also ends a sign-in to the same provider under way.
+        cancelLogin(connectionId)
         val old = s.connection(connectionId) ?: return@locked true
         gate.bump(connectionId, null)
         val ok = store.edit { cur ->
@@ -193,7 +233,12 @@ internal class AgentProviders(
                 defaultModel = cur.defaultModel?.takeIf { it.connectionId != connectionId },
             )
         }
-        if (ok) store.setModels(connectionId, null) else gate.bump(connectionId, old.revision)
+        if (ok) {
+            store.setModels(connectionId, null)
+            _signedOut.update { it - connectionId }
+        } else {
+            gate.bump(connectionId, old.revision)
+        }
         ok
     }
 
@@ -228,7 +273,19 @@ internal class AgentProviders(
         val definition = ProviderCatalog.definition(connection.providerId) ?: return@withContext RefreshResult.Failed
         val base = baseOf(connection, definition) ?: return@withContext RefreshResult.BadUrl
         val url = ProviderClient.catalogUrl(definition, base) ?: return@withContext RefreshResult.Done
-        val key = s.keys[connectionId]
+        val (key, accountId) = when (val a = authOf(s, connection, definition)) {
+            is Auth.Ready -> a.key to a.accountId
+            is Auth.Unavailable -> return@withContext when (a.error) {
+                ChatError.SignInAgain -> RefreshResult.SignInAgain
+                ChatError.NoKey -> RefreshResult.NoKey
+                ChatError.Unreachable -> RefreshResult.Unreachable
+                ChatError.TimedOut -> RefreshResult.TimedOut
+                ChatError.RateLimited -> RefreshResult.RateLimited
+                ChatError.ServerError -> RefreshResult.ServerError
+                ChatError.AiOff, ChatError.KeyChanged -> RefreshResult.Cancelled
+                else -> RefreshResult.Failed
+            }
+        }
         // OpenRouter's and NEAR AI's lists are public: their key isn't sent for them.
         val sendKey = definition.catalogKey || (definition.kind == ProviderKind.Lan && definition.id != ProviderCatalog.OLLAMA)
         // A list that needs the key, or a server whose saved key can't be
@@ -239,7 +296,7 @@ internal class AgentProviders(
         val (maxBytes, _) = ProviderCatalog.bounds(definition)
         val reply = client.fetch(
             connectionId, connection.revision, url,
-            ProviderClient.authHeaders(definition, if (sendKey) key else null),
+            ProviderClient.authHeaders(definition, if (sendKey) key else null, accountId),
             maxBytes, timeoutMs = ProviderClient.CATALOG_TIMEOUT_MS,
         )
         when (reply) {
@@ -280,13 +337,25 @@ internal class AgentProviders(
         val connection = s.connection(connectionId) ?: return@withContext TestResult.Cancelled
         val definition = ProviderCatalog.definition(connection.providerId) ?: return@withContext TestResult.Cancelled
         val base = baseOf(connection, definition) ?: return@withContext TestResult.BadUrl
-        val key = s.keys[connectionId]
         // A server whose saved key can't be read isn't tried without it.
         if (s.keyLost(connection)) return@withContext TestResult.NoKey
+        val (key, accountId) = when (val a = authOf(s, connection, definition)) {
+            is Auth.Ready -> a.key to a.accountId
+            is Auth.Unavailable -> return@withContext when (a.error) {
+                ChatError.SignInAgain -> TestResult.SignInAgain
+                ChatError.Unreachable -> TestResult.Unreachable
+                ChatError.TimedOut -> TestResult.TimedOut
+                ChatError.RateLimited -> TestResult.RateLimited
+                ChatError.ServerError -> TestResult.ServerError
+                ChatError.AiOff, ChatError.KeyChanged -> TestResult.Cancelled
+                ChatError.BadReply -> TestResult.BadReply
+                else -> TestResult.NoKey
+            }
+        }
         val (url, body) = ProviderClient.testRequest(definition, base, modelId)
         val reply = client.fetch(
             connectionId, connection.revision, url,
-            ProviderClient.authHeaders(definition, key), ProviderCatalog.TEST_MAX_BYTES, json = body,
+            ProviderClient.authHeaders(definition, key, accountId), ProviderCatalog.TEST_MAX_BYTES, json = body,
             timeoutMs = if (definition.kind == ProviderKind.Lan) {
                 ProviderClient.LAN_TEST_TIMEOUT_MS
             } else {
@@ -297,7 +366,7 @@ internal class AgentProviders(
             is ProviderReply.Body ->
                 if (ProviderClient.isReply(definition, reply.text)) TestResult.Ok else TestResult.BadReply
             is ProviderReply.Status -> when (reply.code) {
-                401, 403 -> TestResult.Unauthorized
+                401, 403 -> if (definition.kind == ProviderKind.Subscription) TestResult.SignInAgain else TestResult.Unauthorized
                 404 -> TestResult.ModelNotFound
                 429 -> TestResult.RateLimited
                 in 300..399 -> TestResult.Refused
@@ -325,17 +394,32 @@ internal class AgentProviders(
             ?: return@withContext ChatTarget.Unavailable(ChatError.NoModel)
         val base = baseOf(connection, definition) ?: return@withContext ChatTarget.Unavailable(ChatError.BadUrl)
         if (s.keyLost(connection)) return@withContext ChatTarget.Unavailable(ChatError.NoKey)
-        ChatTarget.Ready(connection, definition, base, s.keys[connection.id], ref.modelId)
+        when (val a = authOf(s, connection, definition)) {
+            is Auth.Ready -> ChatTarget.Ready(connection, definition, base, a.key, ref.modelId, a.accountId)
+            is Auth.Unavailable -> ChatTarget.Unavailable(a.error)
+        }
     }
 
     /** Streams one step of a chat to [target]; [onText] gets each piece of reply text. */
     suspend fun streamStep(target: ChatTarget.Ready, request: StepRequest, onText: (String) -> Unit): StepOutcome =
         withContext(Dispatchers.IO) {
+            // A subscription's token is looked up again for every step: a
+            // long turn may outlast it. One renewed since is the same
+            // sign-in (same revision); one from signing in again isn't,
+            // and the gate stops the step.
+            val (key, accountId) = if (target.definition.kind == ProviderKind.Subscription) {
+                when (val a = authOf(store.state.first(), target.connection, target.definition)) {
+                    is Auth.Ready -> a.key to a.accountId
+                    is Auth.Unavailable -> return@withContext StepOutcome.Failed(a.error)
+                }
+            } else {
+                target.key to target.accountId
+            }
             val (url, body) = AgentWire.build(target.definition, target.base, request)
             val parser = AgentWire.parser(target.definition.wire)
             val end = client.stream(
                 target.connection.id, target.connection.revision, url,
-                ProviderClient.authHeaders(target.definition, target.key), body,
+                ProviderClient.authHeaders(target.definition, key, accountId), body,
             ) { event, data ->
                 val delta = parser.onEvent(event, data)
                 if (delta.isNotEmpty()) onText(delta)
@@ -350,7 +434,11 @@ internal class AgentProviders(
                 // The server answered: never "couldn't reach" it.
                 is StreamEnd.Status -> StepOutcome.Failed(
                     when (end.code) {
-                        401, 403 -> ChatError.Unauthorized
+                        401, 403 -> if (target.definition.kind == ProviderKind.Subscription) {
+                            ChatError.SignInAgain
+                        } else {
+                            ChatError.Unauthorized
+                        }
                         404 -> ChatError.ModelNotFound
                         413 -> ChatError.ContextTooLong
                         429, 529 -> ChatError.RateLimited
@@ -369,6 +457,189 @@ internal class AgentProviders(
                 )
             }
         }
+
+    // --- Subscriptions (#576) ---
+
+    /** What a request to a connection is made with: its key, and ChatGPT's account. */
+    private sealed interface Auth {
+        data class Ready(val key: String?, val accountId: String?) : Auth {
+            override fun toString() = "Ready"
+        }
+
+        data class Unavailable(val error: ChatError) : Auth
+    }
+
+    /**
+     * [connection]'s key as [s] has it; for a subscription, its current
+     * access token, renewed first if it's due ([credentialOf]).
+     */
+    private suspend fun authOf(s: AgentState, connection: AgentConnection, definition: ProviderDefinition): Auth {
+        if (definition.kind != ProviderKind.Subscription) return Auth.Ready(s.keys[connection.id], null)
+        return when (val c = credentialOf(connection.id)) {
+            is Credential.Ready -> Auth.Ready(c.credential.access, c.credential.accountId)
+            is Credential.Unavailable -> Auth.Unavailable(c.error)
+        }
+    }
+
+    private sealed interface Credential {
+        data class Ready(val credential: SubscriptionCredential) : Credential
+        data class Unavailable(val error: ChatError) : Credential
+    }
+
+    /**
+     * [connectionId]'s credential, renewed if it's due. One renewal at a
+     * time ([refreshLock]): the state is read again once it's held, so a
+     * second caller finds the first one's new token instead of renewing
+     * (ChatGPT's refresh tokens are used up by a refresh). A renewed
+     * credential is kept only if AI is still on and the connection is
+     * still the sign-in it was renewed for (not signed out, nor signed in
+     * to again meanwhile); it doesn't change the connection's revision,
+     * so a chat streaming with the old token isn't cancelled.
+     */
+    private suspend fun credentialOf(connectionId: String): Credential = refreshLock.withLock {
+        val s = locked { it }
+        if (!s.enabled) return@withLock Credential.Unavailable(ChatError.AiOff)
+        val connection = s.connection(connectionId) ?: return@withLock Credential.Unavailable(ChatError.KeyChanged)
+        val saved = s.keys[connectionId]
+        val credential = SubscriptionCredential.decode(saved) ?: return@withLock Credential.Unavailable(ChatError.NoKey)
+        if (!credential.due(wallClock())) return@withLock Credential.Ready(credential)
+        when (val r = auth.refresh(connection.providerId, credential)) {
+            is RefreshOutcome.Fresh -> locked { cur ->
+                if (!gate.allows(connectionId, connection.revision) || cur.keys[connectionId] != saved) {
+                    return@locked Credential.Unavailable(ChatError.KeyChanged)
+                }
+                val ok = store.edit { now ->
+                    if (now.keys[connectionId] != saved) return@edit null
+                    now.copy(keys = now.keys + (connectionId to r.credential.encode()))
+                }
+                // Not kept: a ChatGPT refresh token was used up, so the old
+                // credential can't be renewed again; it's still good until it runs out.
+                if (!ok) Credential.Unavailable(ChatError.ServerError) else Credential.Ready(r.credential)
+            }
+            RefreshOutcome.SignInAgain -> {
+                _signedOut.update { it + connectionId }
+                Credential.Unavailable(ChatError.SignInAgain)
+            }
+            // Not signed out: a token that hasn't run out yet still works.
+            is RefreshOutcome.Failed -> if (wallClock() < credential.expiresAt) {
+                Credential.Ready(credential)
+            } else {
+                Credential.Unavailable(
+                    when (r.failure) {
+                        LoginFailure.Unreachable -> ChatError.Unreachable
+                        LoginFailure.TimedOut -> ChatError.TimedOut
+                        LoginFailure.RateLimited -> ChatError.RateLimited
+                        LoginFailure.ServerError -> ChatError.ServerError
+                        LoginFailure.NoAccess -> ChatError.SignInAgain
+                        else -> ChatError.BadReply
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * Starts signing in to subscription [providerId] by device code,
+     * ending any other sign-in under way. Its progress is [login]; it
+     * runs on its own, so the user can go to the browser and back. Only
+     * while AI is on.
+     */
+    fun startLogin(providerId: String): Boolean {
+        val definition = ProviderCatalog.definition(providerId) ?: return false
+        if (definition.kind != ProviderKind.Subscription) return false
+        synchronized(loginLock) {
+            loginJob?.cancel()
+            val generation = ++loginGeneration
+            _login.value = LoginState.Starting(providerId)
+            loginJob = loginScope.launch { runLogin(definition, generation) }
+        }
+        return true
+    }
+
+    /**
+     * Ends the sign-in under way (or the result of one that just ended),
+     * or only [providerId]'s, if given. Its requests are cancelled and
+     * whatever it might still get is never saved.
+     */
+    fun cancelLogin(providerId: String? = null) {
+        synchronized(loginLock) {
+            if (providerId != null && _login.value?.providerId != providerId) return
+            loginJob?.cancel()
+            loginJob = null
+            loginGeneration++
+            _login.value = null
+        }
+    }
+
+    private fun publish(generation: Long, state: LoginState?) {
+        synchronized(loginLock) { if (generation == loginGeneration) _login.value = state }
+    }
+
+    private fun isCurrent(generation: Long) = synchronized(loginLock) { generation == loginGeneration }
+
+    private suspend fun runLogin(definition: ProviderDefinition, generation: Long) {
+        val providerId = definition.id
+        try {
+            if (!locked { it.enabled }) return publish(generation, null)
+            val code = when (val started = auth.start(providerId)) {
+                is SubscriptionAuth.Started.Failed -> return publish(generation, LoginState.Failed(providerId, started.failure))
+                is SubscriptionAuth.Started.Code -> started.code
+            }
+            publish(generation, LoginState.Waiting(providerId, code))
+            val credential = when (val finished = auth.await(code)) {
+                is SubscriptionAuth.Finished.Failed ->
+                    return publish(generation, LoginState.Failed(providerId, finished.failure))
+                is SubscriptionAuth.Finished.Done -> finished.credential
+            }
+            if (!saveSubscription(definition, credential, generation)) {
+                return publish(generation, if (isCurrent(generation)) LoginState.Failed(providerId, LoginFailure.SaveFailed) else null)
+            }
+            publish(generation, LoginState.Done(providerId))
+            // The account's own model list, where the provider has one.
+            if (definition.catalogPath != null) refreshModels(providerId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            publish(generation, LoginState.Failed(providerId, LoginFailure.BadReply))
+        }
+    }
+
+    /**
+     * Saves a finished sign-in as [definition]'s connection: a new
+     * revision, so requests made with an earlier sign-in's token are
+     * cancelled. Only if AI is still on and the sign-in wasn't cancelled
+     * (by the user, signing out, AI off): both of those happen under
+     * [lock] too, so none can slip between the check and the write.
+     */
+    private suspend fun saveSubscription(
+        definition: ProviderDefinition,
+        credential: SubscriptionCredential,
+        generation: Long,
+    ): Boolean = locked { s ->
+        if (!s.enabled || !isCurrent(generation)) return@locked false
+        val id = definition.id
+        val old = s.connection(id)
+        val revision = s.nextRevision
+        gate.bump(id, revision)
+        val connection = old?.copy(revision = revision, hasKey = true) ?: AgentConnection(
+            id = id,
+            providerId = id,
+            name = definition.name,
+            favorites = listOfNotNull(definition.defaultModelId),
+            revision = revision,
+            hasKey = true,
+        )
+        val ok = store.edit { cur ->
+            cur.copy(
+                connections = cur.connections.filter { it.id != id } + connection,
+                keys = cur.keys + (id to credential.encode()),
+                nextRevision = revision + 1,
+                defaultModel = cur.defaultModel ?: definition.defaultModelId?.let { ModelRef(id, it) },
+            )
+        }
+        if (ok) _signedOut.update { it - id } else gate.bump(id, old?.revision)
+        ok
+    }
 
     companion object {
         /** Desktop's bound on a key's length. */
@@ -397,6 +668,8 @@ internal sealed interface ChatTarget {
         val base: HttpUrl,
         val key: String?,
         val modelId: String,
+        /** ChatGPT's account (#576), sent with its requests. */
+        val accountId: String? = null,
     ) : ChatTarget {
         // Never print a key.
         override fun toString() = "Ready(${connection.id}, $modelId)"

@@ -105,6 +105,7 @@ internal object AgentWire {
             WireFormat.OpenAiChat -> chatBody(definition, request)
             WireFormat.AnthropicMessages -> anthropicBody(request)
             WireFormat.OpenAiResponses -> responsesBody(request)
+            WireFormat.CodexResponses -> codexBody(request)
         }
         return url to body
     }
@@ -220,7 +221,55 @@ internal object AgentWire {
         // rather than Pi's `developer` for reasoning models: every
         // Responses provider here takes it, and OpenAI reads it as `developer`.
         if (r.system.isNotEmpty()) input.put(JSONObject().put("role", "system").put("content", r.system))
-        for (item in r.items) when (item) {
+        responsesInput(r.items, input)
+        return JSONObject()
+            .put("model", r.modelId)
+            .put("input", input)
+            .put("stream", true)
+            // The conversation lives on this phone, not on the provider's servers.
+            .put("store", false)
+            .put("max_output_tokens", r.maxTokens)
+            .apply { responsesTools(r.tools)?.let { put("tools", it) } }
+    }
+
+    /**
+     * ChatGPT's Codex endpoint (#576), as Pi's `buildRequestBody` sends
+     * it: the system prompt as `instructions`, never stored, always
+     * streamed, and no token cap (it refuses one). Pi's reasoning and
+     * prompt-cache fields are left out: nothing here replays reasoning.
+     */
+    private fun codexBody(r: StepRequest): JSONObject {
+        val input = JSONArray()
+        responsesInput(r.items, input)
+        return JSONObject()
+            .put("model", r.modelId)
+            .put("store", false)
+            .put("stream", true)
+            .put("instructions", r.system.ifEmpty { "You are a helpful assistant." })
+            .put("input", input)
+            .put("text", JSONObject().put("verbosity", "low"))
+            .apply {
+                responsesTools(r.tools)?.let {
+                    put("tools", it)
+                    put("tool_choice", "auto")
+                    put("parallel_tool_calls", true)
+                }
+            }
+    }
+
+    private fun responsesTools(tools: List<ToolSpec>): JSONArray? = if (tools.isEmpty()) {
+        null
+    } else {
+        JSONArray(
+            tools.map {
+                JSONObject().put("type", "function").put("name", it.name)
+                    .put("description", it.description).put("parameters", it.parameters)
+            },
+        )
+    }
+
+    private fun responsesInput(items: List<ChatItem>, input: JSONArray) {
+        for (item in items) when (item) {
             is ChatItem.User -> input.put(JSONObject().put("role", "user").put("content", item.text))
             is ChatItem.Assistant -> {
                 if (item.text.isNotEmpty()) input.put(
@@ -240,24 +289,6 @@ internal object AgentWire {
                 JSONObject().put("type", "function_call_output").put("call_id", item.callId).put("output", item.output),
             )
         }
-        return JSONObject()
-            .put("model", r.modelId)
-            .put("input", input)
-            .put("stream", true)
-            // The conversation lives on this phone, not on the provider's servers.
-            .put("store", false)
-            .put("max_output_tokens", r.maxTokens)
-            .apply {
-                if (r.tools.isNotEmpty()) put(
-                    "tools",
-                    JSONArray(
-                        r.tools.map {
-                            JSONObject().put("type", "function").put("name", it.name)
-                                .put("description", it.description).put("parameters", it.parameters)
-                        },
-                    ),
-                )
-            }
     }
 
     /** A call's arguments as an object; `{}` for empty or unusable text (Anthropic wants an object). */
@@ -275,7 +306,7 @@ internal object AgentWire {
     fun parser(wire: WireFormat): StreamParser = when (wire) {
         WireFormat.OpenAiChat -> ChatStreamParser()
         WireFormat.AnthropicMessages -> AnthropicStreamParser()
-        WireFormat.OpenAiResponses -> ResponsesStreamParser()
+        WireFormat.OpenAiResponses, WireFormat.CodexResponses -> ResponsesStreamParser()
     }
 }
 
@@ -505,7 +536,8 @@ internal class ResponsesStreamParser : StreamParser() {
                 }
                 ""
             }
-            "response.completed", "response.incomplete" -> {
+            // Codex may end with `response.done` (Pi reads it as completed).
+            "response.completed", "response.done", "response.incomplete" -> {
                 terminal = true
                 val response = root.optJSONObject("response")
                 response?.optJSONObject("usage")?.let { usage = Usage(it.optLong("input_tokens"), it.optLong("output_tokens")) }

@@ -82,7 +82,9 @@ internal data class AgentState(
      */
     fun keyLost(c: AgentConnection): Boolean {
         if (c.id in keys) return false
-        return c.hasKey || ProviderCatalog.definition(c.providerId)?.kind == ProviderKind.ApiKey
+        return c.hasKey || ProviderCatalog.definition(c.providerId)?.kind.let {
+            it == ProviderKind.ApiKey || it == ProviderKind.Subscription
+        }
     }
 }
 

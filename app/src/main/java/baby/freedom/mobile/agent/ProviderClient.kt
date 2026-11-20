@@ -448,15 +448,26 @@ internal class ProviderClient(
         const val TEST_PROMPT = "Reply with OK."
         private const val TEST_MAX_TOKENS = 32
 
-        /** Request headers for [definition], with [key] if there is one. */
-        fun authHeaders(definition: ProviderDefinition, key: String?): Map<String, String> = buildMap {
-            if (definition.wire == WireFormat.AnthropicMessages) {
-                put("anthropic-version", "2023-06-01")
-                if (!key.isNullOrEmpty()) put("x-api-key", key)
-            } else if (!key.isNullOrEmpty()) {
-                put("Authorization", "Bearer $key")
+        /**
+         * Request headers for [definition], with [key] if there is one.
+         * ChatGPT's (#576) also name the account ([accountId]) and the
+         * client, as Pi's `buildSSEHeaders` does (`originator` stays `pi`,
+         * as on desktop).
+         */
+        fun authHeaders(definition: ProviderDefinition, key: String?, accountId: String? = null): Map<String, String> =
+            buildMap {
+                if (definition.wire == WireFormat.AnthropicMessages) {
+                    put("anthropic-version", "2023-06-01")
+                    if (!key.isNullOrEmpty()) put("x-api-key", key)
+                } else if (!key.isNullOrEmpty()) {
+                    put("Authorization", "Bearer $key")
+                }
+                if (definition.wire == WireFormat.CodexResponses) {
+                    if (accountId != null) put("chatgpt-account-id", accountId)
+                    put("originator", "pi")
+                    put("OpenAI-Beta", "responses=experimental")
+                }
             }
-        }
 
         /** Where a model list is fetched from: [base] is the provider's API base (or a LAN server's URL). */
         fun catalogUrl(definition: ProviderDefinition, base: HttpUrl): HttpUrl? {
@@ -476,6 +487,7 @@ internal class ProviderClient(
         fun endpoint(definition: ProviderDefinition, base: HttpUrl): HttpUrl = when (definition.wire) {
             WireFormat.AnthropicMessages -> base.plus("messages")
             WireFormat.OpenAiResponses -> base.plus("responses")
+            WireFormat.CodexResponses -> base.plus("codex/responses")
             WireFormat.OpenAiChat -> {
                 val api = if (definition.id == ProviderCatalog.OLLAMA) {
                     rootOfOllama(base).newBuilder().addPathSegment("v1").build()
@@ -499,6 +511,13 @@ internal class ProviderClient(
                     .put("model", modelId)
                     .put("input", TEST_PROMPT)
                     .put("max_output_tokens", TEST_MAX_TOKENS)
+                    .put("store", false)
+                // Codex only streams, and takes no token cap (Pi sends none).
+                WireFormat.CodexResponses -> url to JSONObject()
+                    .put("model", modelId)
+                    .put("instructions", "You are a helpful assistant.")
+                    .put("input", JSONArray().put(user))
+                    .put("stream", true)
                     .put("store", false)
                 WireFormat.OpenAiChat -> url to JSONObject()
                     .put("model", modelId)
@@ -526,6 +545,14 @@ internal class ProviderClient(
 
         /** Whether a 2xx Test connection answer is a reply in [definition]'s format. */
         fun isReply(definition: ProviderDefinition, body: String): Boolean {
+            // A streamed answer: some event says the response finished.
+            if (definition.wire == WireFormat.CodexResponses) {
+                return body.lineSequence().any { line ->
+                    if (!line.startsWith("data:")) return@any false
+                    val type = AgentWire.parseObject(line.removePrefix("data:").trim())?.optString("type")
+                    type == "response.completed" || type == "response.done"
+                }
+            }
             val root = try {
                 JSONObject(body)
             } catch (e: Exception) {
@@ -536,6 +563,7 @@ internal class ProviderClient(
             return when (definition.wire) {
                 WireFormat.AnthropicMessages -> root.optJSONArray("content") != null
                 WireFormat.OpenAiResponses -> root.optJSONArray("output") != null || root.has("status")
+                WireFormat.CodexResponses -> false
                 WireFormat.OpenAiChat -> (root.optJSONArray("choices")?.length() ?: 0) > 0
             }
         }
