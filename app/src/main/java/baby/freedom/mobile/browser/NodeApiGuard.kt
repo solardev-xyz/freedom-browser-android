@@ -342,7 +342,7 @@ internal object NodeApiGuard {
     }
 
     /** Is a [method] request to [url] a write to a transaction-signing endpoint ([CHAIN_PATHS], [V0_CHAIN_PATHS])? */
-    private fun isChainWrite(method: String, url: String): Boolean {
+    internal fun isChainWrite(method: String, url: String): Boolean {
         if (!isWrite(method)) return false
         val segments = segments(pathOf(url))
         val first = segments.firstOrNull()

@@ -91,8 +91,9 @@ internal fun AgentDomainHost() {
     val ask by AgentDomains.shown.collectAsState()
     val approval by AgentApprovals.shown.collectAsState()
     val transfer by AgentTransfers.shown.collectAsState()
+    val node by AgentNodeAsks.shown.collectAsState()
     val shown = ask ?: return
-    if (!agentSheetFirst(shown.id, approval?.id, transfer?.id)) return
+    if (!agentSheetFirst(shown.id, approval?.id, transfer?.id, node?.id)) return
     key(shown.id) { DomainSheet(shown) }
 }
 

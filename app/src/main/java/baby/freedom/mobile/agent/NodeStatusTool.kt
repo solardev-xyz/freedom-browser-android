@@ -28,7 +28,11 @@ import org.json.JSONObject
 internal data class NodeSnapshot(
     /** The Swarm node (its peer count isn't reported, as on desktop). */
     val swarm: NodeInfo = NodeInfo(),
-    /** Settings' Run node switch: the Swarm and IPFS nodes' own. */
+    /**
+     * Settings' Run node switch: the Swarm node's own on/off (reported as
+     * stopped when off), and what IPFS and Radicle need to run at all
+     * (their process).
+     */
     val runNode: Boolean = false,
     /** bzz:// goes to the user's own Swarm endpoint (Settings → Nodes & networks), not this phone's. */
     val externalSwarm: Boolean = false,
@@ -55,6 +59,18 @@ internal data class NodeSnapshot(
 internal object AgentNodes {
     @Volatile
     var source: (() -> NodeSnapshot)? = null
+
+    /**
+     * The node switches the lifecycle and diagnostics tools use (#598),
+     * set by the browser's Activity in `onCreate` and cleared in
+     * `onDestroy` with [clearControls], which only clears its own: a
+     * second Activity's set isn't undone by the first one going.
+     */
+    val controls = java.util.concurrent.atomic.AtomicReference<NodeControls?>(null)
+
+    fun clearControls(mine: NodeControls) {
+        controls.compareAndSet(mine, null)
+    }
 }
 
 /**
@@ -79,7 +95,10 @@ internal object NodeStatusReport {
 
     fun build(s: NodeSnapshot): JSONObject {
         val nodes = listOf(
-            if (s.externalSwarm) external(ANT) else manager(ANT, s.runNode, swarmState(s.swarm.status)),
+            // Run node is the Swarm node's own on/off switch, not a separate
+            // integration setting (#598): switched off, it's stopped, and
+            // node_lifecycle can start it.
+            if (s.externalSwarm) external(ANT) else manager(ANT, true, if (s.runNode) swarmState(s.swarm.status) else "stopped"),
             if (s.externalIpfs) external(IPFS) else manager(IPFS, s.runNode, ipfsState(s.ipfs.status)),
             manager(RADICLE, s.radicleEnabled, radicleState(s.radicle.status)),
             if (!s.torSupported && !s.torProxy) {
@@ -162,7 +181,8 @@ internal object NodeStatusReport {
         val on = network in s.myotisRunning
         val chain = s.myotis.chain(network)
         val state = when {
-            !on -> "disabled"
+            // A chain's switch is its start and stop, as desktop's off chain is stopped (#598).
+            !on -> "stopped"
             else -> when (s.myotis.status) {
                 MyotisStatus.Stopped -> "stopped"
                 MyotisStatus.Error -> "error"

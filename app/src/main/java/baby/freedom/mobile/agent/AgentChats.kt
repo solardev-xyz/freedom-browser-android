@@ -46,6 +46,8 @@ internal class AgentChats(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: () -> ZoneId = ZoneId::systemDefault,
+    /** A deleted chat's node operation receipts go with it (#598); null: every chat's. */
+    private val forgetNodeOperations: suspend (String?) -> Unit = {},
     private val limitsOf: (ProviderDefinition) -> ContextLimits = ContextLimits::of,
     /** A deleted chat's publication receipts go with it (#597); null: every chat's. */
     private val forgetPublications: (String?) -> Unit = {},
@@ -75,7 +77,7 @@ internal class AgentChats(
     private val modes = java.util.concurrent.ConcurrentHashMap<String, ApprovalMode>()
 
     /** A running turn's classifier: the turn's own model, and the request it's for. */
-    private class TurnCheck(val run: ClassifierRun, val userText: String)
+    private class TurnCheck(val run: ClassifierRun, val userText: String, val provider: String)
 
     private val checks = java.util.concurrent.ConcurrentHashMap<String, TurnCheck>()
 
@@ -94,6 +96,11 @@ internal class AgentChats(
             val check = checks[sessionId] ?: return InteractionIntentClassifier.uncertain(ClassifierReason.UNAVAILABLE)
             return InteractionIntentClassifier.classify(check.run, input, check.userText)
         }
+
+        override suspend fun classifyEffect(domain: String, action: JSONObject, trusted: JSONObject?): EffectClassification =
+            EffectClassifier.classify(checks[sessionId]?.run, domain, action, trusted)
+
+        override val provider: String? get() = checks[sessionId]?.provider
     }
 
     /**
@@ -204,7 +211,7 @@ internal class AgentChats(
                     // Only if not set since: a mode picked while the row was read wins.
                     session?.let { modes.putIfAbsent(turn.sessionId, ApprovalMode.of(it.approvalMode)) }
                     val stream = ModelStream { request, onText -> providers.streamStep(target, request, onText) }
-                    check = TurnCheck(ClassifierRun(stream, model.modelId), turn.userText).also { checks[turn.sessionId] = it }
+                    check = TurnCheck(ClassifierRun(stream, model.modelId), turn.userText, target.connection.name).also { checks[turn.sessionId] = it }
                     // Desktop's hydration: only whole turns go back to the model.
                     val history = dao.turns(turn.sessionId)
                         .filter { it.position < turn.position && it.status == ChatStatus.COMPLETED && it.assistantText.isNotBlank() }
@@ -310,6 +317,7 @@ internal class AgentChats(
         try {
             dao.deleteSession(sessionId)
             // Only once the chat is gone: a chat that stays keeps its receipts.
+            forgetOperations(sessionId)
             forgetPublications(sessionId)
             true
         } catch (e: Exception) {
@@ -325,11 +333,20 @@ internal class AgentChats(
         modes.clear()
         try {
             dao.deleteAll()
+            forgetOperations(null)
             forgetPublications(null)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")
             false
+        }
+    }
+
+    private suspend fun forgetOperations(sessionId: String?) {
+        try {
+            forgetNodeOperations(sessionId)
+        } catch (e: Exception) {
+            Log.w(TAG, "deleting node operation receipts failed (${e.javaClass.simpleName})")
         }
     }
 
@@ -339,6 +356,7 @@ internal class AgentChats(
         modes.remove(sessionId)
         AgentApprovals.withdrawSession(sessionId)
         AgentTransfers.withdrawSession(sessionId)
+        AgentNodeAsks.withdrawSession(sessionId)
         AgentDomains.withdrawSession(sessionId)
         AgentTabs.releaseChat(sessionId)
     }
@@ -393,7 +411,11 @@ internal class AgentChats(
                 lateinit var chats: AgentChats
                 chats = AgentChats(
                     AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt,
-                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId), skills) { app } },
+                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId), NodeOperations.get(app), skills) { app } },
+                    forgetNodeOperations = { sessionId ->
+                        val store = NodeOperations.get(app).store
+                        if (sessionId == null) store.deleteAll() else store.deleteOwner(sessionId)
+                    },
                     forgetPublications = { id ->
                         if (id == null) AgentPublications.forgetAll(app) else AgentPublications.forgetSession(app, id)
                     },

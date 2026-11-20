@@ -64,6 +64,8 @@ import baby.freedom.mobile.browser.RadicleProviders
 import baby.freedom.mobile.browser.SwarmProviders
 import baby.freedom.mobile.browser.RadicleControls
 import baby.freedom.mobile.browser.TorControls
+import baby.freedom.mobile.agent.AgentNodes
+import baby.freedom.mobile.agent.NodeControls
 import baby.freedom.mobile.browser.SocksEndpoint
 import baby.freedom.mobile.browser.TorProxy
 import baby.freedom.mobile.browser.TorRouting
@@ -114,6 +116,7 @@ import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
@@ -456,6 +459,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = NodeSettings.get(this)
+        AgentNodes.controls.set(agentNodeControls)
         // Name resolution reads the user's RPC settings for every
         // lookup, so a change in Settings applies to the next name.
         Gateways.ensRpcConfig = { settings.ensRpcConfig.first() }
@@ -1082,13 +1086,55 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         super.startIntentSender(intent, fillInIntent, flagsMask, flagsValues, extraFlags, options)
     }
 
+    /** The Activity in front takes the agent's node switches back (a second one, opened for an App Link, may have gone). */
+    override fun onResume() {
+        super.onResume()
+        AgentNodes.controls.set(agentNodeControls)
+    }
+
     override fun onDestroy() {
+        AgentNodes.clearControls(agentNodeControls)
         NodeIdentitySync.get(this).clearOnChanged(identityChanged)
         unbindFromService()
         unbindMyotis()
         stopTor()
         TorRouting.clearOnExternalFailure(externalTorFailed)
         super.onDestroy()
+    }
+
+    /**
+     * Freedom Agent's node switches (#598): the user's own, as the Nodes &
+     * networks pages flip them, except that Radicle's start and stop leave
+     * Settings' Radicle switch (which also gates `window.radicle`) alone.
+     * Set while this Activity lives ([AgentNodes.clearControls] in [onDestroy]).
+     */
+    private val agentNodeControls = object : NodeControls {
+        // The setting and the service move together, whatever cancels the caller.
+        override suspend fun runNode(on: Boolean): Boolean = withContext(NonCancellable + Dispatchers.Main) {
+            settings.setRunNodeEnabled(on)
+            if (on) {
+                startAndBindService()
+                false
+            } else {
+                stopAndUnbindService()
+            }
+        }
+
+        override fun ipfs(on: Boolean) = onIpfsToggle(on)
+
+        override fun radicle(on: Boolean) {
+            lifecycleScope.launch {
+                radicleRelay.withLock {
+                    runCatching { if (on) binder?.startRadicle() else binder?.stopRadicle() }
+                }
+            }
+        }
+
+        override fun tor(on: Boolean) = onToggleTor(on)
+
+        override fun myotis(network: MyotisNetwork, on: Boolean) = MyotisChains.set(network, on)
+
+        override fun logs(source: NodeLogSource): String? = readNodeLogs(source)
     }
 
     private fun onToggleRunNode(enabled: Boolean) {
@@ -1577,7 +1623,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         }
     }
 
-    private fun stopAndUnbindService() {
+    /** True when the stop waits for a postage spend running inside the node. */
+    private fun stopAndUnbindService(): Boolean {
         // A postage spend still inside ant (#116) must finish first: the
         // service then stops itself once it has, rather than exit mid-spend.
         val deferred = runCatching { binder?.stopWhenIdle() }.getOrNull() == true
@@ -1590,6 +1637,7 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         ipfsInfoFlow.value = IpfsInfo()
         radicleInfoFlow.value = RadicleInfo()
         Gateways.setIpfsBase("")
+        return deferred
     }
 
     private fun unbindFromService() {

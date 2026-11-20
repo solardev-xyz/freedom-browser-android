@@ -612,17 +612,25 @@ class AgentChatsTest {
     }
 
     @Test
-    fun `publication receipts are forgotten only once the chats are really deleted`() = runBlocking {
+    fun `publication and node operation receipts are forgotten only once the chats are really deleted`() = runBlocking {
         val forgotten = ArrayList<String?>()
-        val c = AgentChats(dao, providers, "{{identity}}", scope = scope, forgetPublications = { forgotten += it })
+        val nodeReceipts = ArrayList<String?>()
+        val c = AgentChats(
+            dao, providers, "{{identity}}", scope = scope,
+            forgetNodeOperations = { nodeReceipts += it },
+            forgetPublications = { forgotten += it },
+        )
         dao.failDeletes = true
         assertFalse(c.deleteAll())
         assertFalse(c.delete("chat"))
         assertTrue(forgotten.isEmpty())
+        // A chat that stays keeps its node receipts too (R1-F2).
+        assertTrue(nodeReceipts.isEmpty())
         dao.failDeletes = false
         assertTrue(c.delete("chat"))
         assertTrue(c.deleteAll())
         assertEquals(listOf("chat", null), forgotten)
+        assertEquals(listOf("chat", null), nodeReceipts)
     }
 
     @Test
