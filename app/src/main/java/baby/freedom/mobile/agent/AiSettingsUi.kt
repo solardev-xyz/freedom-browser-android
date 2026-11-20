@@ -297,14 +297,19 @@ private fun testLine(result: TestResult, model: String, keyed: Boolean): String 
     TestResult.Cancelled -> Strings.get(R.string.agent_test_cancelled)
 }
 
+/** What a model list that isn't there says: only a URL the user typed is theirs to check. */
+internal fun refreshNotFoundText(definition: ProviderDefinition): Int = when {
+    definition.id == ProviderCatalog.COMPATIBLE -> R.string.agent_refresh_not_found_compatible
+    // A hosted provider's address is fixed and not shown: there's no URL to check.
+    definition.kind != ProviderKind.Lan -> R.string.agent_refresh_not_found_hosted
+    else -> R.string.agent_refresh_not_found
+}
+
 private fun refreshLine(result: RefreshResult, definition: ProviderDefinition): String = when (result) {
     RefreshResult.Done -> Strings.get(R.string.agent_refresh_done)
     RefreshResult.NoKey -> Strings.get(R.string.agent_test_no_key)
     RefreshResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
-    RefreshResult.NotFound -> Strings.get(
-        if (definition.id == ProviderCatalog.COMPATIBLE) R.string.agent_refresh_not_found_compatible
-        else R.string.agent_refresh_not_found,
-    )
+    RefreshResult.NotFound -> Strings.get(refreshNotFoundText(definition))
     RefreshResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
     RefreshResult.ServerError -> Strings.get(R.string.agent_test_server_error)
     RefreshResult.Refused -> Strings.get(R.string.agent_test_refused)

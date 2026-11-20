@@ -119,6 +119,7 @@
     <string name="agent_refresh_too_large">The model list is too large to load.</string>
     <string name="agent_refresh_unusable">The server didn\'t send a model list Freedom can use.</string>
     <string name="agent_refresh_not_found">The server answered, but has no model list at this address. Check the URL.</string>
+    <string name="agent_refresh_not_found_hosted">The provider answered, but gave no model list. Try again later.</string>
     <string name="agent_refresh_not_found_compatible">The server answered, but has no model list at this address. Check the URL: it usually ends in /v1.</string>
     <string name="agent_refresh_timed_out">The server didn\'t send its model list in time. Try again.</string>
     <string name="agent_refresh_failed">Couldn\'t save the model list. Try again.</string>

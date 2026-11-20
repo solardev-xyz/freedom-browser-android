@@ -5,6 +5,7 @@ import baby.freedom.mobile.data.NodeSettingsEnsRpcTest.MemoryStore
 import java.util.concurrent.TimeUnit
 import javax.crypto.KeyGenerator
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -596,6 +597,41 @@ class AgentProvidersTest {
             mapOf("openai" to "sk-ONE", "anthropic" to "sk-TWO", "xai" to "sk-THREE"),
             AgentStore(file, modelFile, AesGcmCipher { aes }).state.first().keys,
         )
+    }
+
+    @Test
+    fun `a key blob the Keystore couldn't open for a moment reads again without a write`() = runBlocking {
+        val p = AgentProviders(AgentStore(file, modelFile, AesGcmCipher { aes }), RequestGate())
+        p.setEnabled(true)
+        assertTrue(p.saveApiKey("openai", "sk-ONE"))
+        // A fresh process whose first read meets a busy Keystore; nothing writes the file after.
+        val flaky = FlakyCipher().apply { busy = true }
+        val store = AgentStore(file, modelFile, flaky, keyRetryMs = 20)
+        val seen = java.util.Collections.synchronizedList(ArrayList<AgentState>())
+        val job = launch(kotlinx.coroutines.Dispatchers.Default) { store.state.collect { seen += it } }
+        withTimeout(5_000) { while (seen.isEmpty()) delay(5) }
+        assertTrue(seen.first().keysUnreadable)
+        assertTrue(seen.first().keyLost(seen.first().connection("openai")!!))
+        val tries = flaky.decrypts
+        withTimeout(5_000) { while (flaky.decrypts <= tries + 1) delay(5) }
+        flaky.busy = false
+        withTimeout(5_000) { while (seen.last().keysUnreadable) delay(5) }
+        assertEquals("sk-ONE", seen.last().keys["openai"])
+        // Once it opened, it isn't read again.
+        val after = flaky.decrypts
+        delay(200)
+        assertEquals(after, flaky.decrypts)
+        job.cancel()
+    }
+
+    @Test
+    fun `a missing model list asks to check the URL only where the user typed one`() {
+        fun text(id: String) = refreshNotFoundText(ProviderCatalog.definition(id)!!)
+        for (hosted in listOf("openai", "anthropic", "openrouter", "venice", "near-ai")) {
+            assertEquals(baby.freedom.mobile.R.string.agent_refresh_not_found_hosted, text(hosted))
+        }
+        assertEquals(baby.freedom.mobile.R.string.agent_refresh_not_found, text(ProviderCatalog.OLLAMA))
+        assertEquals(baby.freedom.mobile.R.string.agent_refresh_not_found_compatible, text(ProviderCatalog.COMPATIBLE))
     }
 
     @Test

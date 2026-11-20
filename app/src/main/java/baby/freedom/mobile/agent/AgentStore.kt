@@ -22,10 +22,13 @@ import java.security.UnrecoverableKeyException
 import javax.crypto.AEADBadTagException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.transformLatest
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -103,6 +106,8 @@ internal class AgentStore(
     private val store: DataStore<Preferences>,
     private val modelStore: DataStore<Preferences>,
     private val cipher: SecretCipher,
+    /** The first wait before a key blob the Keystore couldn't open just now is tried again. */
+    private val keyRetryMs: Long = KEY_RETRY_MS,
 ) {
     val state: Flow<AgentState> = store.data
         .catch { e ->
@@ -110,7 +115,21 @@ internal class AgentStore(
             Log.w(TAG, "reading AI settings failed (${e.javaClass.simpleName})")
             emit(emptyPreferences())
         }
-        .map { decode(it) }
+        // The file only emits when it's written, so a blob the Keystore
+        // couldn't open for a moment is tried again here (backing off),
+        // until it opens, turns out lost, or the file changes; otherwise
+        // the page would ask for a key that reads fine again a second later.
+        .transformLatest { prefs ->
+            var wait = keyRetryMs
+            while (true) {
+                val (decoded, transient) = decodeRead(prefs)
+                emit(decoded)
+                if (transient == null) break
+                delay(wait)
+                wait = (wait * 2).coerceAtMost(KEY_RETRY_MAX_MS)
+            }
+        }
+        .distinctUntilChanged()
         // Opening the key blob is a Keystore call (a binder round trip):
         // never on the thread that collects this for the UI.
         .flowOn(Dispatchers.IO)
@@ -163,13 +182,24 @@ internal class AgentStore(
     }
 
     private fun decode(prefs: Preferences, failTransient: Boolean = false): AgentState {
+        val (decoded, transient) = decodeRead(prefs)
+        if (transient != null && failTransient) throw transient
+        return decoded
+    }
+
+    /**
+     * [prefs] decoded, and the failure when the key blob couldn't be
+     * opened only for now (it then reads as unreadable), else `null`.
+     */
+    private fun decodeRead(prefs: Preferences): Pair<AgentState, IOException?> {
         val connections = runCatching { decodeConnections(prefs[CONNECTIONS]) }.getOrDefault(emptyList())
-        val (keys, unreadable) = when (val read = decodeKeys(prefs[KEYS])) {
+        val read = decodeKeys(prefs[KEYS])
+        val (keys, unreadable) = when (read) {
             is KeyRead.Opened -> read.keys to false
             KeyRead.Lost -> emptyMap<String, String>() to true
             // Read as unreadable for now (nothing is sent keyless); not cached,
             // so the next read tries again.
-            is KeyRead.Unavailable -> if (failTransient) throw read.cause else emptyMap<String, String>() to true
+            is KeyRead.Unavailable -> emptyMap<String, String>() to true
         }
         val default = prefs[DEFAULT]?.split('\n')?.takeIf { it.size == 2 }?.let { ModelRef(it[0], it[1]) }
         return AgentState(
@@ -179,7 +209,7 @@ internal class AgentStore(
             keys = keys.filterKeys { id -> connections.any { it.id == id } },
             keysUnreadable = unreadable,
             nextRevision = prefs[NEXT_REVISION] ?: 1,
-        )
+        ) to (read as? KeyRead.Unavailable)?.cause
     }
 
     /** [previous]: the keys [prefs]' blob holds now, so an unchanged set keeps its blob. */
@@ -245,6 +275,8 @@ internal class AgentStore(
         private val KEYS = stringPreferencesKey("keys_v1")
         private val NEXT_REVISION = longPreferencesKey("next_revision")
         private const val MODELS_PREFIX = "models:"
+        private const val KEY_RETRY_MS = 2_000L
+        private const val KEY_RETRY_MAX_MS = 60_000L
 
         /** The DataStore files' names, excluded from backup in `res/xml`. */
         const val FILE_NAME = "freedom_agent"
