@@ -742,12 +742,17 @@ private fun loginLine(providerId: String, failure: LoginFailure): String = Strin
 )
 
 /**
- * A subscription's sign-in (#576): Sign in, then the code with the page
- * to enter it on (opened only from the user's tap, in a Custom Tab),
- * Copy and Cancel, until the provider says yes. The sign-in runs in
- * [AgentProviders], so it carries on while the user is in the browser,
- * and this shows it again on return. The page shown, opened and copied
- * is exactly the one [SubscriptionAuth.verificationUrl] passed.
+ * A subscription's sign-in. By device code (#576): Sign in, then the code
+ * with the page to enter it on (opened only from the user's tap, in a
+ * Custom Tab), Copy and Cancel, until the provider says yes; the page
+ * shown, opened and copied is exactly the one
+ * [SubscriptionAuth.verificationUrl] passed. Sign in with ChatGPT (#602):
+ * Sign in opens OpenAI's page by itself, once per sign-in
+ * ([AgentProviders.claimOpen]), with Open again, Cancel and a field for
+ * the address the browser ended on, until the browser comes back; the
+ * page opened is the one [ChatGptLogin.isAuthorizeUrl] passed. The
+ * sign-in runs in [AgentProviders], so it carries on while the user is in
+ * the browser, and this shows it again on return.
  */
 @Composable
 private fun SubscriptionSignIn(

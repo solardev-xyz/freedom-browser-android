@@ -30,6 +30,10 @@ import org.json.JSONObject
  * `device-code.js`); the checks on what may be shown and opened are
  * desktop's (`ipc.js` `normalizeSubscriptionAuthEvent`), made stricter.
  *
+ * Sign in with ChatGPT by PKCE (#602, `openai-chatgpt`) is
+ * [ChatGptLogin]; it shares [SubscriptionCredential], [LoginState] and
+ * [AuthHttp] with these.
+ *
  * Nothing a server writes is shown or logged: every failure is a
  * [LoginFailure] or [RefreshOutcome], never the server's words (Pi's
  * messages quote whole responses, tokens included).

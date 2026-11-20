@@ -741,7 +741,8 @@ internal class AgentProviders(
     }
 
     /**
-     * Starts signing in to subscription [providerId] by device code,
+     * Starts signing in to subscription [providerId], by device code or
+     * (ChatGPT, #602) in the browser ([runChatGpt]),
      * ending any other sign-in under way. Its progress is [login]; it
      * runs on its own, so the user can go to the browser and back. Only
      * while AI is on. Under [lock], like every other end of a sign-in

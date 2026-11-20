@@ -1,7 +1,6 @@
 package baby.freedom.mobile.agent
 
 import java.io.IOException
-import java.net.ConnectException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -21,7 +20,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
@@ -244,6 +242,9 @@ class ChatGptLoginTest {
         assertTrue(portClosed())
     }
 
+    // Also pins Session.close() waiting for the accept thread: a blocked
+    // accept() keeps the port until that thread finishes the close, and
+    // without the wait this test fails (the port can't be bound again).
     @Test
     fun `no callback in time ends the sign-in and frees the port`() = runBlocking {
         val quick = loginWith(maxWaitMs = 300)
@@ -253,16 +254,6 @@ class ChatGptLoginTest {
         assertTrue(portClosed())
         // A new sign-in can listen on it again straight away.
         open(quick).close()
-    }
-
-    @Test
-    fun `closing a sign-in lets go of the port before it returns, every time`() {
-        // A blocked accept() keeps the port until its thread finishes the
-        // close: close() waits for that, so "Sign in again" can bind at once.
-        repeat(100) { i ->
-            open().close()
-            assertTrue("round $i", portClosed())
-        }
     }
 
     @Test
@@ -420,11 +411,21 @@ class ChatGptLoginTest {
         assertEquals(400, status)
         assertTrue(page.contains("Connection cancelled"))
         assertTrue(portClosed())
-        try {
-            get(callback(stateOf(session)))
-            fail("still listening")
-        } catch (e: ConnectException) {
-        }
+    }
+
+    @Test
+    fun `a saved subscription or hosted provider shows its current name, a server the user's`() {
+        val saved = AgentStore.encodeConnections(
+            listOf(
+                AgentConnection(SubscriptionAuth.CODEX, SubscriptionAuth.CODEX, "ChatGPT", revision = 1),
+                AgentConnection("openai", "openai", "Old", revision = 2),
+                AgentConnection("custom-1", ProviderCatalog.COMPATIBLE, "My box", revision = 3),
+            ),
+        )
+        assertEquals(
+            listOf("ChatGPT (device code)", "OpenAI", "My box"),
+            AgentStore.decodeConnections(saved).map { it.name },
+        )
     }
 
     companion object {

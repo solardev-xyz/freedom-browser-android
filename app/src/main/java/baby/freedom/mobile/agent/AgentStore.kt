@@ -99,6 +99,8 @@ internal data class AgentState(
  *    Keystore key ([KEY_ALIAS], [KeystoreAesKey]) and Base64-encoded as
  *    one blob, like the RPC keys (`RpcKeyStore`). The Keystore key never
  *    leaves the phone, so a copied file could never be read anyway.
+ *    It also keeps this installation's id ([deviceId]) for Sign in
+ *    with ChatGPT (#602).
  *  - [MODELS_FILE_NAME]: each connection's discovered model list, apart
  *    so a list of up to 2000 models isn't rewritten on every favourite.
  *
@@ -403,12 +405,16 @@ internal class AgentStore(
             return (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val provider = o.optString("provider")
-                if (ProviderCatalog.definition(provider) == null) return@mapNotNull null
+                val definition = ProviderCatalog.definition(provider) ?: return@mapNotNull null
                 val favorites = o.optJSONArray("favorites")
                 AgentConnection(
                     id = o.optString("id").takeIf { it.isNotEmpty() } ?: return@mapNotNull null,
                     providerId = provider,
-                    name = o.optString("name"),
+                    // A hosted provider or subscription is named by the app,
+                    // not the user: its current name, so one renamed since
+                    // (#602: ChatGPT's device-code sign-in is now "ChatGPT
+                    // (device code)") isn't shown under its old one.
+                    name = if (definition.kind == ProviderKind.Lan) o.optString("name") else definition.name,
                     baseUrl = o.optString("baseUrl").takeIf { it.isNotEmpty() },
                     favorites = if (favorites == null) emptyList() else (0 until favorites.length()).map { favorites.getString(it) },
                     revision = o.optLong("revision"),

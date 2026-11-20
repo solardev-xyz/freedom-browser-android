@@ -239,7 +239,7 @@
     <string name="agent_tab_take_back">Take back</string>
     <string name="agent_tab_take_back_description">Take this tab back from Freedom Agent</string>
 
-    <!-- Subscription sign-in by device code (#576). -->
+    <!-- Subscription sign-in by device code (#576) and, below, Sign in with ChatGPT (#602). -->
     <string name="agent_sign_in">Sign in</string>
     <string name="agent_sign_in_again">Sign in again</string>
     <string name="agent_signing_in">Starting…</string>
@@ -282,8 +282,8 @@
     <string name="agent_sign_in_no_callback">The browser didn\'t come back in time. Sign in again.</string>
     <string name="agent_sign_in_not_completed">The sign-in wasn\'t finished on OpenAI\'s page. Try again.</string>
     <string name="agent_sign_in_not_accepted">OpenAI didn\'t accept the sign-in, so nothing was saved. Sign in again.</string>
-    <string name="agent_chatgpt_how">Freedom opens OpenAI\'s sign-in page in your browser. Sign in there; the browser then comes back here and this page finishes by itself.</string>
-    <string name="agent_chatgpt_waiting">Sign in on OpenAI\'s page in your browser. When you\'re done, this page finishes by itself.</string>
+    <string name="agent_chatgpt_how">Freedom opens OpenAI\'s sign-in page in your browser. Sign in there, then come back to Freedom: this page finishes by itself.</string>
+    <string name="agent_chatgpt_waiting">Sign in on OpenAI\'s page in your browser, then come back to Freedom. This page finishes by itself.</string>
     <string name="agent_chatgpt_finishing">Finishing the sign-in…</string>
     <string name="agent_chatgpt_paste_label">Address the browser ended on</string>
     <string name="agent_chatgpt_paste_help">Only if the sign-in doesn\'t finish by itself: copy the address from the browser\'s address bar and paste it here. It starts with %1$s</string>

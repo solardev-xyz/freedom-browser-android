@@ -21,19 +21,23 @@ import baby.freedom.mobile.R
  * for the browser to come back to its listener on 127.0.0.1:1455.
  *
  * While the user is in the Custom Tab nothing of Freedom's is on screen,
- * so Android caches the process and, a few seconds later, freezes it
- * (seen on an API 36 emulator: `isFrozen=true` with the tab on top, and
- * a request to the listener hanging unanswered). A frozen process can't
- * answer the browser, so OpenAI's redirect would hang until the user came
- * back. A foreground service in the same process keeps it running.
+ * so Android caches the process and then freezes it (seen on an API 36
+ * emulator: `isFrozen=true` with the tab on top, and a request to the
+ * listener hanging unanswered). A frozen process can't answer the
+ * browser, so OpenAI's redirect would spin until the user came back. A
+ * foreground service in the same process keeps it running.
  *
  * It's a `shortService` (Android 14+): meant for a short task the user
  * started, needs no extra permission and spends none of the `dataSync`
  * time the node's own service lives on. Android gives it about three
- * minutes ([onTimeout]); a sign-in that takes longer still finishes,
- * once the user is back in Freedom, from what the browser left with the
- * listener, or from the address pasted on the page. Before Android 14
- * it's a plain foreground service, held for as long as the sign-in waits.
+ * minutes ([onTimeout]). A sign-in that takes longer still finishes once
+ * the user is back in Freedom: the kernel takes the browser's connection
+ * and request while the process is frozen, and the thawed listener reads
+ * them, even if the browser's tab was closed meanwhile (both measured on
+ * that emulator with `am freeze`). The browser's tab spins until then,
+ * on the 127.0.0.1 address the page's paste field asks for. Before
+ * Android 14 it's a plain foreground service, held for as long as the
+ * sign-in waits.
  *
  * Held only from the moment the listener is open until the sign-in
  * ends, however it ends ([AgentProviders.runChatGpt]).
@@ -56,11 +60,8 @@ class SignInService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val keep = synchronized(lock) {
-            if (wanted) running = this
-            wanted
-        }
-        if (!keep) stop()
+        // On the main thread, as [Hold]'s changes to [wanted] are.
+        if (wanted) running = this else stop()
         return START_NOT_STICKY
     }
 
@@ -71,7 +72,7 @@ class SignInService : Service() {
     override fun onTimeout(startId: Int, fgsType: Int) = stop()
 
     override fun onDestroy() {
-        synchronized(lock) { if (running === this) running = null }
+        if (running === this) running = null
         super.onDestroy()
     }
 
@@ -110,24 +111,26 @@ class SignInService : Service() {
 
     /** Holds the process for one sign-in; [release] ends it. */
     internal class Hold(private val context: Context) : ProcessHold {
+        // Starting and stopping both run on the main thread, as the
+        // service's own callbacks do, so a stop can't land between a new
+        // hold's start and its startForeground.
         override fun hold() {
-            synchronized(lock) { wanted = true }
-            try {
-                context.startForegroundService(Intent(context, SignInService::class.java))
-            } catch (e: RuntimeException) {
-                // Not allowed now (the app isn't in front): nothing held.
-                Log.w(TAG, "sign-in hold not started (${e.javaClass.simpleName})")
-                synchronized(lock) { wanted = false }
+            main.post {
+                wanted = true
+                try {
+                    context.startForegroundService(Intent(context, SignInService::class.java))
+                } catch (e: RuntimeException) {
+                    // Not allowed now (the app isn't in front): nothing held.
+                    Log.w(TAG, "sign-in hold not started (${e.javaClass.simpleName})")
+                    wanted = false
+                }
             }
         }
 
         override fun release() {
-            synchronized(lock) { wanted = false }
             main.post {
-                // Checked again on the main thread: a new sign-in may have
-                // started since, and holds the same service.
-                val service = synchronized(lock) { running.takeIf { !wanted } }
-                service?.stop()
+                wanted = false
+                running?.stop()
             }
         }
     }
@@ -137,13 +140,12 @@ class SignInService : Service() {
         const val CHANNEL_ID = "freedom_agent_sign_in"
         const val NOTIFICATION_ID = 0x5160
 
-        val lock = Any()
         val main = Handler(Looper.getMainLooper())
 
-        /** Whether a sign-in wants the process held. Under [lock]. */
+        /** Whether a sign-in wants the process held. Main thread only. */
         var wanted = false
 
-        /** The service while it holds the process. Under [lock]. */
+        /** The service while it holds the process. Main thread only. */
         var running: SignInService? = null
     }
 }
