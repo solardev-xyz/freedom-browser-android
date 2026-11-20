@@ -183,7 +183,6 @@
     <string name="agent_approve_open_tab">Open a new tab</string>
     <string name="agent_approve_navigate">Go to an address</string>
     <string name="agent_approve_click">Tap</string>
-    <string name="agent_approve_type">Type</string>
     <string name="agent_approve_type_replace">Replace the text in</string>
     <string name="agent_approve_type_append">Add text to</string>
     <string name="agent_approve_select">Choose in</string>
@@ -220,5 +219,4 @@
     <string name="agent_tab_held">Freedom Agent is using this tab</string>
     <string name="agent_tab_take_back">Take back</string>
     <string name="agent_tab_take_back_description">Take this tab back from Freedom Agent</string>
-    <string name="agent_tab_held_badge">Agent</string>
 </resources>

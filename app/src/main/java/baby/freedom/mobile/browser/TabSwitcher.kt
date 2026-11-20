@@ -43,6 +43,7 @@ import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.outlined.Home
@@ -849,6 +850,16 @@ private fun TabCard(
                     PrivateTabIcon,
                     contentDescription = stringResource(R.string.browser_tabs_private),
                     tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.size(6.dp))
+            }
+            // Freedom Agent holds it (#575).
+            if (baby.freedom.mobile.agent.AgentTabs.isHeld(tab.id)) {
+                Icon(
+                    Icons.Filled.SmartToy,
+                    contentDescription = stringResource(R.string.agent_tab_held),
+                    tint = MaterialTheme.colorScheme.secondary,
                     modifier = Modifier.size(14.dp),
                 )
                 Spacer(Modifier.size(6.dp))
