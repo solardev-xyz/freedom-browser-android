@@ -277,6 +277,14 @@ internal class AgentAttachments(
     private val random = SecureRandom()
     private val _staged = MutableStateFlow<List<StagedAttachment>>(emptyList())
 
+    /**
+     * Chats a send has moved files into ([consume]) whose message isn't
+     * committed to the chat database yet ([settled] not called): [sweep]
+     * leaves their folders alone, as the chat list it reads can't name them
+     * yet. Under [lock]; counts, as two sends may share a chat.
+     */
+    private val sending = HashMap<String, Int>()
+
     /** Files picked for the message being written, in the order picked. */
     val staged: StateFlow<List<StagedAttachment>> = _staged.asStateFlow()
 
@@ -291,6 +299,9 @@ internal class AgentAttachments(
     }
 
     private fun stagedFile(id: String) = File(stagedDir, id)
+
+    /** The base64 length of [bytes] bytes. */
+    private fun base64Chars(bytes: Long): Long = (bytes + 2) / 3 * 4
 
     private fun chatDir(sessionId: String): File {
         require(AttachmentRules.CHAT_ID.matches(sessionId)) { "not a chat id" }
@@ -414,7 +425,20 @@ internal class AgentAttachments(
             }
             val gone = picked.map { it.id }.toSet()
             _staged.update { list -> list.filterNot { it.id in gone } }
+            sending[sessionId] = (sending[sessionId] ?: 0) + 1
             added
+        }
+    }
+
+    /**
+     * The send that [consume]d files into chat [sessionId] is over: its
+     * message is in the chat database, or [unconsume] put them back. Call
+     * exactly once for every [consume] that returned files, after either.
+     */
+    suspend fun settled(sessionId: String) {
+        lock.withLock {
+            val n = (sending[sessionId] ?: return@withLock) - 1
+            if (n > 0) sending[sessionId] = n else sending.remove(sessionId)
         }
     }
 
@@ -496,6 +520,48 @@ internal class AgentAttachments(
         a to ImagePart(a.mimeType, java.util.Base64.getEncoder().encodeToString(bytes))
     }
 
+    /**
+     * The images [ids] of chat [sessionId], in order, within [maxChars]
+     * base64 characters (#601): each file's size is checked before it is
+     * read, so an image the request's budget would drop anyway is never
+     * read or encoded. Once one doesn't fit, it and every later one are
+     * left out, as [AgentLoop.withinImageBudget] would; returns the images
+     * kept and how many were left out that way. One that can't be read is
+     * skipped without counting.
+     */
+    suspend fun readImages(sessionId: String, ids: List<String>, maxChars: Long): Pair<List<ImagePart>, Int> {
+        var left = maxChars
+        val kept = ArrayList<ImagePart>()
+        var dropped = 0
+        for (id in ids) {
+            if (dropped > 0) {
+                dropped++
+                continue
+            }
+            val size = try {
+                withContext(Dispatchers.IO) { open(sessionId, id).second.length() }
+            } catch (e: AttachmentException) {
+                continue
+            }
+            if (base64Chars(size) > left) {
+                dropped++
+                continue
+            }
+            val image = try {
+                readImage(sessionId, id).second
+            } catch (e: AttachmentException) {
+                continue
+            }
+            if (image.base64.length > left) {
+                dropped++
+                continue
+            }
+            kept += image
+            left -= image.base64.length
+        }
+        return kept to dropped
+    }
+
     /** Deletes chat [sessionId]'s attachments. */
     suspend fun deleteChat(sessionId: String) = withContext(Dispatchers.IO) {
         if (!AttachmentRules.CHAT_ID.matches(sessionId)) return@withContext
@@ -513,15 +579,19 @@ internal class AgentAttachments(
     /**
      * Deletes the folders of chats not in [existing]: a chat deleted
      * while its folder couldn't be, or a message whose save was cut off
-     * by the app stopping. Only folders last changed before [before]
-     * (ms, wall clock: when [existing] was read): one a send filled since
-     * belongs to a chat [existing] couldn't know yet. Returns how many went.
+     * by the app stopping. [existing] is read under the store's lock, so
+     * no send can move files in meanwhile; one that already has, but
+     * hasn't committed its message yet ([sending]), keeps its folder.
+     * Returns how many went.
      */
-    suspend fun sweep(existing: Set<String>, before: Long = System.currentTimeMillis()): Int = withContext(Dispatchers.IO) {
+    suspend fun sweep(existing: suspend () -> Set<String>): Int = withContext(Dispatchers.IO) {
         lock.withLock {
+            val dirs = chatsDir.listFiles().orEmpty()
+            if (dirs.isEmpty()) return@withLock 0
+            val keep = existing()
             var n = 0
-            for (dir in chatsDir.listFiles().orEmpty()) {
-                if (dir.name !in existing && dir.lastModified() < before && dir.deleteRecursively()) n++
+            for (dir in dirs) {
+                if (dir.name !in keep && dir.name !in sending && dir.deleteRecursively()) n++
             }
             n
         }
@@ -567,9 +637,8 @@ internal class AgentAttachments(
         suspend fun atLaunch(context: Context) {
             val store = get(context)
             if (!store.hasChats()) return
-            val before = System.currentTimeMillis()
             try {
-                store.sweep(AgentDatabase.get(context).chats().sessionIds().toSet(), before)
+                store.sweep { AgentDatabase.get(context).chats().sessionIds().toSet() }
             } catch (e: Exception) {
                 Log.w(TAG, "sweeping chat attachments failed (${e.javaClass.simpleName})")
             }

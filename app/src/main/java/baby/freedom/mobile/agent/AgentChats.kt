@@ -139,10 +139,7 @@ internal class AgentChats(
                 // Files of a chat deleted while they couldn't be, or of a
                 // message whose save the app's stop cut off (#601). Before
                 // any send: one under way would look like an orphan.
-                attachments?.let { a ->
-                    val before = clock()
-                    a.sweep(dao.sessionIds().toSet(), before)
-                }
+                attachments?.sweep { dao.sessionIds().toSet() }
             } catch (e: Exception) {
                 Log.w(TAG, "sweeping chat attachments failed (${e.javaClass.simpleName})")
             } finally {
@@ -219,9 +216,16 @@ internal class AgentChats(
             }
             if (saved == null) {
                 // Back under the composer, for the next try.
-                if (files.isNotEmpty()) withContext(NonCancellable) { attachments?.unconsume(id, files) }
+                if (files.isNotEmpty()) {
+                    withContext(NonCancellable) {
+                        attachments?.unconsume(id, files)
+                        attachments?.settled(id)
+                    }
+                }
                 return@withLock null
             }
+            // Committed: the sweep may judge its folder by the chat list again.
+            if (files.isNotEmpty()) withContext(NonCancellable) { attachments?.settled(id) }
             _live.update { it + (id to Live(id, saved.id, "")) }
             // Started only once it's in [jobs], so its own wind-down finds itself there.
             val job = scope.launch(start = CoroutineStart.LAZY) { runTurn(saved, model) }
@@ -266,7 +270,7 @@ internal class AgentChats(
                     }
                     val prompt = systemPromptFor(target)
                     val images = runCatching { takesImages(model) }.getOrDefault(false)
-                    val userImages = if (images) imagesOf(turn) else emptyList()
+                    val (userImages, imagesLeftOut) = if (images) imagesOf(turn) else emptyList<ImagePart>() to 0
                     val toolsKey = "${target.connection.id}\u0000${target.connection.revision}\u0000${model.modelId}"
                     val loop = AgentLoop(
                         model = stream,
@@ -283,7 +287,8 @@ internal class AgentChats(
                         images = images,
                     )
                     loop.run(
-                        history, summary, withAttachments(turn) + AttachmentTools.earlierNote(earlier),
+                        history, summary, withAttachments(turn) + AttachmentTools.earlierNote(earlier) +
+                            "\n${AgentLoop.IMAGE_DROPPED}".repeat(imagesLeftOut),
                         onText = { text ->
                             latest = text
                             val now = clock()
@@ -357,18 +362,14 @@ internal class AgentChats(
 
     /**
      * The images sent with [turn], for a model that takes them (desktop's
-     * `promptImages`); one that can't be read now is left out, and the
-     * model can still try `attachment_read`.
+     * `promptImages`), and how many the request's image budget leaves out:
+     * those are never read (#601). One that can't be read now is left out,
+     * and the model can still try `attachment_read`.
      */
-    private suspend fun imagesOf(turn: ChatTurn): List<ImagePart> {
-        val store = attachments ?: return emptyList()
-        return Attachment.parseList(turn.attachments).filter { it.kind == AttachmentKind.Image }.mapNotNull { a ->
-            try {
-                store.readImage(turn.sessionId, a.id).second
-            } catch (e: AttachmentException) {
-                null
-            }
-        }
+    private suspend fun imagesOf(turn: ChatTurn): Pair<List<ImagePart>, Int> {
+        val store = attachments ?: return emptyList<ImagePart>() to 0
+        val ids = Attachment.parseList(turn.attachments).filter { it.kind == AttachmentKind.Image }.map { it.id }
+        return store.readImages(turn.sessionId, ids, AgentLoop.MAX_IMAGE_CHARS.toLong())
     }
 
     /** Stops [sessionId]'s turn; returns once its end is written. */

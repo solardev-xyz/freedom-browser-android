@@ -3,6 +3,7 @@ package baby.freedom.mobile.agent
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -191,11 +192,14 @@ class AgentAttachmentsTest {
             assertEquals(AttachmentException.Reason.NotFound, e.reason)
         }
         s.consume(chat, listOf(s.stageOk("d.txt", open = text("d")).id))
-        // A folder changed since the chat list was read is a send under way: kept.
-        assertEquals(0, s.sweep(setOf(chat), before = chatDir(other).lastModified()))
+        // A send that moved its files but hasn't committed its message yet:
+        // the chat list can't name it, and its folder is kept (R1-M2).
+        assertEquals(0, s.sweep { setOf(chat) })
         assertTrue(chatDir(other).exists())
-        assertEquals(1, s.sweep(setOf(chat), before = Long.MAX_VALUE))
+        s.settled(other)
+        assertEquals(1, s.sweep { setOf(chat) })
         assertFalse(chatDir(other).exists())
+        s.settled(chat)
         assertTrue(chatDir(chat).exists())
         s.deleteAll()
         assertFalse(File(tmp.root, "chats").exists())
@@ -248,6 +252,55 @@ class AgentAttachmentsTest {
         } catch (e: AttachmentException) {
             assertEquals(AttachmentException.Reason.WrongKind, e.reason)
         }
+    }
+
+    @Test
+    fun `the chat list is read under the lock, so a send can't move files in between`() = runBlocking {
+        val s = store()
+        s.consume(chat, listOf(s.stageOk("kept.txt", open = text("k")).id))
+        s.settled(chat)
+        val id = s.stageOk("a.txt", open = text("a")).id
+        // A send that lands while the sweep is reading the chat list waits
+        // for the sweep: its folder doesn't exist yet when the sweep looks.
+        val sent = kotlinx.coroutines.CompletableDeferred<List<Attachment>?>()
+        val n = s.sweep {
+            val send = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { sent.complete(s.consume(other, listOf(id))) }
+            kotlinx.coroutines.delay(100)
+            assertFalse(send.isCompleted)
+            setOf(chat)
+        }
+        assertEquals(0, n)
+        assertNotNull(sent.await())
+        assertTrue(chatDir(other).exists())
+        // Until it settles, a later sweep keeps it too.
+        assertEquals(0, s.sweep { setOf(chat) })
+        s.settled(other)
+        assertEquals(1, s.sweep { setOf(chat) })
+    }
+
+    @Test
+    fun `a message's images are read only while they fit the request's budget`() = runBlocking {
+        val s = store()
+        val sent = s.consume(
+            chat,
+            listOf(
+                s.stageOk("a.png") { bytes(6, "PNG") }.id,
+                s.stageOk("b.png") { bytes(30, "PNG") }.id,
+                s.stageOk("c.png") { bytes(3, "PNG") }.id,
+            ),
+        )!!
+        // Unreadable: were either over-budget file opened, it would count as
+        // skipped, not as left out by the budget.
+        assertTrue(File(chatDir(chat), sent[1].id).setReadable(false))
+        assertTrue(File(chatDir(chat), sent[2].id).setReadable(false))
+        val (kept, leftOut) = s.readImages(chat, sent.map { it.id }, maxChars = 20)
+        assertEquals(listOf(java.util.Base64.getEncoder().encodeToString("PNGaaa".toByteArray())), kept.map { it.base64 })
+        // b doesn't fit; c would, but goes with it, as the request's own budget drops it.
+        assertEquals(2, leftOut)
+        val (all, none) = s.readImages(chat, listOf(sent[0].id), maxChars = 8)
+        assertEquals(1, all.size)
+        assertEquals(0, none)
+        assertEquals(0 to 1, s.readImages(chat, listOf(sent[0].id), maxChars = 7).let { it.first.size to it.second })
     }
 
     @Test

@@ -842,6 +842,37 @@ class AgentChatsTest {
     }
 
     @Test
+    fun `a launch sweep while a send is between moving its files and saving its chat keeps them`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        // A chat with files already, so the sweep has a folder to judge.
+        route("/v1/chat/completions", { sse(chatText("ok"), chatStop) }, { sse(chatText("ok"), chatStop) })
+        val first = chats.send(null, "one", model, attachmentIds = listOf(store.stageText("a.txt", "a")))!!
+        awaitDone(first, chats)
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        dao.holdInserts = hold
+        val staged = store.stageText("b.txt", "b")
+        val send = CoroutineScope(Dispatchers.IO).let { scope ->
+            kotlinx.coroutines.CompletableDeferred<String?>().also { out ->
+                scope.launch { out.complete(chats.send(null, "two", model, attachmentIds = listOf(staged))) }
+            }
+        }
+        // The files have moved; the chat isn't in the database yet.
+        withTimeout(5_000) { while (store.staged.value.isNotEmpty()) delay(10) }
+        assertEquals(listOf(first), dao.sessionIds())
+        // MainActivity's sweep at that instant.
+        assertEquals(0, store.sweep { dao.sessionIds().toSet() })
+        hold.complete(Unit)
+        val second = withTimeout(5_000) { send.await() }!!
+        awaitDone(second, chats)
+        assertEquals(listOf("b.txt"), store.list(second).map { it.name })
+        // Committed: the next sweep judges it by the chat list, which names it.
+        assertEquals(0, store.sweep { dao.sessionIds().toSet() })
+        assertEquals(1, store.list(second).size)
+    }
+
+    @Test
     fun `deleting a chat, or every chat, deletes its files, and a start sweeps a chat's that's gone`() = runBlocking {
         val model = connectOllama()
         val store = attachmentStore()
@@ -881,8 +912,12 @@ internal class MemoryChatDao : ChatDao {
     /** Set: saving a new chat throws, as a database that can't be written would. */
     @Volatile var failInserts = false
 
+    /** Set: saving a new chat waits for it, as a slow database would. */
+    @Volatile var holdInserts: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
     override suspend fun sessionIds(): List<String> = sessions.value.keys.toList()
     override suspend fun insertSession(session: ChatSession) {
+        holdInserts?.await()
         synchronized(this) {
             if (failInserts) throw java.io.IOException("disk")
             require(session.id !in sessions.value)
