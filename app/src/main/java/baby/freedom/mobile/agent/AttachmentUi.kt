@@ -37,8 +37,10 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
-import baby.freedom.mobile.browser.FileChooser
+import baby.freedom.mobile.browser.isOwnProviderAuthority
 import baby.freedom.mobile.browser.isUploadableUri
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /*
  * The chat's attachments on screen (#601): the composer's attach button,
@@ -73,32 +75,28 @@ internal fun AttachButton(
  */
 internal suspend fun stagePicks(context: Context, store: AgentAttachments, uris: List<Uri>): List<StageResult> {
     val app = context.applicationContext
-    return uris.map { uri ->
-        val (name, _) = describe(app, uri)
-        if (!isUploadableUri(uri.scheme, uri.authority) { isOwnAuthority(app, it) }) {
-            return@map StageResult.Refused(StageRefusal.Unreadable, AttachmentRules.cleanName(name))
+    val untitled = app.getString(R.string.agent_attachment_untitled)
+    // A provider's query can be slow (a cloud file): never on the main thread.
+    return withContext(Dispatchers.IO) {
+        uris.map { uri ->
+            val name = describe(app, uri)?.takeIf { it.isNotBlank() } ?: untitled
+            if (!isUploadableUri(uri.scheme, uri.authority) { isOwnProviderAuthority(app, it) }) {
+                return@map StageResult.Refused(StageRefusal.Unreadable, AttachmentRules.cleanName(name))
+            }
+            val type = runCatching { app.contentResolver.getType(uri) }.getOrNull()
+            store.stage(name, type) { app.contentResolver.openInputStream(uri) }
         }
-        val type = runCatching { app.contentResolver.getType(uri) }.getOrNull()
-        store.stage(name, type) { app.contentResolver.openInputStream(uri) }
     }
 }
 
-/** The picker's name and size for [uri]; neither is trusted beyond showing and naming it. */
-private fun describe(context: Context, uri: Uri): Pair<String?, Long?> = try {
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
-        if (!c.moveToFirst()) return@use null to null
-        val name = c.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { c.getString(it) }
-        val size = c.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 && !c.isNull(it) }?.let { c.getLong(it) }
-        name to size
-    } ?: (null to null)
+/** The picker's name for [uri], trusted no further than showing and naming it (the size is counted while copying). */
+private fun describe(context: Context, uri: Uri): String? = try {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+        if (!c.moveToFirst()) return@use null
+        c.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { c.getString(it) }
+    }
 } catch (e: Exception) {
-    null to null
-}
-
-private fun isOwnAuthority(context: Context, authority: String): Boolean {
-    if (authority.equals(FileChooser.authority(context), ignoreCase = true)) return true
-    val info = runCatching { context.packageManager.resolveContentProvider(authority, 0) }.getOrNull()
-    return info?.packageName == context.packageName
+    null
 }
 
 private fun iconOf(kind: AttachmentKind): ImageVector = when (kind) {

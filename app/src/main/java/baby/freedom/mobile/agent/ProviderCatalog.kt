@@ -87,9 +87,11 @@ internal data class ProviderDefinition(
 /**
  * A model as the picker shows it. [name] falls back to [id]. [vision]:
  * it takes images (#601, desktop's `vision`), as its provider's catalog
- * or Pi's bundled list says; false when nothing says so.
+ * or Pi's bundled list says; false when nothing says so. Null only in a
+ * list stored before #601, which said nothing of images:
+ * [AgentProviders.modelsOf] reads it as the bundled entry does.
  */
-internal data class AgentModel(val id: String, val name: String = id, val vision: Boolean = false)
+internal data class AgentModel(val id: String, val name: String = id, val vision: Boolean? = false)
 
 internal object ProviderCatalog {
     /** Desktop's bounds on a hosted provider's model list: bytes read and entries. */
@@ -355,8 +357,10 @@ internal object ProviderCatalog {
                         if (input != null) input.contains("image") else known[id]?.vision == true,
                     )
                 }
-                // A server on the network doesn't say what a model takes
-                // (desktop asks the user, on a form this app doesn't have yet).
+                // A server on the network doesn't say what a model takes.
+                // Desktop never sends an Ollama model images, and sends a
+                // compatible server's model images only once the user ticks
+                // Images for it, a setting this app doesn't have yet.
                 OLLAMA -> AgentModel(cleanText(item.opt("name")) ?: continue)
                 COMPATIBLE -> AgentModel(cleanText(item.opt("id")) ?: continue)
                 else -> {

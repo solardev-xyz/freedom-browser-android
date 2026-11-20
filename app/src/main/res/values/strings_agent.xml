@@ -170,6 +170,7 @@
     <!-- Attachments (#601): files sent with a message. -->
     <string name="agent_attach">Attach files</string>
     <string name="agent_attachment_remove">Remove %1$s</string>
+    <string name="agent_attachment_untitled">Untitled file</string>
     <string name="agent_attachment_size">%1$s · %2$s</string>
     <string name="agent_attachment_kind_text">Text</string>
     <string name="agent_attachment_kind_image">Image</string>

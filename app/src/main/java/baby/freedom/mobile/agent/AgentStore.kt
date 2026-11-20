@@ -427,7 +427,7 @@ internal class AgentStore(
             for (m in models) put(
                 JSONObject().put("id", m.id).apply {
                     if (m.name != m.id) put("name", m.name)
-                    if (m.vision) put("vision", true)
+                    m.vision?.let { put("vision", it) }
                 },
             )
         }.toString()
@@ -437,8 +437,9 @@ internal class AgentStore(
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val id = ProviderCatalog.cleanText(o.opt("id")) ?: return@mapNotNull null
-                // A list saved before #601 says nothing of images: none, until it's fetched again.
-                AgentModel(id, ProviderCatalog.cleanText(o.opt("name")) ?: id, o.opt("vision") == true)
+                // A list saved before #601 says nothing of images: null, read as its bundled entry.
+                val vision = if (o.has("vision")) o.opt("vision") == true else null
+                AgentModel(id, ProviderCatalog.cleanText(o.opt("name")) ?: id, vision)
             }
         } catch (e: Exception) {
             emptyList()

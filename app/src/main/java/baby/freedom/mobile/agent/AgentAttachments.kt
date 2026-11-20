@@ -182,7 +182,7 @@ internal object AttachmentRules {
         IMAGE_TYPES[ext]?.let { return AttachmentKind.Image to it }
         if (ext == ".pdf") return AttachmentKind.Pdf to "application/pdf"
         if (ext in TEXT_EXTENSIONS) return AttachmentKind.Text to "text/plain"
-        if (ext.isNotEmpty() && ext.length <= 6 && ext.drop(1).all { it.isLetterOrDigit() }) return null
+        // Not an extension Freedom knows ("Notes 20.11.2026", "report.v2", none): the picker's type.
         val mime = mimeType?.lowercase()?.substringBefore(';')?.trim() ?: return null
         if (mime in IMAGE_TYPES.values) return AttachmentKind.Image to mime
         if (mime == "application/pdf") return AttachmentKind.Pdf to mime
@@ -507,16 +507,21 @@ internal class AgentAttachments(
         lock.withLock { chatsDir.deleteRecursively() }
     }
 
+    /** Whether any chat has a folder: nothing to sweep otherwise. */
+    fun hasChats(): Boolean = chatsDir.list()?.isNotEmpty() == true
+
     /**
      * Deletes the folders of chats not in [existing]: a chat deleted
      * while its folder couldn't be, or a message whose save was cut off
-     * by the app stopping. Returns how many went.
+     * by the app stopping. Only folders last changed before [before]
+     * (ms, wall clock: when [existing] was read): one a send filled since
+     * belongs to a chat [existing] couldn't know yet. Returns how many went.
      */
-    suspend fun sweep(existing: Set<String>): Int = withContext(Dispatchers.IO) {
+    suspend fun sweep(existing: Set<String>, before: Long = System.currentTimeMillis()): Int = withContext(Dispatchers.IO) {
         lock.withLock {
             var n = 0
             for (dir in chatsDir.listFiles().orEmpty()) {
-                if (dir.name !in existing && dir.deleteRecursively()) n++
+                if (dir.name !in existing && dir.lastModified() < before && dir.deleteRecursively()) n++
             }
             n
         }
@@ -552,6 +557,23 @@ internal class AgentAttachments(
 
         @Volatile
         private var instance: AgentAttachments? = null
+
+        /**
+         * At the app's start (MainActivity): staged copies a process left
+         * go (the store's first use does that), and so do the folders of
+         * chats that are gone, without opening the chat database when no
+         * chat has files. Off the main thread.
+         */
+        suspend fun atLaunch(context: Context) {
+            val store = get(context)
+            if (!store.hasChats()) return
+            val before = System.currentTimeMillis()
+            try {
+                store.sweep(AgentDatabase.get(context).chats().sessionIds().toSet(), before)
+            } catch (e: Exception) {
+                Log.w(TAG, "sweeping chat attachments failed (${e.javaClass.simpleName})")
+            }
+        }
 
         fun get(context: Context): AgentAttachments = instance ?: synchronized(this) {
             instance ?: AgentAttachments(File(context.applicationContext.noBackupFilesDir, DIR), ::decodedImageType)

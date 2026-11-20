@@ -135,14 +135,14 @@ class ProviderCatalogTest {
         assertEquals(false, bundled["gpt-4"])
         assertEquals(false, bundled["o3-mini"])
         assertEquals(true, bundled["gpt-6.1-sol"])
-        assertTrue(def("anthropic").bundled.all { it.vision })
+        assertTrue(def("anthropic").bundled.all { it.vision == true })
         // A server on the network says nothing: no images.
         val ollama = ProviderCatalog.parseModels(def(ProviderCatalog.OLLAMA), JSONObject().put("models", JSONArray().put(JSONObject().put("name", "llava"))).toString())
-        assertFalse(ollama.single().vision)
-        // Stored and read back; a list stored before says nothing, so no images.
+        assertEquals(false, ollama.single().vision)
+        // Stored and read back; a list stored before says nothing: unknown (AgentProviders.modelsOf reads the bundled entry).
         val stored = AgentStore.encodeModels(openrouter)
         assertEquals(openrouter, AgentStore.decodeModels(stored))
-        assertEquals(listOf(false), AgentStore.decodeModels("""[{"id":"a/vision"}]""").map { it.vision })
+        assertEquals(listOf<Boolean?>(null), AgentStore.decodeModels("""[{"id":"a/vision"}]""").map { it.vision })
     }
 
     @Test

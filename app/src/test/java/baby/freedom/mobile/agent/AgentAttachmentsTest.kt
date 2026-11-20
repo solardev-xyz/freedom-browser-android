@@ -75,8 +75,10 @@ class AgentAttachmentsTest {
         // No extension: the picker's type.
         assertEquals(AttachmentKind.Image to "image/jpeg", AttachmentRules.classify("IMG_2041", "image/jpeg"))
         assertEquals(AttachmentKind.Text to "text/plain", AttachmentRules.classify("README", "text/plain; charset=utf-8"))
-        // An extension Freedom doesn't read isn't overridden by a type.
-        assertNull(AttachmentRules.classify("setup.exe", "text/plain"))
+        // A dot that isn't an extension Freedom knows: the picker's type.
+        assertEquals(AttachmentKind.Pdf to "application/pdf", AttachmentRules.classify("Notes 20.11.2026", "application/pdf"))
+        assertEquals(AttachmentKind.Text to "text/plain", AttachmentRules.classify("report.v2", "text/markdown"))
+        assertNull(AttachmentRules.classify("setup.exe", "application/x-msdownload"))
         assertNull(AttachmentRules.classify("archive.zip", null))
         assertNull(AttachmentRules.classify("photo.heic", "image/heic"))
         assertNull(AttachmentRules.classify("noext", null))
@@ -189,7 +191,10 @@ class AgentAttachmentsTest {
             assertEquals(AttachmentException.Reason.NotFound, e.reason)
         }
         s.consume(chat, listOf(s.stageOk("d.txt", open = text("d")).id))
-        assertEquals(1, s.sweep(setOf(chat)))
+        // A folder changed since the chat list was read is a send under way: kept.
+        assertEquals(0, s.sweep(setOf(chat), before = chatDir(other).lastModified()))
+        assertTrue(chatDir(other).exists())
+        assertEquals(1, s.sweep(setOf(chat), before = Long.MAX_VALUE))
         assertFalse(chatDir(other).exists())
         assertTrue(chatDir(chat).exists())
         s.deleteAll()

@@ -474,6 +474,8 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
 
         // A publish staged in the cache (#118) by a run that ended mid-upload.
         lifecycleScope.launch(Dispatchers.IO) { Publisher.sweepStaging(this@MainActivity) }
+        // The agent's attachments (#601): a pick never sent, a gone chat's files.
+        lifecycleScope.launch(Dispatchers.IO) { baby.freedom.mobile.agent.AgentAttachments.atLaunch(this@MainActivity) }
 
         // The nodes follow the wallet's identity (#77): a wallet created,
         // imported or removed changes what the Swarm and Radicle nodes boot

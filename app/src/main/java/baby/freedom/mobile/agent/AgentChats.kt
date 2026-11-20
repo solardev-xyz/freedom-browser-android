@@ -132,7 +132,10 @@ internal class AgentChats(
                 // Files of a chat deleted while they couldn't be, or of a
                 // message whose save the app's stop cut off (#601). Before
                 // any send: one under way would look like an orphan.
-                attachments?.let { a -> a.sweep(dao.sessionIds().toSet()) }
+                attachments?.let { a ->
+                    val before = clock()
+                    a.sweep(dao.sessionIds().toSet(), before)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "sweeping chat attachments failed (${e.javaClass.simpleName})")
             } finally {
@@ -240,10 +243,20 @@ internal class AgentChats(
                     check = TurnCheck(ClassifierRun(stream, model.modelId), turn.userText).also { checks[turn.sessionId] = it }
                     // Desktop's hydration: only whole turns go back to the model,
                     // each naming the files sent with it (#601), never their images.
-                    val history = dao.turns(turn.sessionId)
+                    val whole = dao.turns(turn.sessionId)
                         .filter { it.position < turn.position && it.status == ChatStatus.COMPLETED && it.assistantText.isNotBlank() }
-                        .map { HistoryTurn(it.position, withAttachments(it), it.assistantText) }
+                    val history = whole.map { HistoryTurn(it.position, withAttachments(it), it.assistantText) }
                     val summary = session?.summary?.let { Summary(it, session.summaryThrough) }
+                    // The chat's files no replayed turn names (one whose turn
+                    // failed or was stopped, or is in the summary): named in
+                    // this one, so their ids stay in reach.
+                    val named = (whole.filter { summary == null || it.position >= summary.through } + turn)
+                        .flatMap { Attachment.parseList(it.attachments) }.map { it.id }.toSet()
+                    val earlier = try {
+                        attachments?.list(turn.sessionId).orEmpty().filter { it.id !in named }
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
                     val prompt = systemPromptFor(target)
                     val images = runCatching { takesImages(model) }.getOrDefault(false)
                     val userImages = if (images) imagesOf(turn) else emptyList()
@@ -263,7 +276,7 @@ internal class AgentChats(
                         images = images,
                     )
                     loop.run(
-                        history, summary, withAttachments(turn),
+                        history, summary, withAttachments(turn) + AttachmentTools.earlierNote(earlier),
                         onText = { text ->
                             latest = text
                             val now = clock()

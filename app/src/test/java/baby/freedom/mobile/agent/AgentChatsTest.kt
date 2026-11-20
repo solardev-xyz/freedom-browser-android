@@ -760,6 +760,34 @@ class AgentChatsTest {
     }
 
     @Test
+    fun `a file sent with a turn that failed is still named in the next`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        val chats = withAttachments(store)
+        route("/v1/chat/completions", { MockResponse().setResponseCode(500) }, { sse(chatText("ok"), chatStop) })
+        val id = chats.send(null, "read this", model, attachmentIds = listOf(store.stageText("a.txt", "a")))!!
+        assertEquals(ChatStatus.FAILED, awaitDone(id, chats).status)
+        val file = store.list(id).single()
+        chats.send(id, "try again", model)!!
+        awaitDone(id, chats)
+        val messages = bodies.last().getJSONArray("messages")
+        // The failed turn isn't replayed; its file is named in this one.
+        assertEquals(listOf("system", "user"), (0 until messages.length()).map { messages.getJSONObject(it).getString("role") })
+        val text = messages.getJSONObject(1).getString("content")
+        assertTrue(text, text.startsWith("try again\n\nFiles attached earlier in this conversation"))
+        assertTrue(text.contains(file.id))
+    }
+
+    @Test
+    fun `a model list stored before images were known takes them as the bundled entry says`() = runBlocking {
+        val model = connectHosted("anthropic", "claude-sonnet-5-5")
+        val connection = providers.state.first().connection(model.connectionId)!!
+        val old = AgentStore.decodeModels("""[{"id":"claude-sonnet-5-5"},{"id":"not-bundled"}]""")
+        val models = providers.modelsOf(connection, mapOf(connection.id to old))
+        assertEquals(listOf<Boolean?>(true, false), models.map { it.vision })
+    }
+
+    @Test
     fun `a model that takes images gets the message's images and render_page`() = runBlocking {
         val model = connectHosted("anthropic", "claude-sonnet-5-5")
         val store = attachmentStore()

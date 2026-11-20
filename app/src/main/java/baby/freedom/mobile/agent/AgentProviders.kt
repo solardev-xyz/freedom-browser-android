@@ -106,14 +106,24 @@ internal class AgentProviders(
     val state: Flow<AgentState> = store.state
     val models: Flow<Map<String, List<AgentModel>>> = store.models
 
-    /** The models [connection] offers: its discovered list, else the provider's bundled one. */
-    fun modelsOf(connection: AgentConnection, discovered: Map<String, List<AgentModel>>): List<AgentModel> =
-        discovered[connection.id] ?: ProviderCatalog.definition(connection.providerId)?.bundled.orEmpty()
+    /**
+     * The models [connection] offers: its discovered list, else the
+     * provider's bundled one. A discovered model stored before #601 takes
+     * images as its bundled entry says (none for a provider with no such
+     * list, until the list is fetched again).
+     */
+    fun modelsOf(connection: AgentConnection, discovered: Map<String, List<AgentModel>>): List<AgentModel> {
+        val bundled = ProviderCatalog.definition(connection.providerId)?.bundled.orEmpty()
+        val list = discovered[connection.id] ?: return bundled
+        if (list.all { it.vision != null }) return list
+        val known = bundled.associateBy { it.id }
+        return list.map { if (it.vision == null) it.copy(vision = known[it.id]?.vision == true) else it }
+    }
 
     /** Whether [ref]'s model takes images (#601), as its connection's model list says. */
     suspend fun takesImages(ref: ModelRef): Boolean {
         val connection = state.first().connection(ref.connectionId) ?: return false
-        return modelsOf(connection, models.first()).any { it.id == ref.modelId && it.vision }
+        return modelsOf(connection, models.first()).any { it.id == ref.modelId && it.vision == true }
     }
 
     /** The gate follows the stored switch from the first call on (under [lock]). */

@@ -303,13 +303,7 @@ internal class FileChooser(
      * those as the browser, so accepting one would let a picker or
      * camera app make us upload our own private data.
      */
-    private fun isOwnAuthority(authority: String): Boolean {
-        if (authority.equals(authority(context), ignoreCase = true)) return true
-        val info = runCatching {
-            context.packageManager.resolveContentProvider(authority, 0)
-        }.getOrNull()
-        return info?.packageName == context.packageName
-    }
+    private fun isOwnAuthority(authority: String): Boolean = isOwnProviderAuthority(context, authority)
 
     private fun captureResult(p: Pending, result: ActivityResult): Array<Uri>? =
         finishCapture(
@@ -634,6 +628,20 @@ internal fun <T : Any> pickedUris(
  * may carry a `userId@` prefix, which ContentResolver strips before
  * resolving the provider, so it is stripped here too.
  */
+/**
+ * True for an authority served by one of the browser's own content
+ * providers: our [FileProvider] or any provider a library merged into the
+ * manifest. Shared by a page's upload ([FileChooser]) and the agent's
+ * attachments (#601).
+ */
+internal fun isOwnProviderAuthority(context: Context, authority: String): Boolean {
+    if (authority.equals(FileChooser.authority(context), ignoreCase = true)) return true
+    val info = runCatching {
+        context.packageManager.resolveContentProvider(authority, 0)
+    }.getOrNull()
+    return info?.packageName == context.packageName
+}
+
 internal fun isUploadableUri(
     scheme: String?,
     authority: String?,
