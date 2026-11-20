@@ -371,16 +371,31 @@ sealed interface PermissionPlan {
  * the whole request: a `getUserMedia({audio, video})` with one half
  * blocked fails in the page regardless, and prompting for the other
  * half first would only be noise.
+ *
+ * [agentHeld]: Freedom Agent holds the tab that asks (#605), so no
+ * standing Allow answers, remembered or this run's: the user is asked
+ * about it, as `window.ethereum` (#577), Swarm and Radicle (#591) ask
+ * there. A block still denies, from either tier, so a remembered Allow
+ * can't hide a "Don't allow" or a dismissal embargo given since and
+ * leave a looping page prompting forever. No default, so a caller has
+ * to decide custody.
  */
 fun planFor(
     scope: PermissionScope,
     permissions: List<SiteCapability>,
     stored: Map<SiteCapability, PermissionDecision>,
     session: PermissionSession,
+    agentHeld: Boolean,
 ): PermissionPlan {
     val undecided = mutableListOf<SiteCapability>()
     for (p in permissions.distinct()) {
-        when (stored[p] ?: session.decisionFor(scope, p)) {
+        val decision = if (agentHeld) {
+            val both = listOfNotNull(stored[p], session.decisionFor(scope, p))
+            if (PermissionDecision.DENY in both) PermissionDecision.DENY else null
+        } else {
+            stored[p] ?: session.decisionFor(scope, p)
+        }
+        when (decision) {
             PermissionDecision.DENY -> return PermissionPlan.Deny
             PermissionDecision.ALLOW -> Unit
             null -> undecided += p
@@ -577,15 +592,20 @@ class PermissionSession(private val embargoes: Boolean = true) {
  * change, against the remembered decisions too ([stored]): an
  * "Allow + remember" moves from the session tier into the store, and a
  * re-check that only runs after that move must still see it.
+ *
+ * [agentHeld] as the prompt was planned ([planFor]): a held tab's
+ * prompt isn't taken down by an Allow given elsewhere, which wouldn't
+ * answer there anyway, only by a block.
  */
 suspend fun awaitPromptSuperseded(
     scope: PermissionScope,
     undecided: List<SiteCapability>,
     session: PermissionSession,
+    agentHeld: Boolean,
     stored: suspend () -> Map<SiteCapability, PermissionDecision>,
 ) {
     val asked = PermissionPlan.Ask(undecided)
-    session.version.first { planFor(scope, undecided, stored(), session) != asked }
+    session.version.first { planFor(scope, undecided, stored(), session, agentHeld) != asked }
 }
 
 /**

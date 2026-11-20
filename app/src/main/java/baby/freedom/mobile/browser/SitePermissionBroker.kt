@@ -8,6 +8,7 @@ import android.util.Log
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import androidx.core.content.ContextCompat
+import baby.freedom.mobile.agent.AgentTabs
 import baby.freedom.mobile.data.SitePermissionStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -42,6 +43,18 @@ internal suspend fun rememberedDecisions(
     }.toMap()
 
 /**
+ * Whether [answer], given on a prompt, goes into the session tier
+ * ([PermissionSession]) at all. From a tab Freedom Agent holds (#605)
+ * an Allow is for that one request: it would answer none of the held
+ * tab's later requests ([planFor]), and in the user's own tabs it would
+ * be a grant they never gave there. A block is kept as usual, so a
+ * "Don't allow" (and the dismissal embargo) still stops a page that
+ * asks again and again.
+ */
+internal fun heldAnswerRecords(answer: PromptAnswer, agentHeld: Boolean): Boolean =
+    !(agentHeld && answer is PromptAnswer.Allow)
+
+/**
  * A prompt waiting for the user: "[scope]'s top-level site wants to
  * [permissions]" — and, for a frame from another origin (#363), "… via
  * [scope]'s origin". Always in the name of the site the user is on: a
@@ -57,6 +70,13 @@ class PermissionPrompt internal constructor(
      * session only, so the prompt offers no "remember".
      */
     val private: Boolean = false,
+    /**
+     * Asked from a tab Freedom Agent holds (#605): no standing Allow
+     * answers there, so the prompt offers no "remember" and its Allow
+     * is for this request only ([heldAnswerRecords]). No default: a
+     * prompt has to say whose tab it's in.
+     */
+    val agentHeld: Boolean,
 ) {
     internal val answer = CompletableDeferred<PromptAnswer>()
 
@@ -695,6 +715,10 @@ class SitePermissionBroker private constructor(
         // before the store is, so one landing while that read (or the
         // prompt, or Android's dialog after it) is in flight is caught.
         var removals = 0
+        // Allowed by a standing decision, with no prompt: one the agent
+        // takes custody of while Android's dialog is awaited mustn't go
+        // through on it ([stillAllowed]).
+        var byRule = false
         val siteAllowed = lock.withLock {
             var allowed: Boolean? = null
             while (allowed == null) {
@@ -702,11 +726,21 @@ class SitePermissionBroker private constructor(
                 removals = tier.removalCount(scope, permissions)
                 val stored = storedDecisionsFor(tab, scope)
                 if (!live()) return@withLock false
-                allowed = when (val plan = planFor(scope, permissions, stored, tier)) {
+                // Custody after the decisions, at the moment of the
+                // decision (#605): a tab Freedom Agent holds gets no
+                // standing Allow, as `window.ethereum` (#577) does.
+                val held = AgentTabs.isHeld(tab.id)
+                allowed = when (val plan = planFor(scope, permissions, stored, tier, agentHeld = held)) {
                     PermissionPlan.Deny -> false
-                    PermissionPlan.Grant -> true
+                    PermissionPlan.Grant -> {
+                        byRule = true
+                        true
+                    }
                     // null: settled by another tab's answer meanwhile — re-plan.
-                    is PermissionPlan.Ask -> ask(tab, entry, scope, plan.undecided)
+                    is PermissionPlan.Ask -> {
+                        byRule = false
+                        ask(tab, entry, scope, plan.undecided, agentHeld = held)
+                    }
                 }
             }
             allowed
@@ -716,7 +750,8 @@ class SitePermissionBroker private constructor(
         // above still stands. Checked again once Android's own dialog is
         // done — a request waiting for its tab to come on screen can wait
         // a long time, and a removal made meanwhile must win.
-        fun stillAllowed() = live() && tier.removalCount(scope, permissions) == removals
+        fun stillAllowed() = live() && tier.removalCount(scope, permissions) == removals &&
+            !(byRule && AgentTabs.isHeld(tab.id))
         if (!siteAllowed || !stillAllowed()) return finish(false)
         finish(ensureAndroidPermissions(entry, permissions, ::stillAllowed) && stillAllowed())
     }
@@ -744,15 +779,16 @@ class SitePermissionBroker private constructor(
         entry: Pending,
         scope: PermissionScope,
         undecided: List<SiteCapability>,
+        agentHeld: Boolean,
     ): Boolean? {
-        val prompt = PermissionPrompt(scope, undecided, private = tab.private)
+        val prompt = PermissionPrompt(scope, undecided, private = tab.private, agentHeld = agentHeld)
         val tier = sessionFor(tab)
         entry.prompt = prompt
         tab.permissionPrompt = prompt
         val answer = try {
             coroutineScope {
                 val watcher = launch {
-                    awaitPromptSuperseded(scope, undecided, tier) { storedDecisionsFor(tab, scope) }
+                    awaitPromptSuperseded(scope, undecided, tier, agentHeld) { storedDecisionsFor(tab, scope) }
                     prompt.respond(PromptAnswer.Superseded)
                 }
                 try {
@@ -768,11 +804,13 @@ class SitePermissionBroker private constructor(
         return when (answer) {
             is PromptAnswer.Allow -> {
                 noteAllowedAgain(scope, undecided.filterIsInstance<SitePermission>(), tab.private)
-                record(tier, scope, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private)
+                if (heldAnswerRecords(answer, agentHeld)) {
+                    record(tier, scope, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private && !agentHeld)
+                }
                 true
             }
             is PromptAnswer.Block -> {
-                record(tier, scope, undecided, PermissionDecision.DENY, answer.remember && !tab.private)
+                record(tier, scope, undecided, PermissionDecision.DENY, answer.remember && !tab.private && !agentHeld)
                 false
             }
             PromptAnswer.Dismiss -> {

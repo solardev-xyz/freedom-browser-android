@@ -61,14 +61,14 @@ class SitePermissionsTest {
     @Test
     fun `undecided asks, stored allow grants, any block denies`() {
         val s = PermissionSession()
-        assertEquals(PermissionPlan.Ask(av), planFor(o, av, emptyMap(), s))
+        assertEquals(PermissionPlan.Ask(av), planFor(o, av, emptyMap(), s, agentHeld = false))
         assertEquals(
             PermissionPlan.Grant,
-            planFor(o, av, mapOf(SitePermission.CAMERA to PermissionDecision.ALLOW, SitePermission.MICROPHONE to PermissionDecision.ALLOW), s),
+            planFor(o, av, mapOf(SitePermission.CAMERA to PermissionDecision.ALLOW, SitePermission.MICROPHONE to PermissionDecision.ALLOW), s, agentHeld = false),
         )
         assertEquals(
             PermissionPlan.Deny,
-            planFor(o, av, mapOf(SitePermission.MICROPHONE to PermissionDecision.DENY), s),
+            planFor(o, av, mapOf(SitePermission.MICROPHONE to PermissionDecision.DENY), s, agentHeld = false),
         )
     }
 
@@ -77,7 +77,7 @@ class SitePermissionsTest {
         val s = PermissionSession()
         assertEquals(
             PermissionPlan.Ask(listOf(SitePermission.MICROPHONE)),
-            planFor(o, av, mapOf(SitePermission.CAMERA to PermissionDecision.ALLOW), s),
+            planFor(o, av, mapOf(SitePermission.CAMERA to PermissionDecision.ALLOW), s, agentHeld = false),
         )
     }
 
@@ -85,15 +85,15 @@ class SitePermissionsTest {
     fun `session decisions apply for the run, stored ones win`() {
         val s = PermissionSession()
         s.record(o, SitePermission.CAMERA, PermissionDecision.DENY, remembered = false)
-        assertEquals(PermissionPlan.Deny, planFor(o, listOf(SitePermission.CAMERA), emptyMap(), s))
+        assertEquals(PermissionPlan.Deny, planFor(o, listOf(SitePermission.CAMERA), emptyMap(), s, agentHeld = false))
         assertEquals(
             PermissionPlan.Grant,
-            planFor(o, listOf(SitePermission.CAMERA), mapOf(SitePermission.CAMERA to PermissionDecision.ALLOW), s),
+            planFor(o, listOf(SitePermission.CAMERA), mapOf(SitePermission.CAMERA to PermissionDecision.ALLOW), s, agentHeld = false),
         )
         // Other origins are untouched.
         assertEquals(
             PermissionPlan.Ask(listOf(SitePermission.CAMERA)),
-            planFor(PermissionScope("https://other.example"), listOf(SitePermission.CAMERA), emptyMap(), s),
+            planFor(PermissionScope("https://other.example"), listOf(SitePermission.CAMERA), emptyMap(), s, agentHeld = false),
         )
     }
 
@@ -103,7 +103,7 @@ class SitePermissionsTest {
         repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD * 2) {
             assertFalse(s.dismiss(o, SitePermission.CAMERA))
         }
-        assertEquals(PermissionPlan.Ask(listOf(SitePermission.CAMERA)), planFor(o, listOf(SitePermission.CAMERA), emptyMap(), s))
+        assertEquals(PermissionPlan.Ask(listOf(SitePermission.CAMERA)), planFor(o, listOf(SitePermission.CAMERA), emptyMap(), s, agentHeld = false))
         assertEquals(emptyList<SitePermissionEntry>(), s.entries())
     }
 
@@ -118,10 +118,10 @@ class SitePermissionsTest {
         s.revoke(o, loc)
         assertFalse(s.dismiss(o, loc))
         assertFalse(s.dismiss(o, loc))
-        assertEquals(PermissionPlan.Ask(listOf(loc)), planFor(o, listOf(loc), emptyMap(), s))
+        assertEquals(PermissionPlan.Ask(listOf(loc)), planFor(o, listOf(loc), emptyMap(), s, agentHeld = false))
         // …and the third consecutive one blocks without asking.
         assertTrue(s.dismiss(o, loc))
-        assertEquals(PermissionPlan.Deny, planFor(o, listOf(loc), emptyMap(), s))
+        assertEquals(PermissionPlan.Deny, planFor(o, listOf(loc), emptyMap(), s, agentHeld = false))
         val entry = s.entries().single()
         assertTrue(entry.embargoed)
         assertFalse(entry.remembered)
@@ -133,7 +133,7 @@ class SitePermissionsTest {
         val s = PermissionSession()
         repeat(3) { s.dismiss(o, SitePermission.CAMERA) }
         s.revoke(o, SitePermission.CAMERA)
-        assertEquals(PermissionPlan.Ask(listOf(SitePermission.CAMERA)), planFor(o, listOf(SitePermission.CAMERA), emptyMap(), s))
+        assertEquals(PermissionPlan.Ask(listOf(SitePermission.CAMERA)), planFor(o, listOf(SitePermission.CAMERA), emptyMap(), s, agentHeld = false))
         assertTrue(s.entries().isEmpty())
     }
 
@@ -327,7 +327,7 @@ class SitePermissionsTest {
         val mic = SitePermission.MICROPHONE
         val session = PermissionSession()
         val wait = async(start = CoroutineStart.UNDISPATCHED) {
-            awaitPromptSuperseded(o, listOf(cam, mic), session) { emptyMap() }
+            awaitPromptSuperseded(o, listOf(cam, mic), session, agentHeld = false) { emptyMap() }
         }
         // Unrelated changes leave the prompt up: another origin, another
         // permission, a dismissal short of the embargo.
@@ -348,7 +348,7 @@ class SitePermissionsTest {
         val session = PermissionSession()
         var stored = emptyMap<SiteCapability, PermissionDecision>()
         val wait = async(start = CoroutineStart.UNDISPATCHED) {
-            awaitPromptSuperseded(o, listOf(cam), session) { stored }
+            awaitPromptSuperseded(o, listOf(cam), session, agentHeld = false) { stored }
         }
         // "Allow + remember": the write lands, then the session entry is
         // dropped — all before the watcher gets to run.
@@ -359,12 +359,70 @@ class SitePermissionsTest {
     }
 
     @Test
+    fun `no remembered or this-run Allow answers camera, microphone or location in a tab Freedom Agent holds (#605)`() {
+        val o = PermissionScope("https://example.com")
+        val cam = SitePermission.CAMERA
+        val mic = SitePermission.MICROPHONE
+        val loc = SitePermission.LOCATION
+        val stored = mapOf<SiteCapability, PermissionDecision>(cam to PermissionDecision.ALLOW, mic to PermissionDecision.ALLOW)
+        val s = PermissionSession()
+        s.record(o, loc, PermissionDecision.ALLOW, remembered = false)
+        // The user's own tab: both tiers' Allows answer with no prompt.
+        assertEquals(PermissionPlan.Grant, planFor(o, listOf(cam, mic), stored, s, agentHeld = false))
+        assertEquals(PermissionPlan.Grant, planFor(o, listOf(loc), stored, s, agentHeld = false))
+        // Held: every one of them is asked about.
+        assertEquals(PermissionPlan.Ask(listOf(cam, mic)), planFor(o, listOf(cam, mic), stored, s, agentHeld = true))
+        assertEquals(PermissionPlan.Ask(listOf(loc)), planFor(o, listOf(loc), stored, s, agentHeld = true))
+    }
+
+    @Test
+    fun `in a held tab a block in either tier denies, under a remembered Allow too (#605)`() {
+        val o = PermissionScope("https://example.com")
+        val cam = SitePermission.CAMERA
+        val remembered = mapOf<SiteCapability, PermissionDecision>(cam to PermissionDecision.ALLOW)
+        // A held tab's "Don't allow" goes into the session tier, under a remembered Allow.
+        val blocked = PermissionSession()
+        blocked.record(o, cam, PermissionDecision.DENY, remembered = false)
+        assertEquals(PermissionPlan.Deny, planFor(o, listOf(cam), remembered, blocked, agentHeld = true))
+        // The user's own tab keeps its remembered Allow.
+        assertEquals(PermissionPlan.Grant, planFor(o, listOf(cam), remembered, blocked, agentHeld = false))
+        // Three dismissals in the held tab embargo it, so a looping page stops prompting.
+        val dismissed = PermissionSession()
+        repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD) { dismissed.dismiss(o, cam) }
+        assertEquals(PermissionPlan.Deny, planFor(o, listOf(cam), remembered, dismissed, agentHeld = true))
+        // A remembered block denies held, as anywhere.
+        assertEquals(
+            PermissionPlan.Deny,
+            planFor(o, listOf(cam), mapOf(cam to PermissionDecision.DENY), PermissionSession(), agentHeld = true),
+        )
+    }
+
+    @Test
+    fun `a held tab's prompt isn't taken down by an Allow given elsewhere, only by a block (#605)`() = runBlocking {
+        val o = PermissionScope("https://example.com")
+        val cam = SitePermission.CAMERA
+        val session = PermissionSession()
+        val stored = mapOf<SiteCapability, PermissionDecision>(cam to PermissionDecision.ALLOW)
+        val wait = async(start = CoroutineStart.UNDISPATCHED) {
+            awaitPromptSuperseded(o, listOf(cam), session, agentHeld = true) { stored }
+        }
+        // Already remembered as allowed, and allowed again in another tab:
+        // neither answers here, so the prompt stays up (no re-plan loop).
+        session.record(o, cam, PermissionDecision.ALLOW, remembered = false)
+        repeat(3) { yield() }
+        assertFalse(wait.isCompleted)
+        // A "Don't allow" from the user's own tab does settle it.
+        session.record(o, cam, PermissionDecision.DENY, remembered = false)
+        withTimeout(1_000) { wait.await() }
+    }
+
+    @Test
     fun `an embargo reached elsewhere supersedes the prompt`() = runBlocking {
         val o = PermissionScope("https://example.com")
         val loc = SitePermission.LOCATION
         val session = PermissionSession()
         val wait = async(start = CoroutineStart.UNDISPATCHED) {
-            awaitPromptSuperseded(o, listOf(loc), session) { emptyMap() }
+            awaitPromptSuperseded(o, listOf(loc), session, agentHeld = false) { emptyMap() }
         }
         repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD) { session.dismiss(o, loc) }
         withTimeout(1_000) { wait.await() }
@@ -690,7 +748,7 @@ class SitePermissionsTest {
         tier.removingFromStore(site, SitePermission.CAMERA)
         val stored = tier.readWithoutStoreRemovals(site) { store }
         // A request made now is asked, not granted by the stale Allow…
-        assertTrue(planFor(site, asked, stored, tier) is PermissionPlan.Ask)
+        assertTrue(planFor(site, asked, stored, tier, agentHeld = false) is PermissionPlan.Ask)
         // …and nothing else is hidden: not another permission, not another site.
         assertEquals(PermissionDecision.ALLOW, stored[SitePermission.LOCATION])
         assertEquals(store, tier.readWithoutStoreRemovals(PermissionScope("https://b.example")) { store })
@@ -772,18 +830,18 @@ class SitePermissionsTest {
         val session = PermissionSession()
         assertEquals(
             PermissionPlan.Ask(listOf(SitePermission.MIDI)),
-            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session),
+            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session, agentHeld = false),
         )
         assertEquals(
             PermissionPlan.Grant,
-            planFor(origin, listOf(SitePermission.MIDI), mapOf(SitePermission.MIDI to PermissionDecision.ALLOW), session),
+            planFor(origin, listOf(SitePermission.MIDI), mapOf(SitePermission.MIDI to PermissionDecision.ALLOW), session, agentHeld = false),
         )
         repeat(PermissionSession.DISMISS_EMBARGO_THRESHOLD) { session.dismiss(origin, SitePermission.MIDI) }
-        assertEquals(PermissionPlan.Deny, planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session))
+        assertEquals(PermissionPlan.Deny, planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session, agentHeld = false))
         session.revoke(origin, SitePermission.MIDI)
         assertEquals(
             PermissionPlan.Ask(listOf(SitePermission.MIDI)),
-            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session),
+            planFor(origin, listOf(SitePermission.MIDI), emptyMap(), session, agentHeld = false),
         )
     }
 

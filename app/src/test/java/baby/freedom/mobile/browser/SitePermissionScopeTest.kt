@@ -45,7 +45,7 @@ class SitePermissionScopeTest {
         permissions: List<SiteCapability> = camera,
     ): PermissionPlan? {
         val scope = permissionScopeFor(requesting, page) ?: return null
-        return planFor(scope, permissions, rememberedDecisions(store, scope), session)
+        return planFor(scope, permissions, rememberedDecisions(store, scope), session, agentHeld = false)
     }
 
     @Test
@@ -310,7 +310,7 @@ class SitePermissionScopeTest {
             embeddedPermissionHint(framed),
         )
         // The title is the top-level site.
-        assertEquals(evil, PermissionPrompt(framed, camera).scope.top)
+        assertEquals(evil, PermissionPrompt(framed, camera, agentHeld = false).scope.top)
     }
 
     @Test

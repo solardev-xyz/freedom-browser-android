@@ -71,20 +71,25 @@ internal enum class PermissionChoice {
 /**
  * The choices the prompt offers, top to bottom. A private tab has nothing
  * to remember a decision in (#86) — its answer lasts the private session
- * whichever button it is — so there "every visit" isn't offered.
+ * whichever button it is — so there "every visit" isn't offered. Nor in
+ * a tab Freedom Agent holds (#605): no standing Allow answers there, and
+ * its Allow is for that one request ([heldAnswerRecords]).
  */
-internal fun permissionChoices(private: Boolean): List<PermissionChoice> =
-    if (private) {
+internal fun permissionChoices(private: Boolean, agentHeld: Boolean): List<PermissionChoice> =
+    if (private || agentHeld) {
         listOf(PermissionChoice.ALLOW_THIS_SESSION, PermissionChoice.DONT_ALLOW)
     } else {
         listOf(PermissionChoice.ALLOW_THIS_SESSION, PermissionChoice.ALLOW_EVERY_VISIT, PermissionChoice.DONT_ALLOW)
     }
 
-/** [choice] as the broker's answer; nothing is remembered from a private tab. */
-internal fun permissionAnswer(choice: PermissionChoice, private: Boolean): PromptAnswer = when (choice) {
+/**
+ * [choice] as the broker's answer; nothing is remembered from a private
+ * tab, or from a tab Freedom Agent holds (#605).
+ */
+internal fun permissionAnswer(choice: PermissionChoice, private: Boolean, agentHeld: Boolean): PromptAnswer = when (choice) {
     PermissionChoice.ALLOW_THIS_SESSION -> PromptAnswer.Allow(remember = false)
-    PermissionChoice.ALLOW_EVERY_VISIT -> PromptAnswer.Allow(remember = !private)
-    PermissionChoice.DONT_ALLOW -> PromptAnswer.Block(remember = !private)
+    PermissionChoice.ALLOW_EVERY_VISIT -> PromptAnswer.Allow(remember = !private && !agentHeld)
+    PermissionChoice.DONT_ALLOW -> PromptAnswer.Block(remember = !private && !agentHeld)
 }
 
 /**
@@ -94,7 +99,9 @@ internal fun permissionAnswer(choice: PermissionChoice, private: Boolean): Promp
  * is closed, on every page of the site, so it isn't called "while
  * visiting"), "Allow every visit"
  * (remembered) and "Don't allow" (a remembered block); in a private tab
- * just "Allow" and "Don't allow", both lasting the private session. A
+ * just "Allow" and "Don't allow", both lasting the private session; in
+ * a tab Freedom Agent holds (#605) "Allow this time" (this request only)
+ * and "Don't allow" (this session). A
  * standing grant is always its own, explicit tap: no box decides it.
  * Back or a tap outside is a dismissal — a deny-once that counts towards
  * the three-dismissals embargo.
@@ -156,6 +163,9 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                         // only (#86): there's nothing to remember it in.
                         if (prompt.private) {
                             R.string.library_permission_prompt_private
+                        } else if (prompt.agentHeld) {
+                            // #605: what an Allow here does, and doesn't.
+                            R.string.library_permission_prompt_agent_held
                         } else {
                             R.string.library_permission_prompt_session_hint
                         },
@@ -171,14 +181,14 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
         // them in no clear order.
         confirmButton = {
             Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
-                for (choice in permissionChoices(prompt.private)) {
+                for (choice in permissionChoices(prompt.private, prompt.agentHeld)) {
                     TextButton(
                         enabled = armed,
-                        onClick = { if (guard.accepts()) prompt.respond(permissionAnswer(choice, prompt.private)) },
+                        onClick = { if (guard.accepts()) prompt.respond(permissionAnswer(choice, prompt.private, prompt.agentHeld)) },
                         modifier = Modifier.heightIn(min = 48.dp).protectedPress(tap),
                     ) {
                         Text(
-                            stringResource(permissionChoiceLabel(choice, prompt.private)),
+                            stringResource(permissionChoiceLabel(choice, prompt.private, prompt.agentHeld)),
                             textAlign = TextAlign.End,
                         )
                     }
@@ -214,11 +224,15 @@ internal fun embeddedPermissionHint(scope: PermissionScope): String? =
         null
     }
 
-private fun permissionChoiceLabel(choice: PermissionChoice, private: Boolean): Int = when (choice) {
+internal fun permissionChoiceLabel(choice: PermissionChoice, private: Boolean, agentHeld: Boolean): Int = when (choice) {
     // In a private tab this is the only Allow, and "this session" would
     // mislead: it lasts the private session (the note above says so).
-    PermissionChoice.ALLOW_THIS_SESSION ->
-        if (private) R.string.common_allow else R.string.library_permission_prompt_allow_session
+    // In a held tab it lasts this one request (#605).
+    PermissionChoice.ALLOW_THIS_SESSION -> when {
+        private -> R.string.common_allow
+        agentHeld -> R.string.library_permission_prompt_allow_once
+        else -> R.string.library_permission_prompt_allow_session
+    }
     PermissionChoice.ALLOW_EVERY_VISIT -> R.string.library_permission_prompt_allow_always
     PermissionChoice.DONT_ALLOW -> R.string.library_permission_prompt_dont_allow
 }
