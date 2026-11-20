@@ -477,6 +477,9 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     val blockedPopups = BlockedPopups()
 
+    /** "Open without gateway" (#537): the page on screen's native version, and "always"'s bookkeeping. */
+    internal val gatewayOffer = GatewayOfferTab()
+
     /**
      * The `window.radicle` consent prompt this tab is waiting on (#124),
      * or null. Owned by [RadicleProviders]; shown like [permissionPrompt].
@@ -1198,6 +1201,8 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         blankOpenerOrigin = null
         userNavigated()
         cancelPendingProbe()
+        // A gateway answer still out never redirects over Home (#537 R1-F1).
+        gatewayOffer.loadStarted()
         capsuleCollapse.expand()
         override = null
         nameTrust = null

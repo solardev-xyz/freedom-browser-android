@@ -44,6 +44,7 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
@@ -120,6 +121,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
@@ -1069,6 +1071,8 @@ fun BrowserScreen(
             BackAction.History -> {
                 // A navigation of its own (#94, see [BrowserState.loadGeneration]).
                 state.beginLoad()
+                // No gateway answer redirects over it (#537 R1-F1).
+                state.gatewayOffer.historyStep()
                 state.loadUrl(HISTORY_BACK_JS)
             }
             BackAction.Home -> {
@@ -1085,6 +1089,7 @@ fun BrowserScreen(
     val goForward: () -> Unit = {
         if (state.canGoForward) {
             state.beginLoad()
+            state.gatewayOffer.historyStep()
             state.loadUrl(HISTORY_FORWARD_JS)
         }
     }
@@ -1467,6 +1472,9 @@ fun BrowserScreen(
         if (source == SubmitSource.User) SwarmProviders.allowPrompts(target.id)
         // Nor is it a load a restore put back over its page (#185 R4-F1).
         if (source == SubmitSource.User) target.userNavigated()
+        // Nor the Back "always open without gateway" lets rest on a
+        // gateway page (#537): asking for it again redirects again.
+        if (source == SubmitSource.User) target.gatewayOffer.userNavigated()
         // And the load it schedules is theirs: its redirects may end in
         // an app link without a tap on a page (#173). Handed to that
         // load's own `loadUrl` below, never left for whichever load
@@ -1478,6 +1486,9 @@ fun BrowserScreen(
         // stale probe decide the navigation.
         target.cancelPendingProbe()
         target.beginLoad()
+        // A gateway lookup still out for the page being left answers for
+        // nothing now (#537).
+        target.gatewayOffer.loadStarted()
 
         val trimmed = raw.trim()
         // Let the user type the friendly form and re-submit to reload.
@@ -2045,6 +2056,65 @@ fun BrowserScreen(
             tabs.requestOpenInNewTab = null
             tabs.requestSearchInNewTab = null
         }
+    }
+
+    // "Open without gateway" (#537): every tab's gateway lookups, not just
+    // the active one's, so a page that loaded in the background has its
+    // offer when the user switches to it. "Always open without gateway"
+    // sends the tab on through [submit] as the page's own navigation
+    // ([SubmitSource.Renderer]): it may start with no tap at all, so it
+    // earns none of what a user's address does.
+    LaunchedEffect(tabs) {
+        snapshotFlow { tabs.tabs.mapNotNull { tab -> tab.gatewayOffer.pending?.let { tab to it } } }
+            .collect { pending ->
+                for ((tab, lookup) in pending) {
+                    if (!tab.gatewayOffer.take(lookup)) continue
+                    // One per tab: the next commit or load cancels it.
+                    tab.gatewayOffer.running = scope.launch {
+                        try {
+                            val shape = lookup.shape
+                            val direct = GatewayOffer.offerWithoutLookup(shape)
+                            val result = if (direct != null || shape.ensName == null) {
+                                null
+                            } else {
+                                GatewayOffer.answerOf { ensResolver.resolveContenthash(shape.ensName, tab.private) }
+                            }
+                            val found = direct ?: GatewayOffer.offerFor(shape, result)
+                            // A Swarm CID names its content itself; a name's
+                            // answer must have been cross-checked (#96).
+                            val verified = direct != null || (result as? EnsResult.Ok)?.trust?.verified == true
+                            // Not runCatching: a cancellation here is the
+                            // screen's, for [interrupted] below (R2-M2).
+                            val always = try {
+                                NodeSettings.get(context).openWithoutGateway.first()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                false
+                            }
+                            val verdict = tab.gatewayOffer.answered(lookup, found, verified, always)
+                            if (verdict is GatewayOfferTab.Verdict.AutoOpen && tab in tabs.tabs) {
+                                submit(tab, verdict.destination, SubmitSource.Renderer)
+                                // Its probe, if it waits on one before it
+                                // loads: a link the page sets out on
+                                // meanwhile cancels it (R3-M1).
+                                tab.gatewayOffer.autoOpenProbing(
+                                    lookup,
+                                    tab.pendingProbeJob.takeIf { tab.pendingProbeSource == SubmitSource.Renderer },
+                                )
+                            }
+                        } catch (e: CancellationException) {
+                            // Cancelled with this screen (an Activity
+                            // recreation) rather than by a later load:
+                            // the next screen runs it (R1-M6). Only if
+                            // this job was: another cancellation is no
+                            // reason to run it again at once (R3-M3).
+                            if (!isActive) tab.gatewayOffer.interrupted(lookup)
+                            throw e
+                        }
+                    }
+                }
+            }
     }
 
     // A link, share or search from another app (#268, see
@@ -2927,8 +2997,63 @@ fun BrowserScreen(
                     .onSizeChanged { popupNoticeHeightPx = it.height },
             )
         }
-        val snackbarLift = ipfsLift + if (popupNoticeShown) {
+        val popupLift = ipfsLift + if (popupNoticeShown) {
             with(density) { popupNoticeHeightPx.toDp() } + IpfsStatusGap * 2
+        } else {
+            0.dp
+        }
+
+        // "Open without gateway" (#537): the active tab's gateway page has
+        // a native version. Over the page at the address bar's end, under
+        // the same conditions as the pop-up notice; folded away with the
+        // capsule while the page scrolls.
+        val gatewayOffer = state.gatewayOffer.offer
+        val gatewayDestination = gatewayOffer?.let { state.gatewayOffer.destination() }
+        val gatewayPillShown = gatewayDestination != null && !isHomeTab && !capsuleCollapsed &&
+            !addressFocused && !overlayShown && tabs.fullscreen == null
+        var gatewayPillHeightPx by remember { mutableIntStateOf(0) }
+        AnimatedVisibility(
+            visible = gatewayPillShown,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            // Centred and capped like the capsule, the pill at its end:
+            // the address bar's right end on a wide screen too (R1-M3).
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(chromeInsets)
+                .padding(horizontal = CapsuleSideMargin)
+                .animatedPadding(
+                    bottom = { capsuleSlot() + CapsuleBottomMargin + IpfsStatusGap + popupLift },
+                )
+                .widthIn(max = CHROME_MAX_WIDTH)
+                .fillMaxWidth()
+                .wrapContentWidth(Alignment.End),
+        ) {
+            // Keep drawing the last offer while it fades out.
+            var shown by remember { mutableStateOf<Pair<String, String>?>(null) }
+            if (gatewayOffer != null && gatewayDestination != null) {
+                shown = gatewayOffer.protocol to gatewayDestination
+            }
+            shown?.let { (protocol, destination) ->
+                GatewayOfferPill(
+                    protocol = protocol,
+                    destination = destination,
+                    // Each showing's own, not the offer's value: an
+                    // equal offer (a reload, another tab) re-arms (R2-M4).
+                    offerKey = state.gatewayOffer.shown,
+                    onOpen = {
+                        // The page's current address, read at the tap.
+                        state.gatewayOffer.destination()?.let { submit(state, it) }
+                    },
+                    // Gone for this page: it may cover the page's own
+                    // controls, and folds away only on scroll (R1-M4).
+                    onDismiss = { state.gatewayOffer.dismissed() },
+                    modifier = Modifier.onSizeChanged { gatewayPillHeightPx = it.height },
+                )
+            }
+        }
+        val snackbarLift = popupLift + if (gatewayPillShown) {
+            with(density) { gatewayPillHeightPx.toDp() } + IpfsStatusGap * 2
         } else {
             0.dp
         }

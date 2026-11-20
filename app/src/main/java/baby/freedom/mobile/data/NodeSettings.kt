@@ -833,7 +833,29 @@ class NodeSettings private constructor(
         store.edit { it[Keys.ASK_WHERE_TO_SAVE] = enabled }
     }
 
+    /**
+     * *Always open without gateway* (#537): a page on an ENS/Swarm gateway
+     * (`vitalik.eth.limo`, `<name>.bzz.link`, …) that has a native version
+     * opens that `ipfs://` / `bzz://` address instead
+     * ([baby.freedom.mobile.browser.GatewayOffer]). Not every such page:
+     * one whose name's answer wasn't cross-checked, one the user reached
+     * or pressed the chrome's Back / Forward on, or stopped, one the page
+     * itself stepped back onto after a redirect, and one whose link or
+     * form ended without a commit only get the pill over the page, as
+     * with this off ([baby.freedom.mobile.browser.GatewayOfferTab.answered]
+     * has the full rule).
+     * Off by default, like desktop's `openWithoutGateway`.
+     */
+    val openWithoutGateway: Flow<Boolean> = store.data.map { prefs ->
+        prefs[Keys.OPEN_WITHOUT_GATEWAY] ?: false
+    }
+
+    suspend fun setOpenWithoutGateway(enabled: Boolean) {
+        store.edit { it[Keys.OPEN_WITHOUT_GATEWAY] = enabled }
+    }
+
     private object Keys {
+        val OPEN_WITHOUT_GATEWAY = booleanPreferencesKey("open_without_gateway")
         val ASK_WHERE_TO_SAVE = booleanPreferencesKey("ask_where_to_save")
         /** The engine id *Search suggestions* was turned on for (see [searchSuggestions]). */
         val SEARCH_SUGGESTIONS_ENGINE = stringPreferencesKey("search_suggestions_engine")

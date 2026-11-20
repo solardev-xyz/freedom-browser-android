@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Key
@@ -95,6 +96,8 @@ private val ROW_ORDER: String get() = Strings.get(R.string.names_order_title)
 private val ORDER_HELP: String get() = Strings.get(R.string.names_order_help)
 private val ROW_CCIP: String get() = Strings.get(R.string.names_ccip_title)
 private val CCIP_HELP: String get() = Strings.get(R.string.names_ccip_help)
+private val ROW_GATEWAY: String get() = Strings.get(R.string.names_open_without_gateway_title)
+private val GATEWAY_HELP: String get() = Strings.get(R.string.names_open_without_gateway_help)
 
 private val SUB_CUSTOM: String get() = Strings.get(R.string.names_custom_title)
 private val CUSTOM_HELP: String get() = Strings.get(R.string.names_custom_help)
@@ -129,7 +132,7 @@ private fun sourceLine(source: EnsRpcConfig.Source): String = when (source.kind)
     else -> "${source.label} · ${source.url}"
 }
 
-internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
+internal fun ensSectionRows(config: EnsRpcConfig, openWithoutGateway: Boolean = false) = listOf(
     settingsRow("about", ENS_ABOUT),
     settingsRow(
         "order",
@@ -148,6 +151,7 @@ internal fun ensSectionRows(config: EnsRpcConfig) = listOf(
         Strings.get(R.string.names_search_verified),
     ),
     settingsRow("ccip", ROW_CCIP, onOff(config.ccipRead), CCIP_HELP, "EIP-3668"),
+    settingsRow("gateway", ROW_GATEWAY, onOff(openWithoutGateway), GATEWAY_HELP, "eth.limo", "eth.link", "bzz.link"),
 )
 
 /**
@@ -199,6 +203,7 @@ internal fun NameResolutionSection(
     visible: Set<Any>,
     config: EnsRpcConfig,
     settings: NodeSettings,
+    openWithoutGateway: Boolean = false,
     query: String = "",
 ) {
     val scope = rememberCoroutineScope()
@@ -262,6 +267,18 @@ internal fun NameResolutionSection(
                 checked = config.ccipRead,
                 enabled = true,
                 onCheckedChange = { on -> scope.launch { settings.setEnsCcipRead(on) } },
+            )
+        }
+        // "Always open without gateway" (#537): see [GatewayOffer].
+        if ("gateway" in visible) {
+            if (listOf("about", "order", "colibri", "ccip").any { it in visible }) Spacer(Modifier.height(12.dp))
+            SwitchRow(
+                icon = Icons.Filled.Hub,
+                title = ROW_GATEWAY,
+                help = GATEWAY_HELP,
+                checked = openWithoutGateway,
+                enabled = true,
+                onCheckedChange = { on -> scope.launch { settings.setOpenWithoutGateway(on) } },
             )
         }
     }

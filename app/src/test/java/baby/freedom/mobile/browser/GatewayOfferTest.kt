@@ -1,0 +1,638 @@
+package baby.freedom.mobile.browser
+
+import baby.freedom.mobile.ens.Base32
+import baby.freedom.mobile.ens.EnsInput
+import baby.freedom.mobile.ens.EnsResult
+import baby.freedom.mobile.ens.EnsTrust
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+
+/**
+ * "Open without gateway" (#537): the gateway URL parsing desktop's
+ * `src/main/gateway-offer.test.js` covers (the same cases, the same
+ * CIDs — bee-js's `Reference.toCid` output), and one tab's offer and
+ * "always" bookkeeping ([GatewayOfferTab]).
+ */
+class GatewayOfferTest {
+    private val hex = "ab".repeat(32)
+
+    // `new Reference('ab'.repeat(32)).toCid('manifest' | 'feed')` in bee-js.
+    private val manifestCid = "bah5acgzavov2xk5lvov2xk5lvov2xk5lvov2xk5lvov2xk5lvov2xk5lvovq"
+    private val feedCid = "bah5qcgzavov2xk5lvov2xk5lvov2xk5lvov2xk5lvov2xk5lvov2xk5lvovq"
+
+    private val ipfsOk = EnsResult.Ok("vitalik.eth", "ipfs", "ipfs://bafy", "bafy", EnsTrust(verified = true))
+    private val bzzOk = EnsResult.Ok("vitalik.eth", "bzz", "bzz://$hex", hex, EnsTrust(verified = true))
+
+    private fun cidWithByte(index: Int, byte: Int): String {
+        val bytes = byteArrayOf(0x01, 0xfa.toByte(), 0x01, 0x1b, 0x20) + ByteArray(32) { 0xab.toByte() }
+        bytes[index] = byte.toByte()
+        return "b" + Base32.encodeLower(bytes)
+    }
+
+    // --- decodeSwarmCid ---
+
+    @Test
+    fun `a manifest and a feed CID decode to the hex reference`() {
+        assertEquals(hex, GatewayOffer.decodeSwarmCid(manifestCid))
+        assertEquals(hex, GatewayOffer.decodeSwarmCid(feedCid))
+        assertEquals(
+            "c2a1c1a3b2ffa1d5d5ff2d2bc2b71ecb5ff4fa22d0dc7a3fd46546c3bc3c1b8b",
+            GatewayOffer.decodeSwarmCid("bah5acgzaykq4di5s76q5lvp7fuv4fny6znp7j6rc2dohup6umvdmhpb4dofq"),
+        )
+    }
+
+    @Test
+    fun `a CID one character short or long is refused`() {
+        assertNull(GatewayOffer.decodeSwarmCid(manifestCid.dropLast(1)))
+        assertNull(GatewayOffer.decodeSwarmCid(manifestCid + "a"))
+        assertNull(GatewayOffer.decodeSwarmCid(manifestCid + "aaaaaaaa"))
+    }
+
+    @Test
+    fun `a CID with non-canonical trailing bits is refused`() {
+        // The last character carries 2 padding bits; `q` has them clear.
+        assertNull(GatewayOffer.decodeSwarmCid(manifestCid.dropLast(1) + "r"))
+    }
+
+    @Test
+    fun `a CID with another multihash header is refused`() {
+        assertEquals(manifestCid, cidWithByte(0, 0x01)) // the helper builds the real one
+        assertNull(GatewayOffer.decodeSwarmCid(cidWithByte(2, 0x12)))
+        assertNull(GatewayOffer.decodeSwarmCid(cidWithByte(3, 0x12)))
+        assertNull(GatewayOffer.decodeSwarmCid(cidWithByte(4, 0x21)))
+    }
+
+    @Test
+    fun `anything not a bah5 base32 label is refused`() {
+        for (label in listOf(
+            "", hex, manifestCid.uppercase(), "bah5", "bah5zzzz", manifestCid.dropLast(1) + "1",
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        )) {
+            assertNull(label, GatewayOffer.decodeSwarmCid(label))
+        }
+    }
+
+    // --- parse ---
+
+    @Test
+    fun `eth limo and eth link hosts are the ENS name`() {
+        val cases = mapOf(
+            "https://vitalik.eth.limo/" to ("eth.limo" to "vitalik.eth"),
+            "https://vitalik.eth.link/" to ("eth.link" to "vitalik.eth"),
+            "http://vitalik.eth.limo/" to ("eth.limo" to "vitalik.eth"),
+            "https://app.uniswap.eth.limo/swap" to ("eth.limo" to "app.uniswap.eth"),
+            "https://VITALIK.ETH.LIMO/" to ("eth.limo" to "vitalik.eth"),
+            "https://vitalik.eth.limo./" to ("eth.limo" to "vitalik.eth"),
+            "https://vitalik.eth.limo" to ("eth.limo" to "vitalik.eth"),
+            "https://vitalik.eth.limo?x#y" to ("eth.limo" to "vitalik.eth"),
+        )
+        for ((url, expected) in cases) {
+            val shape = GatewayOffer.parse(url)
+            assertEquals(url, expected.first, shape?.gateway)
+            assertEquals(url, expected.second, shape?.ensName)
+            assertNull(url, shape?.requireProtocol)
+            assertNull(url, shape?.reference)
+        }
+    }
+
+    @Test
+    fun `a punycode host is looked up under its Unicode name`() {
+        assertEquals("münchen.eth", GatewayOffer.parse("https://xn--mnchen-3ya.eth.limo/")?.ensName)
+    }
+
+    @Test
+    fun `name bzz link is name eth, and only as Swarm content`() {
+        assertEquals(
+            GatewayOffer.Shape("bzz.link", "vitalik.bzz.link", ensName = "vitalik.eth", requireProtocol = "bzz"),
+            GatewayOffer.parse("https://vitalik.bzz.link/"),
+        )
+        assertEquals("app.swarm.eth", GatewayOffer.parse("https://app.swarm.bzz.link/")?.ensName)
+        // The gateway appends `.eth` itself.
+        assertEquals("vitalik.eth.eth", GatewayOffer.parse("https://vitalik.eth.bzz.link/")?.ensName)
+    }
+
+    @Test
+    fun `cid bzz link carries the reference`() {
+        assertEquals(
+            GatewayOffer.Shape("bzz.link", "$manifestCid.bzz.link", reference = hex),
+            GatewayOffer.parse("https://$manifestCid.bzz.link/"),
+        )
+        assertEquals(hex, GatewayOffer.parse("https://$feedCid.bzz.link/")?.reference)
+    }
+
+    @Test
+    fun `an invalid bah5 label is no offer, never a name`() {
+        assertNull(GatewayOffer.parse("https://${manifestCid.dropLast(1)}.bzz.link/"))
+        assertNull(GatewayOffer.parse("https://bah5abc.bzz.link/"))
+        // 64 hex characters can't be a DNS label.
+        assertNull(GatewayOffer.parse("https://$hex.bzz.link/"))
+    }
+
+    @Test
+    fun `lookalikes and other URLs are not gateway URLs`() {
+        for (url in listOf(
+            "https://eth.limo/", "https://eth.link/", "https://bzz.link/", "https://limo/",
+            "https://example.com/", "https://vitalik.eth/", "https://vitaliketh.limo/",
+            "https://vitalik-eth.limo/", "https://vitalik.eth.limo.evil.example/",
+            "https://vitalik.eth.limo.example/", "https://vitalik.eth.lime/",
+            "https://vitalik.eth.limo:8443/", "https://vitalik.eth.limo:443/",
+            "https://user:pw@vitalik.eth.limo/", "https://evil.example@vitalik.eth.limo/",
+            "https://evil.example\\@vitalik.eth.limo/", "ftp://vitalik.eth.limo/",
+            "ipfs://vitalik.eth/", "bzz://vitalik.eth/", "vitalik.eth.limo", "not a url", "",
+            "https://.eth.limo/", "https://a..b.eth.limo/", "https://${"a".repeat(64)}.eth.limo/",
+            "https://bzz.link/forbidden?hash=$manifestCid",
+        )) {
+            assertNull(url, GatewayOffer.parse(url))
+        }
+        assertNull(GatewayOffer.parse(null))
+    }
+
+    // --- offers and destinations ---
+
+    @Test
+    fun `the destination keeps path, query and fragment`() {
+        val shape = GatewayOffer.parse("https://vitalik.eth.limo/a/b.html?x=1&y=2#top")!!
+        val offer = GatewayOffer.offerFor(shape, ipfsOk)!!
+        assertEquals("ipfs://vitalik.eth", offer.target)
+        assertEquals("ipfs://vitalik.eth/a/b.html?x=1&y=2#top", offer.destinationFor("https://vitalik.eth.limo/a/b.html?x=1&y=2#top"))
+        assertEquals("ipfs://vitalik.eth/", offer.destinationFor("https://vitalik.eth.limo"))
+        assertEquals("ipfs://vitalik.eth/?q#f", offer.destinationFor("https://vitalik.eth.limo?q#f"))
+        // Another host: the tab moved on.
+        assertNull(offer.destinationFor("https://other.eth.limo/"))
+    }
+
+    @Test
+    fun `destinations are what the address bar parses as that name on that network`() {
+        for ((url, result) in listOf(
+            "https://vitalik.eth.limo/blog/?p=1#c" to ipfsOk,
+            "https://vitalik.eth.link/" to ipfsOk.copy(protocol = "ipns"),
+            "https://vitalik.bzz.link/x" to bzzOk,
+            "https://xn--mnchen-3ya.eth.limo/a" to ipfsOk,
+        )) {
+            val shape = GatewayOffer.parse(url)!!
+            val offer = GatewayOffer.offerFor(shape, result)!!
+            val destination = offer.destinationFor(url)!!
+            val parsed = EnsInput.parseConstrained(destination)!!
+            assertEquals(url, shape.ensName, parsed.name)
+            assertEquals(url, offer.protocol, parsed.protocol)
+        }
+    }
+
+    @Test
+    fun `a CID is offered without a lookup`() {
+        val url = "https://$manifestCid.bzz.link/index.html?q#f"
+        val offer = GatewayOffer.offerWithoutLookup(GatewayOffer.parse(url)!!)!!
+        assertEquals("bzz", offer.protocol)
+        assertEquals("bzz://$hex/index.html?q#f", offer.destinationFor(url))
+        assertNull(GatewayOffer.offerWithoutLookup(GatewayOffer.parse("https://vitalik.eth.limo/")!!))
+    }
+
+    @Test
+    fun `only a settled answer on a native network is offered`() {
+        val limo = GatewayOffer.parse("https://vitalik.eth.limo/")!!
+        val bzzLink = GatewayOffer.parse("https://vitalik.bzz.link/")!!
+        assertEquals("bzz://vitalik.eth", GatewayOffer.offerFor(limo, bzzOk)?.target)
+        assertEquals("bzz://vitalik.eth", GatewayOffer.offerFor(bzzLink, bzzOk)?.target)
+        // `<name>.bzz.link` is Swarm content or nothing.
+        assertNull(GatewayOffer.offerFor(bzzLink, ipfsOk))
+        assertNull(GatewayOffer.offerFor(limo, ipfsOk.copy(protocol = "https", redirect = true)))
+        assertNull(GatewayOffer.offerFor(limo, ipfsOk.copy(protocol = "http")))
+        assertNull(GatewayOffer.offerFor(limo, EnsResult.NotFound("vitalik.eth", "no contenthash", trust = EnsTrust(verified = true))))
+        assertNull(GatewayOffer.offerFor(limo, null))
+    }
+
+    @Test
+    fun `a cancellation the resolver raises is no answer, the caller's own propagates`() = runTest {
+        // R3-M3: only the lookup job's own cancellation re-queues it.
+        assertNull(GatewayOffer.answerOf { throw CancellationException("the resolver's own") })
+        assertNull(GatewayOffer.answerOf { throw IllegalStateException("no RPC") })
+        assertEquals(ipfsOk, GatewayOffer.answerOf { ipfsOk })
+        val started = CompletableDeferred<Unit>()
+        val job = launch {
+            GatewayOffer.answerOf {
+                started.complete(Unit)
+                awaitCancellation()
+            }
+            fail("a cancelled caller must not get an answer")
+        }
+        started.await()
+        job.cancelAndJoin()
+        assertTrue(job.isCancelled)
+    }
+
+    // --- one tab ---
+
+    private val limoUrl = "https://vitalik.eth.limo/blog"
+    private val limoOffer = GatewayOffer.offerFor(GatewayOffer.parse(limoUrl)!!, ipfsOk)!!
+
+    @Test
+    fun `a gateway page gets its offer, which follows same-document moves`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertTrue(tab.take(lookup))
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false))
+        assertEquals("ipfs://vitalik.eth/blog", tab.destination())
+        tab.located("https://vitalik.eth.limo/about#me")
+        assertEquals("ipfs://vitalik.eth/about#me", tab.destination())
+    }
+
+    @Test
+    fun `a page that is no gateway's asks for nothing and clears the offer`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false)
+        assertNull(tab.committed("https://example.com/", traversal = false))
+        assertNull(tab.offer)
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a late answer for an earlier page, or over a new load, does nothing`() {
+        val tab = GatewayOfferTab()
+        val first = tab.committed(limoUrl, traversal = false)!!
+        tab.committed("https://example.com/", traversal = false)
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(first, limoOffer, verified = true, alwaysOpen = true))
+        assertNull(tab.offer)
+
+        val second = tab.committed(limoUrl, traversal = false)!!
+        tab.loadStarted() // the user typed an address meanwhile
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(second, limoOffer, verified = true, alwaysOpen = true))
+    }
+
+    @Test
+    fun `no offer, no pill`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, null, verified = false, alwaysOpen = true))
+        assertNull(tab.offer)
+    }
+
+    @Test
+    fun `a lookup is taken once`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertEquals(lookup, tab.pending)
+        assertTrue(tab.take(lookup))
+        assertEquals(false, tab.take(lookup))
+    }
+
+    @Test
+    fun `always opens a fresh gateway navigation natively`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertEquals(
+            GatewayOfferTab.Verdict.AutoOpen("ipfs://vitalik.eth/blog"),
+            tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true),
+        )
+    }
+
+    @Test
+    fun `always never opens an unverified answer by itself, only offers it`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = false, alwaysOpen = true))
+    }
+
+    @Test
+    fun `always leaves a Back or Forward onto a gateway page alone`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = true)!!
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+    }
+
+    /** Commit [url] and answer its lookup with [offer] as "always" would. */
+    private fun GatewayOfferTab.visit(url: String, traversal: Boolean = false, offer: GatewayOffer.Offer? = limoOffer) =
+        committed(url, traversal)?.let { answered(it, offer, verified = true, alwaysOpen = true) }
+
+    @Test
+    fun `a page's own Back onto the page always left stays there, once`() {
+        val tab = GatewayOfferTab()
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+        assertNull(tab.visit("https://bafy.ipfs.example/")) // the native page
+        // `history.back()`, which the chrome doesn't see as a step.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit(limoUrl))
+        // The next visit is redirected again.
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `once the tab moves on, the same gateway page is redirected again`() {
+        val tab = GatewayOfferTab()
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+        tab.visit("https://bafy.ipfs.example/")
+        tab.visit("https://example.com/")
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `the user asking for the gateway page again is redirected again`() {
+        val tab = GatewayOfferTab()
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+        tab.visit("https://bafy.ipfs.example/")
+        tab.userNavigated()
+        tab.loadStarted()
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `a link the page follows while always looks the name up is not overridden`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.linkFollowed() // `shouldOverrideUrlLoading`: the user tapped a link
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertNull(tab.offer)
+        // It commits: nothing comes back.
+        assertNull(tab.committed("https://example.com/", traversal = false))
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a link the page follows while always's redirect waits on its probe cancels that probe`() {
+        // R3-M1: the probe's load would stop the link the user tapped.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertTrue(tab.take(lookup))
+        assertTrue(tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true) is GatewayOfferTab.Verdict.AutoOpen)
+        // As the screen does it: the redirect's submit starts a load, then
+        // reports the probe that load waits on.
+        tab.loadStarted()
+        val probe = Job()
+        tab.autoOpenProbing(lookup, probe)
+        assertFalse(tab.linkFollowed(Job())) // some other probe: not ours to cancel
+        tab.loadStarted()
+        tab.autoOpenProbing(lookup, probe)
+        assertTrue(tab.linkFollowed(probe))
+        assertFalse(tab.linkFollowed(probe)) // once
+        // The link became a download: the page gets its lookup back, and
+        // its answer counts.
+        tab.stayed()
+        val back = tab.pending!!
+        assertEquals(lookup.url, back.url)
+        assertTrue(tab.take(back))
+        assertTrue(tab.answered(back, limoOffer, verified = true, alwaysOpen = true) is GatewayOfferTab.Verdict.AutoOpen)
+        // The link commits instead: the gateway page is no Back target
+        // of a redirect that never happened, so it is redirected again.
+        val tab2 = GatewayOfferTab()
+        val l2 = tab2.committed(limoUrl, traversal = false)!!
+        tab2.answered(l2, limoOffer, verified = true, alwaysOpen = true)
+        tab2.loadStarted()
+        tab2.autoOpenProbing(l2, probe)
+        assertTrue(tab2.formPosted(probe))
+        assertNull(tab2.committed("https://example.com/", traversal = false))
+        assertTrue(tab2.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `a probe the redirect no longer waits on is not cancelled by a link`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        tab.loadStarted()
+        val probe = Job()
+        tab.autoOpenProbing(lookup, probe)
+        tab.loadStarted() // the user's own submit took over
+        assertFalse(tab.linkFollowed(probe))
+        val again = tab.committed(limoUrl, traversal = false)!!
+        tab.answered(again, limoOffer, verified = true, alwaysOpen = true)
+        tab.loadStarted()
+        tab.autoOpenProbing(again, null) // loaded at once: nothing to cancel
+        assertFalse(tab.linkFollowed(null))
+    }
+
+    @Test
+    fun `always opens the route the page pushed before the answer came`() {
+        // R3-M2: a hash router's `/#/swap`, pushed before the lookup answered.
+        val tab = GatewayOfferTab()
+        val root = "https://vitalik.eth.limo/"
+        val offer = GatewayOffer.offerFor(GatewayOffer.parse(root)!!, ipfsOk)!!
+        val lookup = tab.committed(root, traversal = false)!!
+        tab.located("https://vitalik.eth.limo/#/swap")
+        assertEquals(
+            GatewayOfferTab.Verdict.AutoOpen("ipfs://vitalik.eth/#/swap"),
+            tab.answered(lookup, offer, verified = true, alwaysOpen = true),
+        )
+        assertNull(tab.visit("https://bafy.ipfs.example/"))
+        // The page's own `history.back()` lands on the route: it stays.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit("https://vitalik.eth.limo/#/swap", offer = offer))
+    }
+
+    @Test
+    fun `a link that never commits gives the page its lookup back`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        assertTrue(tab.take(lookup))
+        tab.linkFollowed()
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        tab.stayed() // the link became a download, or another app's
+        assertEquals(lookup, tab.pending)
+        assertTrue(tab.take(lookup))
+        assertEquals(
+            GatewayOfferTab.Verdict.AutoOpen("ipfs://vitalik.eth/blog"),
+            tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true),
+        )
+    }
+
+    @Test
+    fun `a link answered with a 204 ends at its finish, not the page's own`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.linkFollowed()
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false)
+        tab.loadFinished(limoUrl) // the page on screen's own load event
+        assertNull(tab.pending)
+        tab.loadFinished("https://vitalik.eth.limo/empty") // the 204
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        // Inferred from a finish: the pill, never a redirect.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertEquals("ipfs://vitalik.eth/blog", tab.destination())
+    }
+
+    @Test
+    fun `a superseded link's finish never lets a redirect over the next link`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.linkFollowed() // link A
+        tab.linkFollowed() // link B, a second tap
+        tab.loadFinished("https://vitalik.eth.limo/a") // A's synthetic finish
+        assertTrue(tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true) !is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `the chrome's Back is never redirected over`() {
+        // R1-F1: Back pressed right after the gateway page committed,
+        // its lookup answering before the step commits.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.historyStep()
+        // The pill only, over the page still on screen; the step's commit clears it.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertNull(tab.committed("https://example.com/", traversal = true))
+        assertNull(tab.offer)
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a Back that stays in the document keeps the pill, with no redirect`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.historyStep()
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        tab.located("https://vitalik.eth.limo/") // a pushState entry
+        assertEquals("ipfs://vitalik.eth/", tab.destination())
+    }
+
+    @Test
+    fun `a Back that steps only a frame still gets its pill`() {
+        // R2-M1: no main-frame callback follows a Back that steps an
+        // iframe, so nothing must wait for one.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.historyStep()
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        assertEquals("ipfs://vitalik.eth/blog", tab.destination())
+    }
+
+    @Test
+    fun `a Back over a link on its way gives the page its lookup back, pill only`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.linkFollowed()
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        tab.historyStep()
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+    }
+
+    @Test
+    fun `a form the page posts is never redirected over`() {
+        // R2-M5: a POST never reaches shouldOverrideUrlLoading.
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.formPosted()
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        // Its commit drops the held answer.
+        assertNull(tab.committed("https://example.com/thanks", traversal = false))
+        assertNull(tab.offer)
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `a form that ends with no commit gives the page its pill back`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.formPosted()
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true)
+        tab.loadFinished("https://vitalik.eth.limo/post-204")
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+    }
+
+    @Test
+    fun `each showing of an equal offer gets its own number`() {
+        // R2-M4: the pill's tap guard re-arms on it, not on the offer's value.
+        val tab = GatewayOfferTab()
+        val other = GatewayOfferTab()
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit(limoUrl, traversal = true))
+        val first = tab.shown
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit(limoUrl, traversal = true)) // a reload
+        assertEquals(tab.offer, limoOffer)
+        assertTrue(tab.shown != first)
+        assertEquals(GatewayOfferTab.Verdict.Show, other.visit(limoUrl, traversal = true))
+        assertTrue(other.shown != tab.shown)
+    }
+
+    @Test
+    fun `the user's Stop keeps the page, with its pill and no redirect`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.stopped()
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        // The next commit is redirected as usual.
+        assertTrue(tab.visit(limoUrl) is GatewayOfferTab.Verdict.AutoOpen)
+    }
+
+    @Test
+    fun `a closed pill stays closed for the page, through pushState`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false)
+        tab.dismissed()
+        assertNull(tab.offer)
+        tab.located("https://vitalik.eth.limo/other")
+        assertNull(tab.destination())
+        // A late second answer for the same document doesn't bring it back.
+        assertEquals(GatewayOfferTab.Verdict.Nothing, tab.answered(lookup, limoOffer, verified = true, alwaysOpen = true))
+        // The next document gets its own.
+        assertEquals(GatewayOfferTab.Verdict.Show, tab.visit(limoUrl, traversal = true))
+    }
+
+    @Test
+    fun `a lookup cut off with the screen is run again, a superseded one is not`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.take(lookup)
+        tab.interrupted(lookup) // an Activity recreation
+        assertEquals(lookup, tab.pending)
+        tab.take(lookup)
+        tab.loadStarted()
+        tab.interrupted(lookup)
+        assertNull(tab.pending)
+    }
+
+    @Test
+    fun `the pill's destination is state, so it follows pushState`() {
+        val tab = GatewayOfferTab()
+        val lookup = tab.committed(limoUrl, traversal = false)!!
+        tab.answered(lookup, limoOffer, verified = true, alwaysOpen = false)
+        val reads = mutableListOf<String?>()
+        val snapshot = androidx.compose.runtime.snapshots.Snapshot.takeSnapshot(readObserver = { reads += it.toString() })
+        try {
+            snapshot.enter { tab.destination() }
+        } finally {
+            snapshot.dispose()
+        }
+        // Both the offer and the URL were read through snapshot state.
+        assertEquals(2, reads.size)
+    }
+
+    @Test
+    fun `a superseded lookup is cancelled`() {
+        val tab = GatewayOfferTab()
+        val first = kotlinx.coroutines.Job()
+        tab.running = first
+        tab.committed("https://other.eth.limo/", traversal = false)
+        assertTrue(first.isCancelled)
+        val second = kotlinx.coroutines.Job()
+        tab.running = second
+        tab.loadStarted()
+        assertTrue(second.isCancelled)
+        val third = kotlinx.coroutines.Job()
+        tab.running = third
+        tab.running = kotlinx.coroutines.Job()
+        assertTrue(third.isCancelled)
+    }
+}
