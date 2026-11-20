@@ -605,6 +605,31 @@ class SubscriptionProvidersTest {
     }
 
     @Test
+    fun `turning AI off or signing out still stops the model list a sign-in fetches`() = runBlocking {
+        for (end in listOf<suspend () -> Unit>(
+            { providers.setEnabled(false) },
+            { providers.remove(SubscriptionAuth.CODEX) },
+        )) {
+            codexServer()
+            val release = CountDownLatch(1)
+            val list = routes["/openai-codex/codex/models"]!!
+            routes["/openai-codex/codex/models"] = {
+                release.await(5, TimeUnit.SECONDS)
+                list()
+            }
+            seen.clear()
+            assertTrue(providers.setEnabled(true))
+            assertEquals(LoginState.Done(SubscriptionAuth.CODEX), signIn(SubscriptionAuth.CODEX))
+            withTimeout(5_000) { while (requests("/openai-codex/codex/models").isEmpty()) delay(20) }
+            end()
+            release.countDown()
+            delay(1_000)
+            assertNull(providers.models.first()[SubscriptionAuth.CODEX])
+            providers.dismissLogin(SubscriptionAuth.CODEX)
+        }
+    }
+
+    @Test
     fun `a sign-in this phone can't read any more asks to sign in again, not for a key`() = runBlocking {
         codexServer()
         assertTrue(providers.setEnabled(true))

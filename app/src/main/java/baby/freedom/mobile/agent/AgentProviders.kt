@@ -645,8 +645,8 @@ internal class AgentProviders(
         // Renewed meanwhile by another caller: that one's token is the answer.
         val wasRefused = refused != null && refused == credential.access
         if (!wasRefused && !credential.due(wallClock())) return@withLock Credential.Ready(credential)
-        // Finished and saved even if the caller is cancelled (Stop, AI off
-        // ending a sign-in's model fetch): a ChatGPT refresh token is used
+        // Finished and saved even if the caller is cancelled (Stop, or AI
+        // off cancelling a model fetch's request): a ChatGPT refresh token is used
         // up once the server has it, so an answer dropped halfway would end
         // the sign-in. Each auth request is bounded (30 s). One block, so
         // the answer can't be dropped between the request and its save.

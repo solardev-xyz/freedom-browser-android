@@ -31,7 +31,7 @@ internal object SignInPage {
     fun open(context: Context, url: String): Boolean {
         val pm = context.packageManager
         val view = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
-        val browsers = pm.queryIntentActivities(view, PackageManager.MATCH_DEFAULT_ONLY)
+        val browsers = pm.queryIntentActivities(view, PackageManager.MATCH_DEFAULT_ONLY or PackageManager.MATCH_ALL)
             .mapNotNull { it.activityInfo?.packageName }
         val default = pm.resolveActivity(view, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
         val withService = pm.queryIntentServices(Intent(SERVICE_ACTION), 0).mapNotNull { it.serviceInfo?.packageName }
