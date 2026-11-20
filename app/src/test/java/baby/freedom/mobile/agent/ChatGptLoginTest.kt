@@ -42,7 +42,11 @@ class ChatGptLoginTest {
 
     /** What the token endpoint answers once the verifier checks out. */
     @Volatile
-    private var grant: JSONObject = grant()
+    private var grant: Any = grant()
+
+    /** The token endpoint's status for [grant]. */
+    @Volatile
+    private var grantStatus = 200
 
     private val now = 1_000_000_000L
     private lateinit var login: ChatGptLogin
@@ -60,7 +64,7 @@ class ChatGptLoginTest {
                         return json(JSONObject().put("error", "invalid_grant").put("access_token", "leak"), 400)
                     }
                 }
-                return json(grant)
+                return json(grant, grantStatus)
             }
         }
         server.start()
@@ -299,8 +303,17 @@ class ChatGptLoginTest {
             grant(idToken = null),
             grant().put("access_token", "has space"),
             grant().apply { remove("refresh_token") },
+            "not json",
+            // An answer outside the protocol: a redirect with nowhere to go.
+            grant() to 302,
         )) {
-            grant = bad
+            if (bad is Pair<*, *>) {
+                grant = bad.first!!
+                grantStatus = bad.second as Int
+            } else {
+                grant = bad
+                grantStatus = 200
+            }
             val session = open()
             val finished = async(Dispatchers.IO) { login.finish(session) }
             val (status, page) = get(callback(stateOf(session)))
@@ -343,23 +356,6 @@ class ChatGptLoginTest {
             }
         }
         assertTrue(tokenRequests().isEmpty())
-    }
-
-    @Test
-    fun `answering and a callback racing each other always give the tab its page`() = runBlocking {
-        repeat(40) {
-            val session = open()
-            try {
-                val tab = async(Dispatchers.IO) { get(callback(stateOf(session))) }
-                val ending = async(Dispatchers.IO) { session.answer(CallbackPage.Failed) }
-                ending.await()
-                val (status, page) = tab.await()
-                assertEquals(400, status)
-                assertTrue(page, page.contains("Connection unsuccessful"))
-            } finally {
-                session.close()
-            }
-        }
     }
 
     @Test

@@ -183,8 +183,12 @@ internal class ChatGptLogin(
         }
 
         private fun release(socket: Socket) {
-            synchronized(connections) { connections.remove(socket) }
+            untrack(socket)
             closeQuietly(socket)
+        }
+
+        private fun untrack(socket: Socket) {
+            synchronized(connections) { connections.remove(socket) }
         }
 
         private fun handle(socket: Socket) {
@@ -212,13 +216,18 @@ internal class ChatGptLogin(
             // The first callback that matches is the one; the browser's tab
             // waits for its page until the sign-in has ended, or gets it now
             // if it already has.
-            val (taken, page) = synchronized(answerLock) { arrival.complete(Arrival(callback, socket)) to answered }
+            val (taken, page) = synchronized(answerLock) {
+                val taken = arrival.complete(Arrival(callback, socket))
+                // Owed its page now: [close]'s sweep mustn't cut it off mid-answer.
+                if (taken && answered != null) untrack(socket)
+                taken to answered
+            }
             if (!taken) {
                 respond(socket, 409, CallbackPage.Invalid)
                 release(socket)
             } else if (page != null) {
                 respond(socket, statusOf(page), page)
-                release(socket)
+                closeQuietly(socket)
             }
         }
 
@@ -286,11 +295,11 @@ internal class ChatGptLogin(
                 if (answered != null) return
                 answered = page
                 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-                if (arrival.isCompleted) arrival.getCompleted().socket else null
+                (if (arrival.isCompleted) arrival.getCompleted().socket else null)?.also(::untrack)
             }
             if (socket != null) {
                 respond(socket, statusOf(page), page)
-                release(socket)
+                closeQuietly(socket)
             }
         }
 
@@ -301,7 +310,11 @@ internal class ChatGptLogin(
             answer(CallbackPage.Cancelled)
             if (!closed.compareAndSet(false, true)) return
             closeQuietly(server)
-            val open = synchronized(connections) { connections.toList().also { connections.clear() } }
+            // Under [answerLock]: a socket owed its page has been untracked
+            // by then, and is answered rather than cut off.
+            val open = synchronized(answerLock) {
+                synchronized(connections) { connections.toList().also { connections.clear() } }
+            }
             open.forEach(::closeQuietly)
             // Closing a socket another thread is blocked accepting on returns
             // before the port is let go: that thread finishes the close. Wait
@@ -389,12 +402,19 @@ internal class ChatGptLogin(
         unusable: LoginFailure,
     ): SubscriptionAuth.Finished {
         val body = when (reply) {
-            is AuthReply.Failed -> return SubscriptionAuth.Finished.Failed(reply.failure)
+            // The only BadReply here is Freedom's own token address failing to parse: not OpenAI's answer.
+            is AuthReply.Failed -> return SubscriptionAuth.Finished.Failed(
+                if (reply.failure == LoginFailure.BadReply && unusable == LoginFailure.BadGrant) LoginFailure.Unexpected else reply.failure,
+            )
             is AuthReply.Answer -> {
                 if (reply.code in 400..499 && reply.code != 429) {
                     return SubscriptionAuth.Finished.Failed(LoginFailure.NotAccepted)
                 }
-                if (reply.code !in 200..299) return SubscriptionAuth.Finished.Failed(AuthHttp.failureOf(reply.code))
+                if (reply.code !in 200..299) {
+                    // An answer OpenAI gave (a redirect, say) that isn't one the protocol has.
+                    val failure = AuthHttp.failureOf(reply.code)
+                    return SubscriptionAuth.Finished.Failed(if (failure == LoginFailure.BadReply) unusable else failure)
+                }
                 reply.json() ?: return SubscriptionAuth.Finished.Failed(unusable)
             }
         }
