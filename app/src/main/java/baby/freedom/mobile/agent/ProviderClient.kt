@@ -337,15 +337,18 @@ internal class ProviderClient(
 
     /**
      * Whether a refusal's body says the model takes no tools. Reads at
-     * most [REFUSAL_PEEK_BYTES]; the text goes no further than this
-     * check. Anything going wrong while reading is "no": the server
-     * still answered with its status.
+     * most [REFUSAL_PEEK_BYTES], within [REFUSAL_PEEK_MS] (not the
+     * stream's idle deadline: a refusal's body stalling holds the turn no
+     * longer than that); the text goes no further than this check.
+     * Anything going wrong while reading, running out of time included,
+     * is "no": the server still answered with its status.
      */
     private fun saysNoTools(response: Response): Boolean = try {
         val source = response.body?.source()
         if (source == null) {
             false
         } else {
+            source.timeout().deadline(REFUSAL_PEEK_MS, TimeUnit.MILLISECONDS)
             val buffer = Buffer()
             while (buffer.size < REFUSAL_PEEK_BYTES) {
                 if (source.read(buffer, REFUSAL_PEEK_BYTES - buffer.size) == -1L) break
@@ -399,6 +402,9 @@ internal class ProviderClient(
 
         /** How much of a 400's or 404's body is checked for a no-tools refusal. */
         const val REFUSAL_PEEK_BYTES = 4_096L
+
+        /** How long reading those bytes may take, all told. */
+        const val REFUSAL_PEEK_MS = 5_000L
 
         /**
          * Test connection to a server on the network: a local server may
@@ -538,10 +544,17 @@ internal class ProviderClient(
 
 /**
  * Whether a refusal's [text] says the model takes no tools: Ollama's
- * "… does not support tools" (400) and OpenRouter's "No endpoints found
- * that support tool use" (404). Matched on the refusal's own wording, not
- * on "tools" alone, which a body quoting the request would contain.
+ * "… does not support tools" (400), OpenRouter's "No endpoints found
+ * that support tool use" (404) and Venice's "tools is not supported by
+ * this model" (400), plus the same two shapes for "tool calling" and
+ * "function calling". Matched on the refusal's own wording, not on
+ * "tools" alone, which a body quoting the request would contain.
  */
 internal fun refusesTools(text: String): Boolean = NO_TOOLS.containsMatchIn(text)
 
-private val NO_TOOLS = Regex("\\bsupports?\\s+(tools\\b|tool\\s+use\\b)", RegexOption.IGNORE_CASE)
+private const val TOOLS_WORDING = "(?:tools?\\s+use|tools?\\s+calling|function\\s+calling|tools)"
+
+private val NO_TOOLS = Regex(
+    "\\bsupports?\\s+$TOOLS_WORDING\\b|\\b(?:$TOOLS_WORDING|tool)\\s+(?:is|are)\\s+not\\s+supported\\b",
+    RegexOption.IGNORE_CASE,
+)
