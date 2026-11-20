@@ -470,9 +470,9 @@
       ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].indexOf(inputType) < 0;
     var out = { role: info.role, tag: tag, name: info.name.slice(0, 300) };
     if (tag === 'input' && inputType === 'file') out.effect = 'file_upload';
-    else if (tag === 'a' && element.hasAttribute('download') && activates) out.effect = 'file_download';
+    else if ((tag === 'a' || tag === 'area') && element.hasAttribute('download') && activates) out.effect = 'file_download';
     else if ((submitsForm && activates) || implicitSubmit) out.effect = 'form_submission';
-    if (tag === 'a' && element.hasAttribute('href') && activates) out.target = String(element.href).slice(0, 4096);
+    if ((tag === 'a' || tag === 'area') && element.hasAttribute('href') && activates) out.target = String(element.href).slice(0, 4096);
     else if (out.effect === 'form_submission') out.target = String(element.form.action).slice(0, 4096);
     out.sensitive = inputType === 'password' || /password|one-time-code/i.test(element.getAttribute('autocomplete') || '');
     return out;

@@ -176,6 +176,23 @@ class AgentClassifiersTest {
     }
 
     @Test
+    fun `a reply that reads like the app's fallback is still the model's judgment`() = runBlocking {
+        val mimic = """{"kind":"uncertain","confidence":0,"summary":"${InteractionIntentClassifier.uncertain().summary}",""" +
+            """"uncertainties":["${ClassifierReason.INVALID_JSON}"]}"""
+        val model = FakeModel(says(mimic))
+        val c = InteractionIntentClassifier.classify(ClassifierRun(model, "m"), input, "x")
+        assertEquals(1, model.requests.size)
+        assertFalse(InteractionIntentClassifier.isFallback(c))
+        assertTrue(InteractionIntentClassifier.isFallback(InteractionIntentClassifier.uncertain(ClassifierReason.INVALID_JSON)))
+        val effectMimic = """{"effect":"unknown","confidence":0,"summary":"${EffectClassifier.unknown().summary}",""" +
+            """"resources":[],"uncertainties":["${ClassifierReason.INVALID_JSON}"]}"""
+        val effectModel = FakeModel(says(effectMimic))
+        val e = EffectClassifier.classify(ClassifierRun(effectModel, "m"), "node", JSONObject().put("op", "x"))
+        assertEquals(1, effectModel.requests.size)
+        assertEquals(null, e.fallbackReason)
+    }
+
+    @Test
     fun `provider errors, tool calls and cut-off replies fail closed without a retry`() = runBlocking {
         val outcomes = listOf<Pair<StepOutcome, String>>(
             StepOutcome.Failed(ChatError.ServerError) to ClassifierReason.PROVIDER_ERROR,

@@ -102,6 +102,10 @@ class BrowserToolsTest {
             return canFront
         }
 
+        /** Whether the tab is already on screen, for a step the mode lets run without a card. */
+        var shown: () -> Boolean = { true }
+        override fun onScreen(id: Long) = shown()
+
         /** Run between a tap's touch down and its lift. */
         var duringTap: () -> Unit = {}
         val cancelledTaps = ArrayList<Pair<Float, Float>>()
@@ -645,6 +649,49 @@ class BrowserToolsTest {
         host.onFront = {}
         assertFalse(tools.call("browser_navigate", JSONObject().put("url", "https://example.org/")).isError)
         assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `a relaxed mode never takes the screen without the user's tap`() = runBlocking {
+        for (mode in listOf(ApprovalMode.AllowWebsiteInteractions, ApprovalMode.SensitiveActions)) {
+            host.tabs.clear()
+            AgentTabs.clear()
+            asked.clear()
+            host.fronted.clear()
+            host.taps.clear()
+            host.add(page(1))
+            AgentTabs.hold(1, "chat", private = false)
+            val tools = toolset(approvals = Approvals(mode, ordinary))
+            // Another tab, a panel or the chat is on screen: switching asks, saying why.
+            host.shown = { false }
+            answer = { ApprovalOutcome.Declined }
+            assertEquals("$mode", "USER_DECLINED", tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).code())
+            assertEquals(ApprovalCheck.NeedsScreen, asked.single().check)
+            assertTrue(host.fronted.isEmpty())
+            assertTrue(host.taps.isEmpty())
+            // The user's OK switches to it, as any approved card does.
+            asked.clear()
+            answer = { ApprovalOutcome.Approved }
+            assertFalse(tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).isError)
+            assertEquals(1, asked.size)
+            assertEquals(listOf(1L), host.fronted)
+            assertEquals(1, host.taps.size)
+            // On screen when decided, gone before it runs: refused, nothing switched or tapped.
+            asked.clear()
+            host.fronted.clear()
+            var reads = 0
+            host.shown = { reads++ == 0 }
+            assertEquals("CAPABILITY_UNAVAILABLE", tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).code())
+            assertTrue(asked.isEmpty())
+            assertTrue(host.fronted.isEmpty())
+            assertEquals(1, host.taps.size)
+            // Already on screen: it runs without a card.
+            host.shown = { true }
+            assertFalse(tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).isError)
+            assertTrue(asked.isEmpty())
+            assertEquals(2, host.taps.size)
+        }
+        host.shown = { true }
     }
 
     @Test

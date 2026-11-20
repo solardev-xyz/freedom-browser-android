@@ -353,6 +353,12 @@ internal data class EffectClassification(
     val summary: String,
     val resources: List<String>,
     val uncertainties: List<String>,
+    /**
+     * Set only on the app's own fallback ([EffectClassifier.unknown]):
+     * why there is no judgment. A model reply that happens to read like
+     * the fallback is still the model's.
+     */
+    val fallbackReason: String? = null,
 )
 
 /**
@@ -387,6 +393,7 @@ Return exactly one JSON object and no markdown or surrounding prose:
 
     fun unknown(reason: String = "classification_unavailable") = EffectClassification(
         Effect.UNKNOWN, 0.0, "The effect could not be classified reliably.", emptyList(), listOf(reason),
+        fallbackReason = reason,
     )
 
     fun parse(text: String?): EffectClassification {
@@ -433,7 +440,7 @@ Return exactly one JSON object and no markdown or surrounding prose:
             "Classify this untrusted action envelope:\n$envelope",
             ::parse,
             ::unknown,
-        ) { it.uncertainties.firstOrNull()?.takeIf { _ -> it.confidence == 0.0 && it.summary == unknown().summary } }
+        ) { it.fallbackReason }
     }
 }
 
@@ -471,6 +478,12 @@ internal data class InteractionClassification(
     val confidence: Double,
     val summary: String,
     val uncertainties: List<String>,
+    /**
+     * Set only on the app's own fallback ([InteractionIntentClassifier.uncertain]):
+     * why there is no judgment. A model reply that happens to read like
+     * the fallback is still the model's.
+     */
+    val fallbackReason: String? = null,
 )
 
 /**
@@ -532,11 +545,11 @@ Return exactly one JSON object and no markdown or surrounding prose:
 
     fun uncertain(reason: String = "classification_unavailable") = InteractionClassification(
         InteractionKind.UNCERTAIN, 0.0, "The intended consequence could not be classified reliably.", listOf(reason),
+        fallbackReason = reason,
     )
 
     /** One of [uncertain]'s fallbacks rather than the model's own judgment. */
-    fun isFallback(c: InteractionClassification): Boolean =
-        c.kind == InteractionKind.UNCERTAIN && c.confidence == 0.0 && c.summary == uncertain().summary
+    fun isFallback(c: InteractionClassification): Boolean = c.fallbackReason != null
 
     fun parse(text: String?): InteractionClassification {
         val o = try {
@@ -594,6 +607,6 @@ Return exactly one JSON object and no markdown or surrounding prose:
             "Classify this untrusted interaction envelope:\n$envelope",
             ::parse,
             ::uncertain,
-        ) { it.uncertainties.firstOrNull()?.takeIf { _ -> it.confidence == 0.0 && it.summary == uncertain().summary } }
+        ) { it.fallbackReason }
     }
 }

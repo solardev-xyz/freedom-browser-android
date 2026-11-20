@@ -64,12 +64,19 @@ internal data class AgentApproval(
     /** The agent's own claim of what this does: untrusted, shown as its words. */
     val intent: String?,
     /**
-     * In "sensitive actions" (#595), why it's asked: the intent
+     * Why it's asked (#595): in "sensitive actions", the intent
      * classifier's summary (the chat's model judging page and agent
      * text, so shown as its words), that it sends a form, or that the
-     * check gave no answer. Null in the other modes.
+     * check gave no answer. In either relaxed mode, that the tab
+     * wasn't on screen ([ApprovalCheck.NeedsScreen]). Null otherwise.
      */
     val check: ApprovalCheck? = null,
+    /**
+     * False when the mode let it run without a card: then it may only
+     * run on a tab that is already on screen, never take the screen.
+     * No default: a new kind of approval says which it is.
+     */
+    val byUser: Boolean,
 )
 
 /** How an approval ended. Only [Declined] is the user saying no. */

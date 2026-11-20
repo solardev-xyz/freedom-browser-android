@@ -187,6 +187,7 @@ private fun ApprovalBody(approval: AgentApproval) {
                 is ApprovalCheck.Judged -> stringResource(R.string.agent_approve_check, check.summary)
                 ApprovalCheck.SendsForm -> stringResource(R.string.agent_approve_check_form)
                 ApprovalCheck.NoAnswer -> stringResource(R.string.agent_approve_check_none)
+                ApprovalCheck.NeedsScreen -> stringResource(R.string.agent_approve_check_screen)
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

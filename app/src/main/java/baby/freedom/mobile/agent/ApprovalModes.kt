@@ -57,7 +57,7 @@ internal enum class ActionKind {
     Mcp,
 }
 
-/** Why "sensitive actions" put an action to the user, as its card says. */
+/** Why a relaxed mode put an action to the user, as its card says. */
 internal sealed interface ApprovalCheck {
     /** The model judged it consequential or uncertain: its own [summary]. */
     data class Judged(val summary: String) : ApprovalCheck
@@ -67,13 +67,20 @@ internal sealed interface ApprovalCheck {
 
     /** The check gave no usable answer (an error, a timeout, a reply in the wrong shape). */
     data object NoAnswer : ApprovalCheck
+
+    /**
+     * The mode would let it run, but its tab isn't on screen: taking the
+     * screen (switching tabs, closing the chat or a panel) needs the
+     * user's tap, so it asks instead. In either relaxed mode.
+     */
+    data object NeedsScreen : ApprovalCheck
 }
 
 /** The policy's answer: run without a card, or ask the user. */
 internal sealed interface PolicyDecision {
     data object Proceed : PolicyDecision
 
-    /** [check]: why "sensitive actions" asks, for the card; null in the other modes. */
+    /** [check]: why "sensitive actions" asks, for the card; null in the other modes ([ApprovalCheck.NeedsScreen] is added later, by the toolset). */
     data class Ask(val check: ApprovalCheck? = null) : PolicyDecision
 }
 
@@ -141,15 +148,19 @@ internal object ApprovalPolicy {
                     "the user; so does every form submission and every dialog answer. For every browser_click, " +
                     "browser_type, browser_select, browser_press, and browser_scroll call, include a brief literal " +
                     "intent describing what you expect that exact interaction to accomplish. Dialog answers, " +
-                    "uploads, downloads, wallet requests, and other privileged capabilities keep their separate " +
+                    "uploads, downloads, wallet requests, Swarm and Radicle publishing, signing, messages and writes, " +
+                    "and other privileged capabilities keep their separate " +
                     "Freedom approval boundaries. Never claim that the user personally approved an automatic decision."
             ApprovalMode.AllowWebsiteInteractions ->
                 "Freedom allows ordinary navigation and website interactions without asking each time. Dialog " +
-                    "answers, uploads, downloads, wallet requests, and other privileged capabilities keep their " +
+                    "answers, uploads, downloads, wallet requests, Swarm and Radicle publishing, signing, messages and " +
+                    "writes, and other privileged capabilities keep their " +
                     "separate Freedom approval boundaries."
         }
+        val screen = if (mode == ApprovalMode.EveryInteraction) "" else " An interaction allowed without asking runs " +
+            "only in a tab already on screen; otherwise the user is asked to switch to it."
         return "Freedom approval policy (this chat's approval mode is ${mode.wire}; the user can change it at any " +
-            "time, and this line always shows the current one): $policy Freedom enforces this policy; do not claim " +
+            "time, and this line always shows the current one): $policy$screen Freedom enforces this policy; do not claim " +
             "broader authority."
     }
 }

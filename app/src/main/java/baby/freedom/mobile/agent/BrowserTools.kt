@@ -328,12 +328,25 @@ internal class BrowserToolset(
             "press" -> AgentAction.Press(target, args.key!!)
             else -> AgentAction.Scroll(target, args.direction!!, args.pages)
         }
-        val approval = approve(tab.id, tab.site, tab.document, action, args.intent)
+        val approval = approve(tab.id, tab.site, tab.document, action, args.intent, needsScreen = true)
         // On screen, then everything the card named checked again on the live tab.
         // Still this chat's (taken back while it was asked, the card was withdrawn).
         ownedTab(tab.id, readable = true)
+        // A step the mode let run without a card never takes the screen: the user may be in
+        // another tab, a panel or the chat, and only their tap switches (it asked if it wasn't on
+        // screen). Checked in the same main-thread turn as bringToFront, so nothing switches between.
         // Back to this chat next time only if its page closed for the tab.
-        if (!onMain { host().bringToFront(tab.id, chat = sessionId) }) {
+        val fronted = onMain {
+            if (!approval.byUser && !host().onScreen(tab.id)) null else host().bringToFront(tab.id, chat = sessionId)
+        }
+        if (fronted == null) {
+            throw ToolError(
+                ToolError.CAPABILITY_UNAVAILABLE,
+                "The tab went off screen before the action ran. Nothing was done. Try again: the user will be " +
+                    "asked to put it on screen.",
+            )
+        }
+        if (!fronted) {
             throw ToolError(
                 ToolError.CAPABILITY_UNAVAILABLE,
                 "The tab couldn't be put on screen (another Freedom page is open over it, or the app is in the " +
@@ -612,15 +625,28 @@ internal class BrowserToolset(
      * Puts [action] to the chat's approval mode, and to the user when the
      * mode says to ask. Returns the approval it runs under: the user's,
      * or one the mode gave without a card, which binds the action just
-     * the same.
+     * the same. With [needsScreen] (an input into the page), the mode
+     * lets it run only on a tab already on screen: switching to it asks.
      */
-    private suspend fun approve(tabId: Long, site: String, document: Int, action: AgentAction, intent: String?): AgentApproval {
+    private suspend fun approve(
+        tabId: Long,
+        site: String,
+        document: Int,
+        action: AgentAction,
+        intent: String?,
+        needsScreen: Boolean = false,
+    ): AgentApproval {
         val flatIntent = intent?.let { ApprovalText.flatten(it, BrowserToolSpecs.MAX_INTENT_CHARS) }
-        val decision = ApprovalPolicy.decide(
+        val decided = ApprovalPolicy.decide(
             kindOf(action),
             mode = { approvals.mode },
             classify = { approvals.classifyInteraction(interactionInput(action, site, intent)) },
         )
+        val decision = if (decided == PolicyDecision.Proceed && needsScreen && !onMain { host().onScreen(tabId) }) {
+            PolicyDecision.Ask(ApprovalCheck.NeedsScreen)
+        } else {
+            decided
+        }
         val check = when (val c = (decision as? PolicyDecision.Ask)?.check) {
             // The model read page and agent text: its words are flattened like the page's.
             is ApprovalCheck.Judged -> ApprovalText.flatten(c.summary, 240).ifEmpty { null }?.let { ApprovalCheck.Judged(it) } ?: ApprovalCheck.NoAnswer
@@ -636,6 +662,7 @@ internal class BrowserToolset(
             action = action,
             intent = flatIntent,
             check = check,
+            byUser = decision != PolicyDecision.Proceed,
         )
         if (decision == PolicyDecision.Proceed) return approval
         return when (ask(approval)) {
