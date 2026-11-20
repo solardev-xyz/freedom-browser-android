@@ -11,6 +11,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -43,26 +44,40 @@ internal enum class RecognizerKind {
 
 internal object DictationRecognizers {
     /**
-     * The recognizer dictation uses: the on-device one when the phone has
-     * it (API 31+), else the speech service when there is one, else none
-     * (null: no microphone button). Every place that names the
-     * destination (the button, the listening line, Settings) and the one
-     * that creates the recognizer read this same answer, so the label
-     * can't say "on this phone" while audio goes to a service.
+     * The recognizers this phone offers: the on-device one (API 31+) when
+     * Android reports it, and the speech service when there is one.
      */
-    fun pick(sdk: Int, onDeviceAvailable: () -> Boolean, serviceAvailable: () -> Boolean): RecognizerKind? = when {
-        sdk >= Build.VERSION_CODES.S && onDeviceAvailable() -> RecognizerKind.OnDevice
-        serviceAvailable() -> RecognizerKind.Service
-        else -> null
+    fun available(sdk: Int, onDeviceAvailable: () -> Boolean, serviceAvailable: () -> Boolean): Set<RecognizerKind> = buildSet {
+        if (sdk >= Build.VERSION_CODES.S && onDeviceAvailable()) add(RecognizerKind.OnDevice)
+        if (serviceAvailable()) add(RecognizerKind.Service)
     }
 
-    fun pick(context: Context): RecognizerKind? = pick(
+    fun available(context: Context): Set<RecognizerKind> = available(
         Build.VERSION.SDK_INT,
         onDeviceAvailable = {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && safely { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }
         },
         serviceAvailable = { safely { SpeechRecognizer.isRecognitionAvailable(context) } },
     )
+
+    /**
+     * The recognizer dictation uses out of [available]: the speech
+     * service when the user picked it in Settings ([preferService]) and
+     * the phone has one, else the on-device one when the phone has it,
+     * else the service, else none (null: no microphone button). Android
+     * can report an on-device recognizer that then never works, so the
+     * service is the user's to choose; it's never switched to by itself.
+     * Every place that names the destination (the button, the listening
+     * line, Settings) and the one that creates the recognizer read this
+     * same answer, so the label can't say "on this phone" while audio
+     * goes to a service.
+     */
+    fun pick(available: Set<RecognizerKind>, preferService: Boolean): RecognizerKind? = when {
+        preferService && RecognizerKind.Service in available -> RecognizerKind.Service
+        RecognizerKind.OnDevice in available -> RecognizerKind.OnDevice
+        RecognizerKind.Service in available -> RecognizerKind.Service
+        else -> null
+    }
 
     private inline fun safely(block: () -> Boolean): Boolean = try {
         block()
@@ -105,13 +120,23 @@ internal enum class DictationFailure {
     /** Nothing was heard: the draft is as it was. */
     NoSpeech,
 
-    /** The microphone permission is refused (here or in Android settings). */
+    /** Freedom's microphone permission is refused (here or in Android settings). */
     Permission,
 
-    /** The recognizer has no model for the language. */
-    Language,
+    /**
+     * The recognizer itself may not use the microphone: Freedom's own
+     * permission was granted before the run started, so this is the
+     * speech app's.
+     */
+    RecognizerPermission,
 
-    /** The speech service couldn't be reached. */
+    /** The recognizer doesn't support the language. */
+    LanguageUnsupported,
+
+    /** The recognizer supports the language but its model isn't on the phone (yet). */
+    LanguageUnavailable,
+
+    /** The speech service couldn't be reached (or, for the on-device recognizer, didn't answer). */
     Network,
 
     /** Another app is using the recognizer. */
@@ -127,8 +152,10 @@ internal enum class DictationFailure {
     companion object {
         fun of(error: Int): DictationFailure = when (error) {
             SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> NoSpeech
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> Permission
-            ERROR_LANGUAGE_NOT_SUPPORTED, ERROR_LANGUAGE_UNAVAILABLE -> Language
+            // A run only starts once Freedom holds RECORD_AUDIO, so this is the recognizer's own.
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> RecognizerPermission
+            ERROR_LANGUAGE_NOT_SUPPORTED -> LanguageUnsupported
+            ERROR_LANGUAGE_UNAVAILABLE -> LanguageUnavailable
             SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
             SpeechRecognizer.ERROR_SERVER, ERROR_SERVER_DISCONNECTED, ERROR_TOO_MANY_REQUESTS -> Network
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> Busy
@@ -318,6 +345,14 @@ internal class Dictation(
         _status.value = DictationStatus.Failed(DictationFailure.Permission, kind)
     }
 
+    /**
+     * Freedom now holds the microphone permission (checked on resume, after
+     * a trip to Android settings): a refusal's line no longer applies.
+     */
+    fun permissionGranted() {
+        if ((_status.value as? DictationStatus.Failed)?.failure == DictationFailure.Permission) _status.value = DictationStatus.Idle
+    }
+
     /** Hides a failure's (or a finished run's) line. */
     fun dismiss() {
         val now = _status.value
@@ -408,10 +443,11 @@ internal class AndroidRecognizer(context: Context, kind: RecognizerKind) : Recog
 }
 
 /**
- * Settings → AI → Voice dictation's language (#578): null follows the
- * app language. Its own small file, apart from the AI settings, so a
- * language pick never rewrites the keys' blob. A file that can't be
- * read reads as the app language.
+ * Settings → AI → Voice dictation's picks (#578): the language (null
+ * follows the app language) and whether to use the phone's speech
+ * service over the on-device recognizer. Its own small file, apart from
+ * the AI settings, so a pick never rewrites the keys' blob. A file that
+ * can't be read reads as the app language and the on-device recognizer.
  */
 internal class DictationSettings private constructor(private val context: Context) {
     val language: Flow<String?> = context.dictationSettings.data
@@ -421,6 +457,23 @@ internal class DictationSettings private constructor(private val context: Contex
             emit(emptyPreferences())
         }
         .map { it[LANGUAGE]?.takeIf { tag -> tag in DICTATION_LANGUAGES } }
+
+    /** Whether the user picked the phone's speech service over the on-device recognizer. */
+    val preferService: Flow<Boolean> = context.dictationSettings.data
+        .catch { e ->
+            if (e !is IOException) throw e
+            emit(emptyPreferences())
+        }
+        .map { it[PREFER_SERVICE] == true }
+
+    /** Sets [preferService]; false when the write failed. */
+    suspend fun setPreferService(prefer: Boolean): Boolean = try {
+        context.dictationSettings.edit { if (prefer) it[PREFER_SERVICE] = true else it.remove(PREFER_SERVICE) }
+        true
+    } catch (e: IOException) {
+        Log.w(TAG, "saving the dictation recognizer failed (${e.javaClass.simpleName})")
+        false
+    }
 
     /** Sets the language ([tag] null: the app's); false when the write failed. */
     suspend fun setLanguage(tag: String?): Boolean = try {
@@ -434,6 +487,7 @@ internal class DictationSettings private constructor(private val context: Contex
     companion object {
         private const val TAG = "DictationSettings"
         private val LANGUAGE = stringPreferencesKey("language")
+        private val PREFER_SERVICE = booleanPreferencesKey("prefer_service")
         const val FILE_NAME = "freedom_agent_dictation"
 
         private val Context.dictationSettings by preferencesDataStore(

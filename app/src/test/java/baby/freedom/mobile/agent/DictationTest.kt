@@ -10,28 +10,42 @@ import java.util.Locale
 
 /** The composer's dictation (#578): which recognizer, which language, and what lands in the draft. */
 class DictationTest {
+    private val both = setOf(RecognizerKind.OnDevice, RecognizerKind.Service)
+
     @Test
     fun `the on-device recognizer when the phone has it on API 31 and up`() {
-        assertEquals(RecognizerKind.OnDevice, DictationRecognizers.pick(31, { true }, { true }))
-        assertEquals(RecognizerKind.OnDevice, DictationRecognizers.pick(36, { true }, { false }))
+        assertEquals(both, DictationRecognizers.available(31, { true }, { true }))
+        assertEquals(RecognizerKind.OnDevice, DictationRecognizers.pick(both, preferService = false))
+        val onDeviceOnly = DictationRecognizers.available(36, { true }, { false })
+        assertEquals(setOf(RecognizerKind.OnDevice), onDeviceOnly)
+        assertEquals(RecognizerKind.OnDevice, DictationRecognizers.pick(onDeviceOnly, preferService = false))
     }
 
     @Test
     fun `the speech service when there's no on-device recognizer`() {
-        assertEquals(RecognizerKind.Service, DictationRecognizers.pick(31, { false }, { true }))
+        val available = DictationRecognizers.available(31, { false }, { true })
+        assertEquals(RecognizerKind.Service, DictationRecognizers.pick(available, preferService = false))
+    }
+
+    @Test
+    fun `the speech service when the user picked it, never by itself`() {
+        assertEquals(RecognizerKind.Service, DictationRecognizers.pick(both, preferService = true))
+        assertEquals(RecognizerKind.OnDevice, DictationRecognizers.pick(both, preferService = false))
+        // Picked but gone from the phone: the on-device one, which the label names.
+        assertEquals(RecognizerKind.OnDevice, DictationRecognizers.pick(setOf(RecognizerKind.OnDevice), preferService = true))
     }
 
     @Test
     fun `below API 31 the on-device recognizer isn't even asked about`() {
         var asked = false
-        assertEquals(RecognizerKind.Service, DictationRecognizers.pick(30, { asked = true; true }, { true }))
+        assertEquals(setOf(RecognizerKind.Service), DictationRecognizers.available(30, { asked = true; true }, { true }))
         assertFalse(asked)
     }
 
     @Test
     fun `no recognizer at all means no dictation`() {
-        assertNull(DictationRecognizers.pick(36, { false }, { false }))
-        assertNull(DictationRecognizers.pick(30, { true }, { false }))
+        assertNull(DictationRecognizers.pick(DictationRecognizers.available(36, { false }, { false }), preferService = false))
+        assertNull(DictationRecognizers.pick(DictationRecognizers.available(30, { true }, { false }), preferService = true))
     }
 
     @Test
@@ -61,9 +75,11 @@ class DictationTest {
     fun `recognizer errors map to what the composer says`() {
         assertEquals(DictationFailure.NoSpeech, DictationFailure.of(SpeechRecognizer.ERROR_NO_MATCH))
         assertEquals(DictationFailure.NoSpeech, DictationFailure.of(SpeechRecognizer.ERROR_SPEECH_TIMEOUT))
-        assertEquals(DictationFailure.Permission, DictationFailure.of(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS))
-        assertEquals(DictationFailure.Language, DictationFailure.of(12))
-        assertEquals(DictationFailure.Language, DictationFailure.of(13))
+        // Freedom holds the microphone before a run starts: this one is the recognizer's own.
+        assertEquals(DictationFailure.RecognizerPermission, DictationFailure.of(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS))
+        assertEquals(DictationFailure.LanguageUnsupported, DictationFailure.of(12))
+        // Supported, but its model isn't downloaded yet.
+        assertEquals(DictationFailure.LanguageUnavailable, DictationFailure.of(13))
         assertEquals(DictationFailure.Network, DictationFailure.of(SpeechRecognizer.ERROR_NETWORK))
         assertEquals(DictationFailure.Busy, DictationFailure.of(SpeechRecognizer.ERROR_RECOGNIZER_BUSY))
         assertEquals(DictationFailure.Other, DictationFailure.of(SpeechRecognizer.ERROR_CLIENT))
@@ -210,7 +226,7 @@ class DictationTest {
         fake.last.partial("konnichiwa")
         fake.last.error(12)
         assertEquals("konnichiwa", draft())
-        assertEquals(DictationStatus.Failed(DictationFailure.Language, RecognizerKind.OnDevice), d.status.value)
+        assertEquals(DictationStatus.Failed(DictationFailure.LanguageUnsupported, RecognizerKind.OnDevice), d.status.value)
         assertEquals(1, fake.languages.size)
     }
 
@@ -258,6 +274,24 @@ class DictationTest {
         d.refused()
         d.edited("typed instead")
         assertEquals(DictationStatus.Idle, d.status.value)
+    }
+
+    @Test
+    fun `a permission granted in Android settings meanwhile takes the refusal's line away, and nothing else`() {
+        val (d, fake, _) = setUp()
+        d.refused()
+        d.permissionGranted()
+        assertEquals(DictationStatus.Idle, d.status.value)
+        // Another failure's line, or a run, isn't touched.
+        d.start("", "en")
+        fake.last.error(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
+        val recognizers = DictationStatus.Failed(DictationFailure.RecognizerPermission, RecognizerKind.OnDevice)
+        assertEquals(recognizers, d.status.value)
+        d.permissionGranted()
+        assertEquals(recognizers, d.status.value)
+        d.start("", "en")
+        d.permissionGranted()
+        assertTrue(d.listening)
     }
 
     @Test

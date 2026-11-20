@@ -184,7 +184,7 @@ internal fun AiSection(
         )
         if (state.enabled && "ai-dictation" in visible) {
             val pick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
-            val kind = remember(context) { DictationRecognizers.pick(context) }
+            val kind = rememberDictationRecognizer().kind
             PageRow(
                 title = stringResource(R.string.agent_dictation),
                 subtitle = dictationSummary(kind, pick),

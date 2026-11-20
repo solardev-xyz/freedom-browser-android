@@ -45,6 +45,7 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -236,7 +237,8 @@ private fun ChatView(
 
     // Voice dictation (#578): only when the phone has a recognizer.
     val context = LocalContext.current
-    val recognizer = remember(context) { DictationRecognizers.pick(context) }
+    val recognizers = rememberDictationRecognizer()
+    val recognizer = recognizers.kind
     val languagePick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
     val language = dictationLanguage(languagePick, LocalConfiguration.current.locales[0])
     val dictation = remember(recognizer) {
@@ -262,7 +264,19 @@ private fun ChatView(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(dictation, lifecycle) {
         // The microphone is let go of once the app is out of sight.
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) dictation?.cancel() }
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> dictation?.cancel()
+                // Back from Android settings with the microphone turned on:
+                // the refusal's line no longer holds.
+                Lifecycle.Event.ON_RESUME -> if (
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    dictation?.permissionGranted()
+                }
+                else -> Unit
+            }
+        }
         lifecycle.addObserver(observer)
         onDispose {
             lifecycle.removeObserver(observer)
@@ -375,7 +389,12 @@ private fun ChatView(
                     modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
-            DictationLine(dictationStatus, language, onOpenAndroidSettings = { openAppSettings(context) })
+            DictationLine(
+                dictationStatus,
+                language,
+                serviceOffered = RecognizerKind.Service in recognizers.available,
+                onOpenAndroidSettings = { openAppSettings(context) },
+            )
             Row(verticalAlignment = Alignment.Bottom) {
                 OutlinedTextField(
                     value = draft,
@@ -480,32 +499,35 @@ private fun ChatView(
  * finishes. Its label says where the audio goes before the first tap.
  */
 @Composable
-private fun MicButton(kind: RecognizerKind, status: DictationStatus, onClick: () -> Unit) {
-    if (status is DictationStatus.Listening) {
+internal fun MicButton(kind: RecognizerKind, status: DictationStatus, onClick: () -> Unit) {
+    val listening = status as? DictationStatus.Listening
+    // One button in both states, only its look and label changing: two
+    // buttons swapped on the tap would replace the node TalkBack has
+    // focus on, and a user exploring to find Stop would have every label
+    // on the way read aloud into the open microphone.
+    IconButton(
+        onClick = onClick,
         // While finishing, a second tap has nothing more to do.
-        FilledIconButton(onClick = onClick, enabled = !status.finishing) {
-            Icon(
-                Icons.Filled.Mic,
-                contentDescription = stringResource(
-                    if (status.finishing) R.string.agent_dictation_finishing else R.string.agent_dictate_stop,
-                ),
-            )
-        }
-    } else {
-        IconButton(onClick = onClick) {
-            Icon(
-                Icons.Outlined.Mic,
-                contentDescription = stringResource(
-                    if (kind == RecognizerKind.OnDevice) R.string.agent_dictate_on_device else R.string.agent_dictate_service,
-                ),
-            )
-        }
+        enabled = listening?.finishing != true,
+        colors = if (listening != null) IconButtonDefaults.filledIconButtonColors() else IconButtonDefaults.iconButtonColors(),
+    ) {
+        Icon(
+            if (listening != null) Icons.Filled.Mic else Icons.Outlined.Mic,
+            contentDescription = stringResource(
+                when {
+                    listening?.finishing == true -> R.string.agent_dictation_finishing
+                    listening != null -> R.string.agent_dictate_stop
+                    kind == RecognizerKind.OnDevice -> R.string.agent_dictate_on_device
+                    else -> R.string.agent_dictate_service
+                },
+            ),
+        )
     }
 }
 
 /** The line over the composer while dictating, or after dictation failed. */
 @Composable
-private fun DictationLine(status: DictationStatus, language: String, onOpenAndroidSettings: () -> Unit) {
+private fun DictationLine(status: DictationStatus, language: String, serviceOffered: Boolean, onOpenAndroidSettings: () -> Unit) {
     when (status) {
         DictationStatus.Idle -> Unit
         // Said once by TalkBack: the microphone is let go of by then.
@@ -531,25 +553,36 @@ private fun DictationLine(status: DictationStatus, language: String, onOpenAndro
         )
         is DictationStatus.Failed -> Row(verticalAlignment = Alignment.CenterVertically) {
             val locale = LocalConfiguration.current.locales[0]
+            val languageName = java.util.Locale.forLanguageTag(language).getDisplayName(locale)
+            val line = when (status.failure) {
+                DictationFailure.NoSpeech -> stringResource(R.string.agent_dictation_no_speech)
+                DictationFailure.Permission -> stringResource(R.string.agent_dictation_permission)
+                DictationFailure.RecognizerPermission -> stringResource(
+                    if (status.kind == RecognizerKind.OnDevice) {
+                        R.string.agent_dictation_recognizer_permission_on_device
+                    } else {
+                        R.string.agent_dictation_recognizer_permission_service
+                    },
+                )
+                DictationFailure.LanguageUnsupported -> stringResource(R.string.agent_dictation_language, languageName)
+                DictationFailure.LanguageUnavailable -> stringResource(R.string.agent_dictation_language_download, languageName)
+                DictationFailure.Network -> stringResource(
+                    if (status.kind == RecognizerKind.OnDevice) {
+                        R.string.agent_dictation_on_device_failed
+                    } else {
+                        R.string.agent_dictation_network
+                    },
+                )
+                DictationFailure.Busy -> stringResource(R.string.agent_dictation_busy)
+                DictationFailure.Audio -> stringResource(R.string.agent_dictation_audio)
+                DictationFailure.Other -> stringResource(R.string.agent_dictation_failed)
+            }
+            // The on-device recognizer failing for a reason of its own: the
+            // speech service is there to pick, by the user, in Settings.
+            val offerService = serviceOffered && status.kind == RecognizerKind.OnDevice && status.failure !in
+                setOf(DictationFailure.NoSpeech, DictationFailure.Permission, DictationFailure.Busy)
             Text(
-                when (status.failure) {
-                    DictationFailure.NoSpeech -> stringResource(R.string.agent_dictation_no_speech)
-                    DictationFailure.Permission -> stringResource(R.string.agent_dictation_permission)
-                    DictationFailure.Language -> stringResource(
-                        R.string.agent_dictation_language,
-                        java.util.Locale.forLanguageTag(language).getDisplayName(locale),
-                    )
-                    DictationFailure.Network -> stringResource(
-                        if (status.kind == RecognizerKind.OnDevice) {
-                            R.string.agent_dictation_on_device_failed
-                        } else {
-                            R.string.agent_dictation_network
-                        },
-                    )
-                    DictationFailure.Busy -> stringResource(R.string.agent_dictation_busy)
-                    DictationFailure.Audio -> stringResource(R.string.agent_dictation_audio)
-                    DictationFailure.Other -> stringResource(R.string.agent_dictation_failed)
-                },
+                if (offerService) line + " " + stringResource(R.string.agent_dictation_try_service) else line,
                 style = MaterialTheme.typography.bodySmall,
                 color = if (status.failure == DictationFailure.NoSpeech) {
                     MaterialTheme.colorScheme.onSurfaceVariant

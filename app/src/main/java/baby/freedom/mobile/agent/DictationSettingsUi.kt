@@ -44,6 +44,22 @@ internal fun nativeLanguageName(tag: String): String {
     return locale.getDisplayName(locale).replaceFirstChar { if (it.isLowerCase()) it.titlecase(locale) else it.toString() }
 }
 
+/** The phone's recognizers and the one dictation uses ([kind], null: none). */
+internal data class DictationRecognizer(val available: Set<RecognizerKind>, val kind: RecognizerKind?)
+
+/**
+ * The recognizer dictation uses, with the user's pick from Settings:
+ * the composer, the Settings row and the Settings page all read this,
+ * so each names the destination the microphone actually sends to.
+ */
+@Composable
+internal fun rememberDictationRecognizer(): DictationRecognizer {
+    val context = LocalContext.current
+    val available = remember(context) { DictationRecognizers.available(context) }
+    val preferService by remember(context) { DictationSettings.get(context).preferService }.collectAsState(initial = false)
+    return DictationRecognizer(available, DictationRecognizers.pick(available, preferService))
+}
+
 /** The Voice dictation row's line: where audio goes and the language, or that there's no recognizer. */
 @Composable
 internal fun dictationSummary(kind: RecognizerKind?, pick: String?): String {
@@ -57,8 +73,9 @@ internal fun dictationSummary(kind: RecognizerKind?, pick: String?): String {
 
 /**
  * Settings → AI → Voice dictation (#578): where the audio goes with the
- * recognizer this phone has (the same answer the composer's microphone
- * uses), and the language, following the app language unless one is
+ * recognizer dictation uses (the same answer the composer's microphone
+ * uses), a pick between the on-device recognizer and the speech service
+ * when the phone has both, and the language, following the app language unless one is
  * picked. Closes by itself if AI is turned off meanwhile.
  */
 @Composable
@@ -69,9 +86,11 @@ internal fun AiDictationPage(onBack: () -> Unit) {
     if (state?.enabled == false) LaunchedEffect(Unit) { onBack() }
     val settings = remember(context) { DictationSettings.get(context) }
     val pick by settings.language.collectAsState(initial = null)
-    val kind = remember(context) { DictationRecognizers.pick(context) }
+    val recognizer = rememberDictationRecognizer()
+    val kind = recognizer.kind
     val scope = rememberCoroutineScope()
     var failed by remember { mutableStateOf(false) }
+    var recognizerFailed by remember { mutableStateOf(false) }
     val appLocale = LocalConfiguration.current.locales[0]
 
     BackHandler(onBack = onBack)
@@ -88,12 +107,41 @@ internal fun AiDictationPage(onBack: () -> Unit) {
                             stringResource(
                                 when (kind) {
                                     RecognizerKind.OnDevice -> R.string.agent_dictation_where_on_device
+                                    RecognizerKind.Service if RecognizerKind.OnDevice in recognizer.available ->
+                                        R.string.agent_dictation_where_service_picked
                                     RecognizerKind.Service -> R.string.agent_dictation_where_service
                                     null -> R.string.agent_dictation_where_none
                                 },
                             ),
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        // Both on the phone: which one is the user's to pick.
+                        // Android can report an on-device recognizer that never
+                        // works, and dictation never switches by itself.
+                        if (recognizer.available.size > 1) {
+                            Column {
+                                if (recognizerFailed) {
+                                    Text(
+                                        stringResource(R.string.agent_dictation_save_failed),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                                    )
+                                }
+                                LanguageRow(
+                                    title = stringResource(R.string.agent_dictation_use_on_device),
+                                    subtitle = stringResource(R.string.agent_dictation_use_on_device_hint),
+                                    selected = kind == RecognizerKind.OnDevice,
+                                    onClick = { scope.launch { recognizerFailed = !settings.setPreferService(false) } },
+                                )
+                                LanguageRow(
+                                    title = stringResource(R.string.agent_dictation_use_service),
+                                    subtitle = stringResource(R.string.agent_dictation_use_service_hint),
+                                    selected = kind == RecognizerKind.Service,
+                                    onClick = { scope.launch { recognizerFailed = !settings.setPreferService(true) } },
+                                )
+                            }
+                        }
                         Text(
                             stringResource(R.string.agent_dictation_where_common),
                             style = MaterialTheme.typography.bodyMedium,
