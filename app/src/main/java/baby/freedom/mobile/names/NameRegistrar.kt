@@ -545,7 +545,7 @@ class NameRegistrar internal constructor(
 
     /** [op] (at its reveal) placed in its commitment's window at [s]: waiting, ready or expired. */
     private suspend fun commitmentWindow(op: NameOperation, s: NameChain.Snapshot): NameOperation {
-        val commitment = op.commitment ?: return op.copy(state = State.VERIFICATION_NEEDED)
+        val commitment = op.commitment ?: return op.copy(state = State.VERIFICATION_NEEDED, message = null)
         val at = chain.committedAt(op.space, hexBytes(commitment), s)
         if (at.signum() == 0) return op.copy(state = State.VERIFICATION_NEEDED, message = Strings.get(R.string.namereg_state_commitment_missing))
         val (min, max) = chain.commitmentAges(op.space, s)
@@ -589,15 +589,18 @@ class NameRegistrar internal constructor(
      * does this, since each names the wallet's addresses and the names
      * they were registering (as the wallet's history is wiped). An
      * outcome still on its way is dropped with them, as the wallet's own
-     * send is.
+     * send is. The list here empties even when the disk fails; then
+     * [NameException.Code.SECURE_STORAGE] says the file couldn't be
+     * emptied or deleted ([NameJournal.erase]), for Remove wallet to say so.
      */
     suspend fun wipe() {
         loaded.await()
         writing.withLock {
-            if (!withContext(io) { journal.save(emptyList()).also { journal.forgetSetAside() } }) {
-                refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
-            }
+            // Gone from memory whatever the disk does: nothing here may go on naming the wallet's addresses.
             _operations.value = emptyList()
+            if (!withContext(io) { journal.erase() }) {
+                refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_wipe))
+            }
         }
     }
 

@@ -120,7 +120,9 @@ internal fun operationStatus(op: NameOperation, nowSeconds: Long): String {
         State.FAILED -> Strings.get(R.string.namereg_state_reverted)
         State.EXPIRED -> Strings.get(R.string.namereg_state_commitment_expired)
         State.DISPATCH_UNKNOWN -> Strings.get(R.string.namereg_state_dispatch_unknown)
-        State.VERIFICATION_NEEDED -> Strings.get(R.string.namereg_state_verification_needed)
+        // Reached for more than one reason (a reveal mined with no effect seen, a commitment not seen, before or
+        // without any transaction of this step): the registrar's own note is the whole line when it left one.
+        State.VERIFICATION_NEEDED -> op.message ?: Strings.get(R.string.namereg_state_verification_needed)
     }
     // A note the registrar left (why a send didn't go, a reverted reveal) comes after, unless it's the same words.
     val note = op.message?.takeIf { it != base && op.state != State.COMPLETED }
@@ -137,6 +139,16 @@ internal fun carriedOnNotice(op: NameOperation, nowSeconds: Long): String? {
     if (op.state == State.READY) return null
     val text = if (op.registering) R.string.namereg_open_registration_continues else R.string.namereg_open_renewal_continues
     return Strings.get(text, op.name, operationStatus(op, nowSeconds))
+}
+
+/**
+ * The line for the operation [id] that Register or Renew handed back, from
+ * [operations] as they are now and the phone's clock: null once it's ready
+ * (its card offers the review) or gone, or when nothing was handed back.
+ */
+internal fun carriedOnLine(id: String?, operations: List<NameOperation>?, nowSeconds: Long): String? {
+    val op = id?.let { operations?.firstOrNull { o -> o.id == it } } ?: return null
+    return carriedOnNotice(op, nowSeconds)
 }
 
 /** The deadline line under a reveal that's ready or waiting: when its commitment runs out. */

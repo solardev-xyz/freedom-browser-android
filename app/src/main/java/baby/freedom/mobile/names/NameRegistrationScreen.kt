@@ -47,6 +47,8 @@ import baby.freedom.mobile.l10n.pluralText
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -141,6 +143,8 @@ fun NameRegistrationScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
+    // The open operation Register or Renew handed back: its line is built from it as it is now, never kept as text.
+    var carriedOn by remember { mutableStateOf<String?>(null) }
     var dismissing by remember { mutableStateOf<NameOperation?>(null) }
 
     val space = input.trim().substringAfterLast('.', "").lowercase().let(NameSpace::of)
@@ -152,6 +156,7 @@ fun NameRegistrationScreen(
         checked = Checked.Loading
         error = null
         notice = null
+        carriedOn = null
         scope.launch {
             checked = try {
                 Checked.Ready(registrar.check(name, duration))
@@ -177,6 +182,7 @@ fun NameRegistrationScreen(
         busy = true
         error = null
         notice = null
+        carriedOn = null
         scope.launch {
             try {
                 val plan = registrar.plan(op.id)
@@ -206,6 +212,7 @@ fun NameRegistrationScreen(
         busy = true
         error = null
         notice = null
+        carriedOn = null
         scope.launch {
             val op = try {
                 registrar.start(check, intent, from.address, from.index)
@@ -220,7 +227,7 @@ fun NameRegistrationScreen(
             if (op != null) {
                 checked = Checked.None
                 // The same choice already open and not ready (waiting, pending, unknown): say so instead of the check just vanishing.
-                notice = carriedOnNotice(op, System.currentTimeMillis() / 1000)
+                carriedOn = op.id.takeIf { op.state != State.READY }
                 // A brand-new one (nothing sent yet) that can't be built is dropped again.
                 if (op.state == State.READY) review(op, fresh = op.transactionHash == null && op.step != Step.REVEAL && op.revision == 1)
             }
@@ -245,6 +252,15 @@ fun NameRegistrationScreen(
             nowSeconds = System.currentTimeMillis() / 1000
         }
     }
+
+    // The handed-back operation's line, as it stands now; once it's ready (its card offers Review) or gone, the line goes for good.
+    val carriedLine = carriedOnLine(carriedOn, operations, nowSeconds)
+    val carriedState = carriedOn?.let { id -> operations?.firstOrNull { it.id == id }?.state }
+    LaunchedEffect(carriedOn, carriedLine == null) {
+        if (carriedOn != null && carriedLine == null && operations != null) carriedOn = null
+    }
+    // TalkBack hears it once per state (a countdown re-announced every second is noise), as it stood then.
+    val carriedSpoken = remember(carriedOn, carriedState) { carriedLine }
 
     val back: () -> Unit = {
         if (reviewing != null) {
@@ -282,6 +298,7 @@ fun NameRegistrationScreen(
                                 if (sender.isStale(r.quote)) {
                                     reviewing = null
                                     notice = Strings.get(R.string.namereg_send_stale)
+                                    carriedOn = null
                                     return@confirm
                                 }
                                 busy = true
@@ -298,12 +315,14 @@ fun NameRegistrationScreen(
                                             is NameRegistrar.Dispatched.NotSent -> notice = d.message
                                             NameRegistrar.Dispatched.Unknown -> notice = Strings.get(R.string.namereg_state_dispatch_unknown)
                                         }
+                                        carriedOn = null
                                         reviewing = null
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: NameException) {
                                         reviewing = null
                                         notice = e.message
+                                        carriedOn = null
                                     } catch (e: Exception) {
                                         error = safeErrorMessage(e, Strings.get(R.string.wallet_action_unlock), phraseBackedUp)
                                     } finally {
@@ -356,10 +375,18 @@ fun NameRegistrationScreen(
                             onRenew = { c -> begin(c, Intent.RENEW) },
                         )
                     }
-                    if (notice != null || error != null) {
+                    if (notice != null || error != null || carriedLine != null) {
                         item("notice") {
                             Column(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
                                 notice?.let { MutedText(it) }
+                                carriedLine?.let {
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.clearAndSetSemantics { contentDescription = carriedSpoken ?: it },
+                                    )
+                                }
                                 error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                             }
                         }

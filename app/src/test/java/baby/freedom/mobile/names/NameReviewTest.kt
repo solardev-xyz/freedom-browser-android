@@ -1,6 +1,7 @@
 package baby.freedom.mobile.names
 
 import baby.freedom.mobile.chains.BuiltInChains
+import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.names.NameOperation.Intent
 import baby.freedom.mobile.names.NameOperation.State
 import baby.freedom.mobile.names.NameOperation.Step
@@ -133,5 +134,29 @@ class NameReviewTest {
         )
         assertTrue(carriedOnNotice(op().copy(state = State.DISPATCH_UNKNOWN), 0)!!.contains("won't send it again"))
         assertNull("a ready one opens its review instead", carriedOnNotice(op(), 0))
+    }
+
+    @Test
+    fun `the carried-on line follows the operation as it is now, and goes once it's ready or gone`() {
+        val waiting = op(step = Step.REVEAL).copy(state = State.WAITING_COMMITMENT, readyAt = 1_000, expiresAt = 87_400)
+        assertTrue(carriedOnLine(waiting.id, listOf(waiting), 955)!!.contains("about 45 s"))
+        // A minute on: not the 45 s it said when it was handed back.
+        assertTrue(carriedOnLine(waiting.id, listOf(waiting), 999)!!.contains("in a moment"))
+        assertNull("ready: its card offers the review", carriedOnLine(waiting.id, listOf(waiting.copy(state = State.READY)), 1_015))
+        assertNull("dismissed", carriedOnLine(waiting.id, emptyList(), 1_015))
+        assertNull("nothing handed back", carriedOnLine(null, listOf(waiting), 955))
+    }
+
+    @Test
+    fun `a commitment not seen says so once, and doesn't claim a transaction of this step went through`() {
+        val missing = Strings.get(baby.freedom.mobile.R.string.namereg_state_commitment_missing)
+        val unseen = op(step = Step.REVEAL).copy(state = State.VERIFICATION_NEEDED, message = missing)
+        assertEquals(missing, operationStatus(unseen, 0))
+        assertEquals(missing, carriedOnNotice(unseen, 0)!!.substringAfter("started. ").substringBefore(" It carries on below."))
+        // A reveal mined with its effect not seen yet: that one did go through.
+        val mined = unseen.copy(message = Strings.get(baby.freedom.mobile.R.string.namereg_state_verification_needed))
+        assertTrue(operationStatus(mined, 0).startsWith("The transaction went through"))
+        assertEquals(1, Regex("Check again in a moment").findAll(operationStatus(mined, 0)).count())
+        assertTrue(operationStatus(unseen.copy(message = null), 0).startsWith("The transaction went through"))
     }
 }

@@ -663,4 +663,45 @@ class NameRegistrarTest {
             dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `a wipe the disk refuses still forgets every operation here, and says the file stayed`() = runBlocking {
+        val j = NameJournal.Memory()
+        val r = registrar(j)
+        r.start(r.check("freedom.eth", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        j.failSaves = true
+        try {
+            r.wipe()
+            fail("a wipe that left the journal reported success")
+        } catch (e: NameException) {
+            assertEquals(NameException.Code.SECURE_STORAGE, e.code)
+        }
+        assertEquals(emptyList<NameOperation>(), r.operations.value)
+        // Next time the journal is read back, it's tried again (the wallet page, with no wallet).
+        j.failSaves = false
+        val again = registrar(j)
+        assertEquals(1, again.operations.value!!.size)
+        again.wipe()
+        assertEquals(emptyList<NameOperation>(), j.saved)
+    }
+
+    @Test
+    fun `a journal that can't be rewritten is deleted instead when the wallet goes`() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("names").toFile()
+        try {
+            val file = java.io.File(dir, "operations.json")
+            val r = registrar(NameJournal.FileBacked(file))
+            r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+            assertTrue(file.exists())
+            java.io.File(dir, "operations.json.unreadable-1").writeText("{}")
+            // A directory where the temporary file goes: every save fails, as on a full disk.
+            java.io.File(dir, "operations.json.tmp").mkdir()
+            r.wipe()
+            assertFalse(file.exists())
+            assertTrue(dir.listFiles()!!.none { it.name.contains("unreadable") })
+            assertEquals(emptyList<NameOperation>(), r.operations.value)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

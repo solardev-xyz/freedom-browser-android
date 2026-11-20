@@ -27,6 +27,7 @@
     <string name="namereg_error_commitment_mismatch">The saved registration doesn\'t match its commitment. Nothing was sent.</string>
     <string name="namereg_error_secret_lost">The saved registration secret can\'t be read on this phone any more. The commit can\'t be completed; dismiss it and start again.</string>
     <string name="namereg_error_secure_storage">Registering needs the phone\'s secure key storage, which isn\'t working. Renewals still work.</string>
+    <string name="namereg_error_wipe">Couldn\'t delete the name registrations saved on this phone.</string>
     <string name="namereg_error_save">Couldn\'t save on this phone. Nothing was sent. Check the free space and try again.</string>
     <string name="namereg_error_gone">That registration isn\'t on this phone any more.</string>
     <string name="namereg_error_not_ready">This step isn\'t ready to send yet.</string>

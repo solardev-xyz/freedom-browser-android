@@ -53,7 +53,12 @@ data class NameOperation(
     val transactionHash: String? = null,
     /** The commit's transaction, once mined. */
     val commitHash: String? = null,
-    /** A renewal's name state as prepared: its expiry (and the wrapper's) must move by exactly [duration]. */
+    /**
+     * A renewal's name state as prepared: it must still be this at Confirm,
+     * and the renewal counts as done once the expiry (and the wrapper's)
+     * is at least this plus [duration] — "at least", since another renewal
+     * landing too moves it further.
+     */
     val beforeExpiry: BigInteger? = null,
     val beforeWrapperExpiry: BigInteger? = null,
     val wrapped: Boolean = false,
@@ -184,6 +189,18 @@ interface NameJournal {
      */
     fun forgetSetAside() {}
 
+    /**
+     * Leaves nothing of the journal behind (Remove wallet): an empty one
+     * saved, or — when that write can't go (a full disk) — the file
+     * deleted, as is any temporary file a failed save left and every
+     * copy set aside. False when something of it is still there.
+     */
+    fun erase(): Boolean {
+        val saved = save(emptyList())
+        forgetSetAside()
+        return saved
+    }
+
     /** In memory, for tests. */
     class Memory(initial: List<NameOperation> = emptyList(), var failSaves: Boolean = false) : NameJournal {
         var saved: List<NameOperation> = initial
@@ -196,6 +213,9 @@ interface NameJournal {
             saved = operations
             return true
         }
+
+        /** With [failSaves], the entries can't be deleted either: the worst case, for tests. */
+        override fun erase(): Boolean = save(emptyList())
     }
 
     class FileBacked(private val file: File) : NameJournal {
@@ -271,6 +291,20 @@ interface NameJournal {
 
         override fun forgetSetAside() {
             file.parentFile?.listFiles { f -> f.name.startsWith("${file.name}.unreadable-") }?.forEach { it.delete() }
+        }
+
+        override fun erase(): Boolean {
+            // An empty journal saved, or else none at all: deleting needs no free space.
+            val saved = save(emptyList())
+            if (!saved) file.delete()
+            val tmp = File(file.parentFile, "${file.name}.tmp")
+            if (tmp.isFile) tmp.delete()
+            forgetSetAside()
+            val left = !saved && file.exists() ||
+                tmp.isFile ||
+                file.parentFile?.listFiles { f -> f.name.startsWith("${file.name}.unreadable-") }.orEmpty().isNotEmpty()
+            runCatching { FileSendJournal.syncDirectory(file.parentFile) }
+            return !left
         }
 
         private companion object {

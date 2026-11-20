@@ -171,6 +171,8 @@
     <string name="wallet_remove_title">Remove wallet</string>
     <string name="wallet_remove_subtitle">Erases it from this phone</string>
     <!-- %s: why Google Play services couldn’t delete it. -->
+    <!-- %s: why (from the name registrations' store). -->
+    <string name="wallet_removed_names_not_deleted">The wallet is removed, but the names it was registering or renewing are still saved on this phone: %s Free up some space; Freedom tries again each time this page opens without a wallet.</string>
     <string name="wallet_removed_backup_not_deleted">The wallet is removed, but its Google backup couldn’t be deleted (%s). Delete it below once Google Play services answers.</string>
     <string name="wallet_removed_kept_other_wallets">The wallet is removed. The Google backup on this phone is another wallet’s, so it was kept: restore or delete it below.</string>
     <string name="wallet_removed_kept_unknown">The wallet is removed. Freedom couldn’t tell whether the Google backup on this phone is this wallet’s, so it was kept: restore or delete it below.</string>
