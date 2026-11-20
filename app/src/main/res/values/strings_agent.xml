@@ -217,7 +217,7 @@
     <string name="agent_approve_dialog_cancel">Answer Cancel to the page\'s message</string>
     <string name="agent_approve_upload">Attach a file you choose</string>
     <string name="agent_approve_download">Download a file</string>
-    <string name="agent_approve_upload_picker">You pick the file in Android\'s file picker, or cancel there. The agent learns its name, size and type, never where it\'s kept.</string>
+    <string name="agent_approve_upload_picker">You pick the file in Android\'s file picker, or take it with the camera if the page asks for a photo or video, or cancel there. The agent learns its name, size and type, never where it\'s kept.</string>
     <string name="agent_approve_download_saves">Allowing saves the file at this link\'s exact address, once, without asking again (unless you choose where to save each download). Any other download this tap starts, even where the link redirects to, waits for you.</string>
     <string name="agent_approve_site">On %1$s</string>
     <string name="agent_approve_site_none">On a page with no address</string>

@@ -167,13 +167,17 @@ private fun ApprovalBody(approval: AgentApproval) {
             )
         }
         is AgentAction.Press -> TargetRows(action.target)
+        // What Allow does comes first: a link's address can be long enough
+        // to push anything after it out of the card's scroll area.
         is AgentAction.Upload -> {
-            TargetRows(action.target)
             Text(stringResource(R.string.agent_approve_upload_picker), style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
+            TargetRows(action.target)
         }
         is AgentAction.Download -> {
-            TargetRows(action.target)
             Text(stringResource(R.string.agent_approve_download_saves), style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(8.dp))
+            TargetRows(action.target)
         }
         is AgentAction.Scroll -> action.target?.takeIf { it.role != "viewport" }?.let { TargetRows(it) }
         is AgentAction.Dialog -> {

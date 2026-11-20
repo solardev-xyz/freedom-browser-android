@@ -31,7 +31,7 @@ import org.json.JSONObject
  *
  * Uploads and downloads (#600) have tools of their own, which always
  * ask: `browser_upload` taps a file input and the user picks the file in
- * Android's picker; `browser_download` taps a download link, and only
+ * Android's picker (or takes it with the camera, for `capture`); `browser_download` taps a download link, and only
  * the download that approval covers ([DownloadIntentMatch]) is saved
  * without the usual prompt. A plain click on either is refused.
  */
@@ -278,7 +278,13 @@ internal class BrowserToolset(
             .put("loading", after.loading)
             .put("untrusted", UNTRUSTED_NOTE)
             .put("page", result)
-        return ok(out)
+        return ok(noteLate(tab.id, out))
+    }
+
+    /** An approved download that came after browser_download gave up on it ([AgentDownloads.lapse]), said once. */
+    private fun noteLate(tabId: Long, out: JSONObject): JSONObject {
+        if (AgentDownloads.takeLate(tabId)) out.put("lateDownload", LATE_DOWNLOAD_NOTE)
+        return out
     }
 
     private fun documentIdOf(tab: AgentTab) = "doc_${tab.id}_${tab.document}"
@@ -595,14 +601,15 @@ internal class BrowserToolset(
             .put("navigated", now != null && now.document != tab.document)
         // Desktop's blocked download, reported with the step that caused it (#600).
         if (AgentDownloads.takeHeld(tab.id)) out.put("heldDownload", HELD_DOWNLOAD_NOTE)
-        return out
+        return noteLate(tab.id, out)
     }
 
     /**
      * `browser_upload` (#600): desktop's `file-upload-controller.js`.
      * Always asks; the approved tap on the file input (or its label)
-     * opens the page's file chooser, which is Android's picker: the user
-     * picks there, or cancels. The receipt is the picked file's name,
+     * opens the page's file chooser, which is Android's picker (the camera,
+     * for an input with `capture`): the user picks or takes the file
+     * there, or cancels. The receipt is the picked file's name,
      * size and type as its provider tells them, never its address.
      */
     private suspend fun upload(rawRef: String): ToolOutcome {
@@ -691,13 +698,20 @@ internal class BrowserToolset(
      * page starts waits for the user: one that ends the wait (another
      * address, or a window the page opened) is the result; one that comes
      * after the approved download started is said with its result
-     * (`heldDownload`). The card shows that address in full; one it can't
+     * (`heldDownload`). The approved link's download coming only after the
+     * start wait ran out waits for the user too, and is said with the next
+     * step on the tab (`lateDownload`), or instead of asking again here.
+     * The card shows that address in full; one it can't
      * show as it is isn't asked about. A download that starts on the
      * approval alone stops if the turn stops or it can't be recorded.
      */
     private suspend fun download(rawRef: String): ToolOutcome {
         val port = files() ?: throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Downloads are unavailable right now.")
         val tab = heldTab(readable = true)
+        // The approved link's download came after an earlier call gave up on it: not asked again.
+        if (AgentDownloads.takeLate(tab.id)) {
+            throw ToolError(ToolError.APPROVAL_REQUIRED, "$LATE_DOWNLOAD_NOTE Nothing else was done.")
+        }
         val ref = resolveRef(tab, rawRef)
         if (ref.viewport) throw ToolError(ToolError.INVALID_ARGUMENT, "Use the viewport reference only with browser_scroll.")
         val raw = describeRaw(tab, ref, "click")
@@ -747,9 +761,14 @@ internal class BrowserToolset(
                 // Disarmed first: a download that met the intent as the wait ran
                 // out is answered below, not left to start unreported.
                 if (AgentDownloads.disarm(intent)) {
+                    // One that comes later still waits for the user, and is said with a later step.
+                    AgentDownloads.lapse(intent)
                     throw ToolError(
                         ToolError.WAIT_TIMEOUT,
-                        "The page did not start a download after the requested interaction. Take a new snapshot to see what it did.",
+                        "The page did not start a download within ${DOWNLOAD_START_WAIT_MS / 1_000} seconds of the approved " +
+                            "tap. If it starts it later, it is not saved without the user: it waits in Freedom's download " +
+                            "prompt, and a later browser step on this tab says so (lateDownload). Do not call " +
+                            "browser_download on this link again; take a new snapshot to see what the page did.",
                     )
                 }
             }
@@ -889,7 +908,7 @@ internal class BrowserToolset(
             met
         }
         if (matched == null) throw ToolError(ToolError.WAIT_TIMEOUT, "The condition wasn't met within ${w.timeoutMs} ms.")
-        return ok(JSONObject().put("matched", true).put("tab", describeTab(matched)))
+        return ok(noteLate(tab.id, JSONObject().put("matched", true).put("tab", describeTab(matched))))
     }
 
     private suspend fun getDialog(): ToolOutcome {
@@ -1072,6 +1091,10 @@ internal class BrowserToolset(
 
         /** A link address the page script cut ([page.js] `describe`): too long to match a download against. */
         const val MAX_LINK_CHARS = 4_096
+
+        const val LATE_DOWNLOAD_NOTE = "The approved link's download started after browser_download had stopped " +
+            "waiting for it. It was not saved: it waits for the user in Freedom's download prompt. Do not call " +
+            "browser_download for it again; tell the user it is waiting for their answer."
 
         const val HELD_DOWNLOAD_NOTE = "The page started a download that no approval covered. It waits for the " +
             "user in Freedom's download prompt and was not saved. If the task needs that file, use " +

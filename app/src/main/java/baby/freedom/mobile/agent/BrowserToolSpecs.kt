@@ -221,8 +221,9 @@ internal object BrowserToolSpecs {
             "Ask the user to choose one local file, then attach it to an exact file-input reference from the latest " +
                 "page snapshot (or a label for one). Freedom never reveals the local path. File selection always " +
                 "requires approval, even when ordinary website interactions are allowed; Freedom brings the tab on " +
-                "screen and the user picks the file in Android's file picker. If the user cancels the picker, do not " +
-                "retry unless they explicitly ask again.",
+                "screen and the user picks the file in Android's file picker (or, for an input that asks for a capture, " +
+                "takes it with the camera, which opens directly). If the user cancels, do not retry unless they " +
+                "explicitly ask again.",
             obj("ref" to str(), required = listOf("ref")),
         ),
         ToolSpec(

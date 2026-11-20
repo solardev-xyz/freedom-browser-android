@@ -150,6 +150,10 @@ internal object AgentDownloads {
     private val armed = HashMap<Long, DownloadIntent>()
     private val held = HashSet<Long>()
 
+    /** Tab -> the intent whose wait ran out before its download came ([lapse]). */
+    private val lapsed = HashMap<Long, DownloadIntent>()
+    private val late = HashSet<Long>()
+
     /** Who holds a tab; [AgentTabs] outside tests. */
     @Volatile
     internal var holderOf: (Long) -> String? = { AgentTabs.holder(it) }
@@ -164,7 +168,20 @@ internal object AgentDownloads {
         if (intent.tabId in armed) return false
         armed[intent.tabId] = intent
         held.remove(intent.tabId)
+        lapsed.remove(intent.tabId)
         return true
+    }
+
+    /**
+     * [intent]'s wait ran out with nothing claiming it (after [disarm]
+     * said so). If the approved link's download comes after all, it waits
+     * for the user like any other, but is noted apart ([takeLate]): kept
+     * past the next step's start, so the agent hears of it and doesn't ask
+     * again for a file already waiting in the offer prompt.
+     */
+    @Synchronized
+    fun lapse(intent: DownloadIntent) {
+        if (intent.tabId !in armed) lapsed[intent.tabId] = intent
     }
 
     /**
@@ -195,7 +212,13 @@ internal object AgentDownloads {
         val intent = armed[tabId]
         if (intent == null) {
             val holder = holderOf(tabId) ?: return null
-            held += tabId
+            val gone = lapsed[tabId]
+            if (gone != null && gone.sessionId == holder && DownloadIntentMatch.matches(gone.expectedUrl, url)) {
+                lapsed.remove(tabId)
+                late += tabId
+            } else {
+                held += tabId
+            }
             val opener = openerOf(tabId)
             if (opener != null && opener != tabId && holderOf(opener) == holder) {
                 held += opener
@@ -243,18 +266,25 @@ internal object AgentDownloads {
     @Synchronized
     fun takeHeld(tabId: Long): Boolean = held.remove(tabId)
 
+    /** Whether the approved link's download came after its wait ran out ([lapse]) since last asked; clears it. */
+    @Synchronized
+    fun takeLate(tabId: Long): Boolean = late.remove(tabId)
+
     /** For tests. */
     @Synchronized
     internal fun clear() {
         armed.clear()
         held.clear()
+        lapsed.clear()
+        late.clear()
     }
 }
 
 /**
  * One approved `browser_upload`, armed on its tab just before the
  * agent's tap on the file input (#600). The file chooser that tap opens
- * is the user's: Android's own picker, where they pick or cancel. The
+ * is the user's: Android's own picker (the camera, for `capture`), where
+ * they pick or take the file, or cancel. The
  * agent is told only what was attached (name, size, type), never where
  * it came from.
  */

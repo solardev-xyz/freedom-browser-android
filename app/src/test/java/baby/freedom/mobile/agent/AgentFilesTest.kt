@@ -247,6 +247,37 @@ class AgentFilesTest {
     }
 
     @Test
+    fun `the approved link's download after the wait ran out is noted apart, past the next step's start`() {
+        AgentDownloads.holderOf = { if (it == 1L) "chat" else null }
+        val i = intent()
+        assertTrue(AgentDownloads.arm(i))
+        assertTrue(AgentDownloads.disarm(i))
+        AgentDownloads.lapse(i)
+        // Another address is an ordinary held download.
+        assertNull(AgentDownloads.claim(1, "https://evil.example/a.zip"))
+        assertFalse(AgentDownloads.takeLate(1))
+        assertTrue(AgentDownloads.takeHeld(1))
+        // The approved link, late: waits for the user, not saved, and is
+        // not cleared by the next step's start (which takes only held ones).
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip#x"))
+        assertFalse(i.start.isCompleted)
+        assertFalse(AgentDownloads.takeHeld(1))
+        assertTrue(AgentDownloads.takeLate(1))
+        assertFalse(AgentDownloads.takeLate(1))
+        // Once only: the same link again is an ordinary held download.
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertFalse(AgentDownloads.takeLate(1))
+        assertTrue(AgentDownloads.takeHeld(1))
+        // A new intent on the tab replaces the lapsed one.
+        AgentDownloads.lapse(i)
+        val j = intent()
+        assertTrue(AgentDownloads.arm(j))
+        assertTrue(AgentDownloads.disarm(j))
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertFalse(AgentDownloads.takeLate(1))
+    }
+
+    @Test
     fun `a tab taken back before its download comes is the user's`() {
         val i = intent()
         AgentDownloads.arm(i)

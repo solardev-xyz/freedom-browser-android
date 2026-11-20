@@ -1198,6 +1198,62 @@ class BrowserToolsTest {
     }
 
     @Test
+    fun `the approved link's download after the start wait ran out is reported with the next step, not asked again`() = runBlocking {
+        downloadLink()
+        val tools = toolset()
+        // The page does nothing within the start wait.
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("WAIT_TIMEOUT", out.code())
+        assertTrue(out.output, out.output.contains("Do not call browser_download on this link again"))
+        host.control = JSONObject().put("role", "button").put("tag", "button").put("name", "Next")
+        val next = snapshotRef(tools)
+        // Then it starts the approved link after all: held for the user, not saved.
+        assertNull(AgentDownloads.claim(1, "https://example.com/files/report.pdf"))
+        assertTrue(files.records.of("chat").isEmpty())
+        // The next step's start doesn't clear it unreported: said with that step, once.
+        val click = tools.call("browser_click", JSONObject().put("ref", next))
+        assertFalse(click.isError)
+        assertTrue(click.result().getString("lateDownload").contains("Do not call browser_download"))
+        assertFalse(click.result().has("heldDownload"))
+        assertFalse(tools.call("browser_snapshot").result().has("lateDownload"))
+    }
+
+    @Test
+    fun `a snapshot reports the approved link's late download`() = runBlocking {
+        downloadLink()
+        val earlier = DownloadIntent("chat", 1, "https://example.com/files/report.pdf", direct = true)
+        assertTrue(AgentDownloads.arm(earlier))
+        assertTrue(AgentDownloads.disarm(earlier))
+        AgentDownloads.lapse(earlier)
+        assertNull(AgentDownloads.claim(1, "https://example.com/files/report.pdf"))
+        val tools = toolset()
+        tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+        assertTrue(tools.call("browser_snapshot").result().getString("lateDownload").contains("download prompt"))
+        assertFalse(tools.call("browser_snapshot").result().has("lateDownload"))
+    }
+
+    @Test
+    fun `browser_download on a tab whose approved download came late says so instead of asking again`() = runBlocking {
+        downloadLink()
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        val earlier = DownloadIntent("chat", 1, "https://example.com/files/report.pdf", direct = true)
+        assertTrue(AgentDownloads.arm(earlier))
+        assertTrue(AgentDownloads.disarm(earlier))
+        AgentDownloads.lapse(earlier)
+        assertNull(AgentDownloads.claim(1, "https://example.com/files/report.pdf"))
+        val out = tools.call("browser_download", JSONObject().put("ref", ref))
+        assertEquals("APPROVAL_REQUIRED", out.code())
+        assertTrue(out.output, out.output.contains("waits for the user in Freedom's download prompt"))
+        assertTrue(asked.isEmpty())
+        // Said once: a new call asks as usual.
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.declined() }
+        val again = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("DOWNLOAD_CANCELLED_BY_USER", again.code())
+        assertEquals(1, asked.size)
+    }
+
+    @Test
     fun `a download held before a step isn't reported with it`() = runBlocking {
         host.add(page(1))
         AgentTabs.hold(1, "chat", private = false)

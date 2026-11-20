@@ -19,7 +19,7 @@ internal sealed interface AgentAction {
     data class Press(val target: PageTarget, val key: String) : AgentAction
     data class Scroll(val target: PageTarget?, val direction: String, val pages: Double) : AgentAction
 
-    /** Tap a file input (browser_upload, #600): the user picks the file in Android's picker. */
+    /** Tap a file input (browser_upload, #600): the user picks the file in Android's picker (or the camera, for `capture`). */
     data class Upload(val target: PageTarget) : AgentAction
 
     /**
