@@ -202,6 +202,15 @@ internal class AgentLoop(
             for (call in result.toolCalls) {
                 val out = tools.run(call, images)
                 turn += ChatItem.ToolResult(call.id, call.name, out.output, out.isError, out.images)
+                // An image left out of a request is never sent again, so
+                // the turn lets go of it too: a turn of page renders or
+                // photos holds at most one request's images, not every
+                // one a tool returned.
+                if (out.images.isNotEmpty()) {
+                    val pruned = withinImageBudget(turn)
+                    turn.clear()
+                    turn.addAll(pruned)
+                }
                 // The user's Don't allow ends the turn: the step's other
                 // calls aren't run and no further step is asked for, so
                 // one no isn't followed by another card, and another.

@@ -357,4 +357,39 @@ class AgentLoopTest {
         assertEquals(5, user.text.split("\n").count { it == AgentLoop.IMAGE_DROPPED })
         assertEquals(20, AgentLoop.MAX_IMAGES)
     }
+
+    @Test
+    fun `a turn lets go of the images it no longer sends`() {
+        // Each step's tool returns a new picture; the turn mustn't keep
+        // the ones past the newest 20 alive until it ends.
+        val first = ArrayList<java.lang.ref.WeakReference<ImagePart>>()
+        val camera = object : AgentTool {
+            override val spec = ToolSpec("look", "Look.", JSONObject().put("type", "object"))
+            override suspend fun run(arguments: JSONObject): ToolOutcome {
+                val image = ImagePart("image/png", "P".repeat(1000) + first.size)
+                first += java.lang.ref.WeakReference(image)
+                return ToolOutcome("a picture", images = listOf(image))
+            }
+        }
+        val steps = 22
+        var collected = -1
+        var sent = -1
+        val model = object : ModelStream {
+            var n = 0
+            override suspend fun step(request: StepRequest, onText: (String) -> Unit): StepOutcome {
+                if (n++ < steps) return StepOutcome.Ok(StepResult("", listOf(ToolCall("c$n", "look", "{}")), StopReason.ToolUse))
+                sent = request.items.sumOf { (it as? ChatItem.ToolResult)?.images?.size ?: 0 }
+                repeat(5) { System.gc(); Thread.sleep(20) }
+                collected = first.take(steps - AgentLoop.MAX_IMAGES).count { it.get() == null }
+                onText("Pictures.")
+                return StepOutcome.Ok(StepResult("Pictures.", emptyList(), StopReason.Done))
+            }
+        }
+        val loop = AgentLoop(model, ToolRegistry(listOf(camera)), ContextLimits(128_000, 1000), "m", { "s" }, images = true)
+        val outcome = runBlocking { loop.run(emptyList(), null, "look", {}, {}) }
+        assertEquals("Pictures.", outcome.text)
+        assertEquals(AgentLoop.MAX_IMAGES, sent)
+        assertEquals(steps - AgentLoop.MAX_IMAGES, collected)
+        assertTrue(first.takeLast(AgentLoop.MAX_IMAGES).all { it.get() != null })
+    }
 }
