@@ -70,4 +70,22 @@ class SitePermissionPromptTest {
         assertTrue(heldAnswerRecords(PromptAnswer.Allow(remember = false), agentHeld = false))
         assertTrue(heldAnswerRecords(PromptAnswer.Allow(remember = true), agentHeld = false))
     }
+
+    @Test
+    fun `a held tab's note says a location or MIDI grant stays with the page until reload (#605)`() {
+        // Each camera, microphone or app-link request reaches the broker, so it asks again.
+        assertEquals(baby.freedom.mobile.R.string.library_permission_prompt_agent_held, agentHeldPromptHint(listOf(SitePermission.CAMERA)))
+        assertEquals(
+            baby.freedom.mobile.R.string.library_permission_prompt_agent_held,
+            agentHeldPromptHint(listOf(SitePermission.CAMERA, SitePermission.MICROPHONE)),
+        )
+        assertEquals(baby.freedom.mobile.R.string.library_permission_prompt_agent_held, agentHeldPromptHint(listOf(ExternalScheme("tel"))))
+        // WebView keeps these for the document's life: no "asks again".
+        assertEquals(baby.freedom.mobile.R.string.library_permission_prompt_agent_held_until_reload, agentHeldPromptHint(listOf(SitePermission.LOCATION)))
+        assertEquals(baby.freedom.mobile.R.string.library_permission_prompt_agent_held_until_reload, agentHeldPromptHint(listOf(SitePermission.MIDI)))
+        assertEquals(
+            baby.freedom.mobile.R.string.library_permission_prompt_agent_held_until_reload,
+            agentHeldPromptHint(listOf(SitePermission.CAMERA, SitePermission.MIDI)),
+        )
+    }
 }

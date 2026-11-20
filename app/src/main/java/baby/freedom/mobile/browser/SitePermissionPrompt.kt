@@ -75,7 +75,7 @@ internal enum class PermissionChoice {
  * to remember a decision in (#86) — its answer lasts the private session
  * whichever button it is — so there "every visit" isn't offered. Nor in
  * a tab Freedom Agent holds (#605): no standing Allow answers there, and
- * its Allow is for that one request ([heldAnswerRecords]).
+ * its Allow is recorded nowhere ([heldAnswerRecords]).
  */
 internal fun permissionChoices(private: Boolean, agentHeld: Boolean): List<PermissionChoice> =
     if (private || agentHeld) {
@@ -102,7 +102,8 @@ internal fun permissionAnswer(choice: PermissionChoice, private: Boolean, agentH
  * visiting"), "Allow every visit"
  * (remembered) and "Don't allow" (a remembered block); in a private tab
  * just "Allow" and "Don't allow", both lasting the private session; in
- * a tab Freedom Agent holds (#605) "Allow this time" (this request only)
+ * a tab Freedom Agent holds (#605) "Allow this time" (recorded nowhere;
+ * a location or MIDI grant stays with the page until it's reloaded)
  * and "Don't allow" (this session). A
  * standing grant is always its own, explicit tap: no box decides it.
  * Back or a tap outside is a dismissal — a deny-once that counts towards
@@ -167,7 +168,7 @@ fun SitePermissionPrompt(prompt: PermissionPrompt) {
                             R.string.library_permission_prompt_private
                         } else if (prompt.agentHeld) {
                             // #605: what an Allow here does, and doesn't.
-                            R.string.library_permission_prompt_agent_held
+                            agentHeldPromptHint(prompt.permissions)
                         } else {
                             R.string.library_permission_prompt_session_hint
                         },
@@ -226,10 +227,25 @@ internal fun embeddedPermissionHint(scope: PermissionScope): String? =
         null
     }
 
+/**
+ * The held-tab prompt's note (#605). Nothing is recorded, but WebView
+ * keeps a location grant for the document's whole life, answering its
+ * later requests without asking, and a `MIDIAccess` it was given keeps
+ * working ([stillHeldAfterRemoval]), so for those "the next request asks
+ * again" would be false: the page keeps them until it's reloaded. A
+ * camera, microphone or app link asks again on the next request.
+ */
+internal fun agentHeldPromptHint(permissions: List<SiteCapability>): Int =
+    if (permissions.any { it == SitePermission.LOCATION || it == SitePermission.MIDI }) {
+        R.string.library_permission_prompt_agent_held_until_reload
+    } else {
+        R.string.library_permission_prompt_agent_held
+    }
+
 internal fun permissionChoiceLabel(choice: PermissionChoice, private: Boolean, agentHeld: Boolean): Int = when (choice) {
     // In a private tab this is the only Allow, and "this session" would
     // mislead: it lasts the private session (the note above says so).
-    // In a held tab it lasts this one request (#605).
+    // In a held tab it's recorded nowhere (#605; [agentHeldPromptHint]).
     PermissionChoice.ALLOW_THIS_SESSION -> when {
         private -> R.string.common_allow
         agentHeld -> R.string.library_permission_prompt_allow_once

@@ -45,11 +45,17 @@ internal suspend fun rememberedDecisions(
 /**
  * Whether [answer], given on a prompt, goes into the session tier
  * ([PermissionSession]) at all. From a tab Freedom Agent holds (#605)
- * an Allow is for that one request: it would answer none of the held
- * tab's later requests ([planFor]), and in the user's own tabs it would
- * be a grant they never gave there. A block is kept as usual, so a
- * "Don't allow" (and the dismissal embargo) still stops a page that
- * asks again and again.
+ * an Allow is recorded nowhere: it would answer none of the held tab's
+ * later requests ([planFor]), and in the user's own tabs it would be a
+ * grant they never gave there. (What WebView itself keeps for the
+ * document — a location grant answering its later requests, a
+ * `MIDIAccess` — still lasts until it's reloaded; the prompt says so,
+ * [agentHeldPromptHint].) A block is kept as usual, in the same tier
+ * as any other "Don't allow" from a normal tab ([PermissionSession],
+ * not a private tab's own), so a "Don't allow" (and the dismissal
+ * embargo) still stops a page that asks again and again — and, with no
+ * remembered decision for the site, also applies in the user's own
+ * tabs until Freedom closes.
  */
 internal fun heldAnswerRecords(answer: PromptAnswer, agentHeld: Boolean): Boolean =
     !(agentHeld && answer is PromptAnswer.Allow)
@@ -73,7 +79,8 @@ class PermissionPrompt internal constructor(
     /**
      * Asked from a tab Freedom Agent holds (#605): no standing Allow
      * answers there, so the prompt offers no "remember" and its Allow
-     * is for this request only ([heldAnswerRecords]). No default: a
+     * is recorded nowhere ([heldAnswerRecords]) — though WebView keeps a
+     * location or MIDI grant for the document's life ([agentHeldPromptHint]). No default: a
      * prompt has to say whose tab it's in.
      */
     val agentHeld: Boolean,
@@ -100,7 +107,8 @@ class PermissionPrompt internal constructor(
  *     is denied — protected media (DRM, #267) with a notice saying why.
  *  2. Look up remembered + session decisions ([planFor]). In a tab
  *     Freedom Agent holds (#605) no Allow answers, only a block does:
- *     the user is asked, and their Allow there is for that request only.
+ *     the user is asked, and their Allow there is recorded nowhere (a
+ *     location or MIDI grant still lasts the document, as WebView keeps it).
  *  3. Undecided → put a [PermissionPrompt] on the tab and wait. One
  *     prompt at a time per tab: requests queue behind a per-tab lock
  *     and re-plan when they get it, so a second identical request
@@ -805,7 +813,7 @@ class SitePermissionBroker private constructor(
         }
         return when (answer) {
             is PromptAnswer.Allow -> {
-                // A held tab's Allow is for this request only: it allows
+                // A held tab's Allow is recorded nowhere: it allows
                 // nothing again in other tabs' documents either.
                 if (heldAnswerRecords(answer, agentHeld)) {
                     noteAllowedAgain(scope, undecided.filterIsInstance<SitePermission>(), tab.private)
