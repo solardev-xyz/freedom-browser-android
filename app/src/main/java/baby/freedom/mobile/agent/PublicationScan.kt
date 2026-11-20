@@ -238,27 +238,52 @@ internal object PublicationScan {
     private const val CREDENTIAL_NAMES = "password|passwd|api[_-]?key|secret|token|access[_-]?token|auth[_-]?token|private[_-]?key"
 
     private fun isKeyName(c: Char) = isWord(c) || c == '.' || c == '-'
-    private val KEY_SUFFIXES = listOf("key", "value")
+    private val KEY_SUFFIXES = listOf("access", "value", "base", "key")
+    private const val MAX_KEY_SUFFIXES = 3
     private const val MAX_KEY_PREFIX = 256
 
     /**
      * Where a credential name whose keyword ends at [keywordEnd] ends: the
-     * keyword alone, or followed by a `key`/`value` part, as in `SECRET_KEY`,
-     * `secretKey` or `token.value`. Other suffixes (`token_count`,
-     * `secret_name`) name something else.
+     * keyword alone, or followed by up to three `access`/`key`/`value`/`base`
+     * parts, as in `SECRET_KEY`, `secretKey`, `token.value`,
+     * `AWS_SECRET_ACCESS_KEY` or `SECRET_KEY_BASE`. Other suffixes
+     * (`token_count`, `secret_name`) name something else.
      */
     internal fun credentialNameEnd(text: String, keywordEnd: Int): Int {
-        val at = if (keywordEnd < text.length && text[keywordEnd] in "_.-") keywordEnd + 1 else keywordEnd
-        for (suffix in KEY_SUFFIXES) {
-            if (text.regionMatches(at, suffix, 0, suffix.length, ignoreCase = true)) return at + suffix.length
+        var end = keywordEnd
+        repeat(MAX_KEY_SUFFIXES) {
+            val at = if (end < text.length && text[end] in "_.-") end + 1 else end
+            val suffix = KEY_SUFFIXES.firstOrNull { text.regionMatches(at, it, 0, it.length, ignoreCase = true) } ?: return end
+            end = at + suffix.length
         }
-        return keywordEnd
+        return end
+    }
+
+    private val CODE_ROOTS = setOf(
+        "self", "this", "cls", "os", "process", "settings", "config", "conf", "cfg", "form", "request", "req", "env",
+        "ctx", "context", "options", "opts", "args", "params", "app", "props", "state", "credentials", "creds", "secrets",
+    )
+    private val CODE_SEGMENT = Regex("[A-Za-z_$]+")
+    private val CREDENTIAL_WORD = Regex("(?:$CREDENTIAL_NAMES)", RegexOption.IGNORE_CASE)
+
+    /**
+     * An unquoted value that reads as code, not as a credential: a member
+     * access of letter-only names that starts at a common object
+     * (`self.token`, `os.environ.get`) or names a credential itself
+     * (`form.password.data`, `settings.SECRET_KEY`). A digit anywhere, as
+     * in most real passwords, keeps it a value.
+     */
+    internal fun codeReference(value: String): Boolean {
+        val segments = value.split('.')
+        return segments.size >= 2 && segments.all { CODE_SEGMENT.matches(it) } &&
+            (segments[0].lowercase() in CODE_ROOTS || segments.any { CREDENTIAL_WORD.containsMatchIn(it) })
     }
 
     /**
      * The credential name whose keyword starts at [keywordStart] opens a line,
-     * optionally after `export ` and a prefix that ends at a word boundary:
-     * `DB_PASSWORD`, `app.secret`, `dbPassword`, but not `nopassword`.
+     * or a YAML list item's `- `, optionally after `export ` and a prefix
+     * that ends at a word boundary: `DB_PASSWORD`, `app.secret`,
+     * `dbPassword`, `- password`, but not `nopassword`.
      */
     internal fun credentialKeyOpensLine(text: String, keywordStart: Int): Boolean {
         var key = keywordStart
@@ -271,11 +296,19 @@ internal object PublicationScan {
             val camel = (before in 'a'..'z' || isAsciiDigit(before)) && text[keywordStart] in 'A'..'Z'
             if (before !in "_.-" && !camel) return false
         }
-        if (opensLine(text, key)) return true
+        if (opensLineOrItem(text, key)) return true
         var export = key
         while (export > 0 && isJsSpace(text[export - 1])) export--
         return export < key && export >= 6 && text.regionMatches(export - 6, "export", 0, 6, ignoreCase = true) &&
-            opensLine(text, export - 6)
+            opensLineOrItem(text, export - 6)
+    }
+
+    /** [index] opens a line, or a YAML list item: `^\s*-\s+` before it. */
+    private fun opensLineOrItem(text: String, index: Int): Boolean {
+        if (opensLine(text, index)) return true
+        var dash = index
+        while (dash > 0 && isJsSpace(text[dash - 1])) dash--
+        return dash < index && dash > 0 && text[dash - 1] == '-' && opensLine(text, dash - 1)
     }
 
     /** key ["']? \s* [:=] \s* ["'] value{8,} ["'] */
@@ -301,7 +334,7 @@ internal object PublicationScan {
         return start == 0
     }
 
-    /** ^\s* (export\s+)? prefix? key suffix? \s* [:=] \s* value{8,} \s* (#.*)? $ */
+    /** ^\s* (-\s+)? (export\s+)? prefix? key suffix* \s* [:=] \s* value{8,} \s* (#.*)? $ */
     private fun bareAssignmentTail(text: String, keywordEnd: Int, match: Matcher): Tail {
         if (!credentialKeyOpensLine(text, match.start())) return Tail()
         val operator = spaceThen(text, credentialNameEnd(text, keywordEnd), ":=")
@@ -422,9 +455,11 @@ internal object PublicationScan {
                 { t, e, _ -> urlPasswordTail(t, e) },
             )),
         // Wider than desktop's pattern: the key may carry a prefix
-        // (DB_PASSWORD, dbPassword, export GITHUB_TOKEN) or a key/value
-        // suffix (SECRET_KEY), and an unquoted value may hold punctuation
-        // (Tr0ub4dor&3horse), as .env and YAML files write them.
+        // (DB_PASSWORD, dbPassword, export GITHUB_TOKEN), key/value/access/base
+        // suffixes (SECRET_KEY, AWS_SECRET_ACCESS_KEY, SECRET_KEY_BASE) or sit
+        // in a YAML list item (- password: …), and an unquoted value may hold
+        // punctuation (Tr0ub4dor&3horse), as .env and YAML files write them.
+        // An unquoted value that reads as code (self.token) is not a value.
         Rule("credential-assignment", Kind.Secret, "Password or key assignment") { text ->
             val quoted = regexRule(
                 p("(?:$CREDENTIAL_NAMES|authorization|credential)", ci = true),
@@ -438,7 +473,7 @@ internal object PublicationScan {
                 p("(?:$CREDENTIAL_NAMES)", ci = true),
                 { v, _, _ ->
                     !Regex("^(?:your[_-]|example|placeholder|changeme|test|dummy)", RegexOption.IGNORE_CASE).containsMatchIn(v) &&
-                        !placeholderValue(v)
+                        !placeholderValue(v) && !codeReference(v)
                 },
                 { t, e, m -> bareAssignmentTail(t, e, m) },
             )(text)
@@ -929,9 +964,13 @@ internal object SecretBackstop {
             from = end + 1
             if (!QUOTED_PLACEHOLDER.containsMatchIn(text.substring(quote + 1, minOf(text.length, quote + 41)))) return true
         }
-        // ^\s* (export\s+)? prefix? key suffix? \s* [:=] \s* value{8,} \s* (#.*)? $, multiline.
+        // ^\s* (-\s+)? (export\s+)? prefix? key suffix* \s* [:=] \s* value{8,} \s* (#.*)? $, multiline.
+        // A placeholder (<your-password>, ********) or code (self.token) is no value,
+        // the same as in the credential-assignment rule.
         val bare = BARE.matcher(text)
-        while (bare.find()) {
+        from = 0
+        while (from <= text.length && bare.find(from)) {
+            from = bare.end()
             if (!PublicationScan.credentialKeyOpensLine(text, bare.start())) continue
             val operator = spaceThen(text, PublicationScan.credentialNameEnd(text, bare.end()), ":=")
             if (operator == -1) continue
@@ -939,11 +978,12 @@ internal object SecretBackstop {
             if (start < text.length && text[start] == '$') continue
             // The value must end its line, optionally followed by blanks and a # comment.
             val end = runEnd(text, start, PublicationScan::isBareValue)
+            // No key inside a value opens a line, so the next one is after it.
+            from = maxOf(from, end)
             val after = runEnd(text, end) { isSpace(it) && !isLineEnd(it) }
-            if (end - start >= 8 &&
-                (after == text.length || text[after] == '#' || isLineEnd(text[after])) &&
-                !BARE_PLACEHOLDER.containsMatchIn(text.substring(start, minOf(text.length, start + 40)))
-            ) {
+            if (end - start < 8 || !(after == text.length || text[after] == '#' || isLineEnd(text[after]))) continue
+            val value = text.substring(start, end)
+            if (!BARE_PLACEHOLDER.containsMatchIn(value) && !PublicationScan.placeholderValue(value) && !PublicationScan.codeReference(value)) {
                 return true
             }
         }

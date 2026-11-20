@@ -362,12 +362,13 @@ class PublicationScanTest {
     @Test
     fun `the walked rules match what the original unbounded patterns matched`() {
         // Desktop's originals, in Java syntax with JavaScript's \s spelled out, with the
-        // credential names widened to prefixed and suffixed keys (DB_PASSWORD, SECRET_KEY)
-        // and unquoted values to any punctuation but quotes and code brackets.
+        // credential names widened to prefixed and suffixed keys (DB_PASSWORD, SECRET_KEY,
+        // AWS_SECRET_ACCESS_KEY) and YAML list items, and unquoted values to any
+        // punctuation but quotes and code brackets; code references (self.token) are left out.
         val sIn = "\\t\\n\\x0B\\f\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF"
         val s = "[$sIn]"
         val names = "password|passwd|api[_-]?key|secret|token|access[_-]?token|auth[_-]?token|private[_-]?key"
-        val suffix = "(?:[_.-]?(?:key|value))?"
+        val suffix = "(?:[_.-]?(?:access|value|base|key)){0,3}"
         val bareValue = "[^$sIn\"'`()\\[\\]{},;#]"
         val original = mapOf(
             "credential-assignment" to listOf(
@@ -376,7 +377,7 @@ class PublicationScanTest {
                     RegexOption.IGNORE_CASE,
                 ) to Regex("^(?:\\$\\{|process\\.env\\.|your[_ -]|example|placeholder|changeme|test|dummy|<)", RegexOption.IGNORE_CASE),
                 Regex(
-                    "^$s*(?:export$s+)?(?:[A-Za-z0-9_.-]*(?:[_.-]|(?-i:[a-z0-9](?=[A-Z]))))?(?:$names)$suffix" +
+                    "^$s*(?:-$s+)?(?:export$s+)?(?:[A-Za-z0-9_.-]*(?:[_.-]|(?-i:[a-z0-9](?=[A-Z]))))?(?:$names)$suffix" +
                         "$s*[:=]$s*(?<v>(?!\\$)$bareValue{8}$bareValue*)$s*(?:#.*)?$",
                     setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
                 ) to Regex("^(?:your[_-]|example|placeholder|changeme|test|dummy)", RegexOption.IGNORE_CASE),
@@ -393,6 +394,7 @@ class PublicationScanTest {
             "Qz9kLm2PwXr4\"", "\n# c", " ", "\u000b", "PRIVATE KEY-----", "-----BEGIN RSA ",
             " ".repeat(70), "\n﻿password", "http://", "eyJ", "u:p@", "/", "test1234 ", "a.b.c.d.e.f.g.h.i.", "A".repeat(45),
             "SECRET_KEY", "DB_", "export ", "&", "dbPassword", "Token", "\$", "(", "]", "_value", "Key", "_count", "no", "Tr0ub4dor&3",
+            "- ", "_ACCESS", "_base", "self.", "access_key", "keyvalue",
         )
         val comparable = Regex("your|example|placeholder|changeme|dummy|test|\\.\\.\\.|[<>]|(.)\\1{7}|x{6}", RegexOption.IGNORE_CASE)
         var seed = 7L
@@ -406,9 +408,9 @@ class PublicationScanTest {
                 val expected = patterns.flatMap { (pattern, refuse) ->
                     pattern.findAll(text).map { if ("(?<v>" in pattern.pattern) (it.groups as MatchNamedGroupCollection)["v"]!!.value else it.value }
                         .filter { refuse == null || !refuse.containsMatchIn(it) }.toList()
-                }.filterNot { comparable.containsMatchIn(it) }.sorted()
+                }.filterNot { comparable.containsMatchIn(it) || PublicationScan.codeReference(it) }.sorted()
                 val rule = PublicationScan.RULES.first { it.id == id }
-                val actual = rule.matches(text).map { it.value }.filterNot { comparable.containsMatchIn(it) }.toList().sorted()
+                val actual = rule.matches(text).map { it.value }.filterNot { comparable.containsMatchIn(it) || PublicationScan.codeReference(it) }.toList().sorted()
                 assertEquals("$id in ${text.replace("\n", "\\n")}", expected, actual)
             }
         }
@@ -429,6 +431,12 @@ class PublicationScanTest {
             "SECRET_KEY = \"$secret\"",
             "\"client_secret\": \"$secret\"",
             "jwtSecretValue: '$secret'",
+            "AWS_SECRET_ACCESS_KEY=$secret",
+            "aws_secret_access_key = $secret",
+            "SECRET_KEY_BASE=$secret",
+            "- password: Tr0ub4dor&3horse",
+            "  - token: $secret",
+            "- export API_KEY=$secret",
         )) {
             assertEquals(line, listOf("credential-assignment"), rulesIn(line))
             assertTrue(line, SecretBackstop.containsSecret(line))
@@ -444,6 +452,22 @@ class PublicationScanTest {
             "password = getpass(\"Password: \")",
             "x DB_PASSWORD=$secret",
             "password: \${DB_PASSWORD}",
+            // Documentation placeholders.
+            "DB_PASSWORD=<your-db-password>",
+            "password: ********",
+            "password=<password>",
+            "API_KEY=<YOUR_API_KEY>",
+            "SECRET_KEY=<changeme>",
+            "token: <redacted>",
+            "password: [REDACTED]",
+            // Code that reads the value from elsewhere.
+            "token = self.token",
+            "password = form.password.data",
+            "SECRET_KEY = os.environ.get",
+            "api_key = settings.API_KEY",
+            // Neither a list item nor a key.
+            "x - password: $secret",
+            "secret_access_count: $secret",
         )) {
             assertEquals(line, emptyList<String>(), rulesIn(line))
             assertFalse(line, SecretBackstop.containsSecret(line))
