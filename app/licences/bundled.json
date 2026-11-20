@@ -12,7 +12,7 @@
   "components": [
     {
       "name": "Colibri (colibri-stateless)",
-      "version": "3.0.0",
+      "version": "3.0.3",
       "colibri": "self",
       "section": "native",
       "licence": "MIT",

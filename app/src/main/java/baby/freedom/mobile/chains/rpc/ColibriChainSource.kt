@@ -32,7 +32,7 @@ import org.json.JSONObject
  * goes to the next tier, as does a `null` receipt, transaction or block,
  * which says only that the prover didn't find it, never a proven "no",
  * and a receipt or transaction whose hash isn't the one asked about. The
- * pinned core (v3.0.0) already ties those to the hash asked for: it
+ * pinned core (v3.0.3) already ties those to the hash asked for: it
  * checks the proven transaction hashes to it (`c4_tx_verify_tx_hash`)
  * and that the receipt names that transaction (`c4_tx_verify_receipt_data`),
  * so this re-check is defence in depth, as on desktop (#1060), against a
