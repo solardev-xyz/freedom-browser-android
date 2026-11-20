@@ -116,6 +116,12 @@
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     return element.getClientRects().length > 0;
   };
+  // A file input laid transparent over a styled button: a tap there reaches it.
+  var transparentFileInput = function (element) {
+    if (element.tagName !== 'INPUT' || String(element.type).toLowerCase() !== 'file') return false;
+    var style = styleFor(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
   var implicitRole = function (element) {
     var tag = element.tagName.toLowerCase();
     if (tag === 'a' && element.hasAttribute('href')) return 'link';
@@ -187,10 +193,11 @@
           if (element === frameDocument.scrollingElement) continue;
           var scroll = readScrollState(element);
           var scrollable = scroll.horizontal || scroll.vertical;
-          var semantic = element.matches(SEMANTIC);
+          // A label for a file input is the way to a hidden one (see choosesFile).
+          var semantic = element.matches(SEMANTIC) || (element.tagName === 'LABEL' && fileInputOf(element) !== null);
           var inferred = !semantic && (element.hasAttribute('onclick') || typeof element.onclick === 'function' || isPointerBoundary(element));
           if (!semantic && !inferred && !scrollable) continue;
-          if (!visible(element)) continue;
+          if (!visible(element) && !transparentFileInput(element)) continue;
           var name = readElementName(element);
           if (inferred && !name && !scrollable) continue;
           if (search && name.toLowerCase().indexOf(search) < 0) continue;
@@ -340,7 +347,7 @@
       if (index < elementOffset || elements.length >= maxElements || budgetReached) return false;
       var tag = element.tagName.toLowerCase();
       var inputType = normalize(element.getAttribute('type')).toLowerCase();
-      var uploadsFile = tag === 'input' && inputType === 'file';
+      var uploadsFile = choosesFile(element, tag, inputType);
       var submitsForm = Boolean(element.form) &&
         ((tag === 'button' && (!inputType || inputType === 'submit')) ||
           (tag === 'input' && (inputType === 'submit' || inputType === 'image')));
@@ -469,13 +476,30 @@
     var implicitSubmit = action === 'press' && key === 'Enter' && Boolean(element.form) && tag === 'input' &&
       ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].indexOf(inputType) < 0;
     var out = { role: info.role, tag: tag, name: info.name.slice(0, 300) };
-    if (tag === 'input' && inputType === 'file') out.effect = 'file_upload';
+    if (choosesFile(element, tag, inputType)) out.effect = 'file_upload';
     else if ((tag === 'a' || tag === 'area') && element.hasAttribute('download') && activates) out.effect = 'file_download';
     else if ((submitsForm && activates) || implicitSubmit) out.effect = 'form_submission';
     if ((tag === 'a' || tag === 'area') && element.hasAttribute('href') && activates) out.target = String(element.href).slice(0, 4096);
     else if (out.effect === 'form_submission') out.target = String(element.form.action).slice(0, 4096);
     out.sensitive = isCredential(element, tag, inputType);
     return out;
+  }
+
+  /*
+   * A file input, or a label for one: pages often hide the input itself
+   * and style its label as the button, and a tap on that label opens the
+   * same file chooser (Android has no other way to reach a hidden input).
+   */
+  function choosesFile(element, tag, inputType) {
+    if (tag === 'input') return inputType === 'file';
+    return tag === 'label' && fileInputOf(element) !== null;
+  }
+
+  function fileInputOf(element) {
+    var tag = element.tagName.toLowerCase();
+    var input = tag === 'label' ? element.control : element;
+    if (!input || input.tagName.toLowerCase() !== 'input' || String(input.type).toLowerCase() !== 'file') return null;
+    return input;
   }
 
   /*
@@ -505,9 +529,9 @@
     return false;
   }
 
-  function usable(element, frameWindow) {
+  function usable(element, frameWindow, transparentOk) {
     var style = frameWindow.getComputedStyle(element);
-    return !(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' ||
+    return !(style.display === 'none' || style.visibility === 'hidden' || (style.opacity === '0' && !transparentOk) ||
       element.getClientRects().length === 0 || element.matches(':disabled') ||
       element.getAttribute('aria-disabled') === 'true');
   }
@@ -550,7 +574,9 @@
       // Click: scrolled into view, hit-tested, as a point in the WebView.
       var c = find(a.index, a.query, a.fingerprint);
       if (c.error) return c;
-      if (!usable(c.element, c.frameWindow)) return { error: 'not_interactable' };
+      // A file input laid transparent over a styled button is still what a tap there reaches.
+      var transparentOk = a.action === 'upload' && fileInputOf(c.element) === c.element;
+      if (!usable(c.element, c.frameWindow, transparentOk)) return { error: 'not_interactable' };
       var p = pointFor(c);
       if (!p) return { error: 'not_interactable' };
       return { ok: true, x: p.x, y: p.y, editable: c.element.matches('input:not([readonly]),textarea:not([readonly])') || c.element.isContentEditable };
@@ -581,6 +607,14 @@
         }
       }
       return { ok: true };
+    }
+    case 'files': {
+      // Upload: how many files the referenced input (or the label's input) holds now.
+      var fi = find(a.index, a.query, a.fingerprint);
+      if (fi.error) return fi;
+      var input = fileInputOf(fi.element);
+      if (!input) return { error: 'not_interactable' };
+      return { ok: true, count: input.files ? input.files.length : 0 };
     }
     case 'value': {
       var v = find(a.index, a.query, a.fingerprint);

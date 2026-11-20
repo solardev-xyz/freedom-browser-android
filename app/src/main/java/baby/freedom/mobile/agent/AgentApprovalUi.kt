@@ -167,6 +167,14 @@ private fun ApprovalBody(approval: AgentApproval) {
             )
         }
         is AgentAction.Press -> TargetRows(action.target)
+        is AgentAction.Upload -> {
+            TargetRows(action.target)
+            Text(stringResource(R.string.agent_approve_upload_picker), style = MaterialTheme.typography.bodyMedium)
+        }
+        is AgentAction.Download -> {
+            TargetRows(action.target)
+            Text(stringResource(R.string.agent_approve_download_saves), style = MaterialTheme.typography.bodyMedium)
+        }
         is AgentAction.Scroll -> action.target?.takeIf { it.role != "viewport" }?.let { TargetRows(it) }
         is AgentAction.Dialog -> {
             Field(stringResource(R.string.agent_approve_message), action.message.ifEmpty { "—" })
@@ -230,6 +238,8 @@ private fun headline(action: AgentAction): String = when (action) {
         },
     )
     is AgentAction.Dialog -> stringResource(if (action.accept) R.string.agent_approve_dialog_ok else R.string.agent_approve_dialog_cancel)
+    is AgentAction.Upload -> stringResource(R.string.agent_approve_upload)
+    is AgentAction.Download -> stringResource(R.string.agent_approve_download)
 }
 
 @Composable

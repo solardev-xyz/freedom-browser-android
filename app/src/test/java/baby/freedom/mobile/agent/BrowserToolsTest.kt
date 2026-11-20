@@ -35,6 +35,9 @@ class BrowserToolsTest {
         /** The control the page's describe/point answers name. */
         var control = JSONObject().put("role", "button").put("tag", "button").put("name", "Search")
 
+        /** What the page's file input holds, by its own word (#600). */
+        var attachedFiles = 1
+
         /** Run as each page script goes in, with its op. */
         var onScript: (String) -> Unit = {}
 
@@ -86,6 +89,7 @@ class BrowserToolsTest {
                     .toString()
                 "describe" -> JSONObject().put("ok", true).put("target", control).toString()
                 "point" -> JSONObject().put("ok", true).put("x", 100).put("y", 200).toString()
+                "files" -> JSONObject().put("ok", true).put("count", attachedFiles).toString()
                 "scroll", "scrollState" -> JSONObject().put("ok", true)
                     .put("scroll", JSONObject().put("x", 0).put("y", if (op == "scroll") 0 else 800)).toString()
                 else -> JSONObject().put("ok", true).toString()
@@ -152,12 +156,15 @@ class BrowserToolsTest {
     private val asked = ArrayList<AgentApproval>()
     private var answer: (AgentApproval) -> ApprovalOutcome = { ApprovalOutcome.Approved }
 
+    private val files = FakeFiles(java.nio.file.Files.createTempDirectory("agent-files").toFile())
+
     private fun toolset(session: String = "chat", approvals: ChatApprovals = ChatApprovals.AskEveryTime) = BrowserToolset(
         session,
         browser = { host },
         ask = { a -> asked += a; answer(a) },
         pageScript = { "PAGE" },
         approvals = approvals,
+        files = { files },
     )
 
     /** A chat in [mode] whose classifier answers [check], recording what it was given. */
@@ -186,12 +193,14 @@ class BrowserToolsTest {
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         AgentTabs.clear()
+        AgentDownloads.clear()
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
         AgentTabs.clear()
+        AgentDownloads.clear()
     }
 
     @Test
@@ -202,6 +211,7 @@ class BrowserToolsTest {
                 "browser_get_dialog", "browser_handle_dialog", "browser_list_tabs", "browser_create_tab", "browser_get_tab",
                 "browser_focus_tab", "browser_close_tab", "browser_snapshot", "browser_navigate", "browser_click",
                 "browser_type", "browser_select", "browser_scroll", "browser_press", "browser_wait", "browser_stop_loading",
+                "browser_upload", "browser_download", "browser_list_downloads",
             ),
             names,
         )
@@ -704,11 +714,19 @@ class BrowserToolsTest {
                 host.add(page(1))
                 AgentTabs.hold(1, "chat", private = false)
                 host.control = JSONObject().put("role", "link").put("tag", "a").put("name", "Get it").put("effect", effect)
+                    .put("target", "https://example.com/file.zip")
                 val approvals = Approvals(mode, ordinary)
                 val tools = toolset(approvals = approvals)
-                val ref = snapshotRef(tools)
-                assertFalse(tools.call("browser_click", JSONObject().put("ref", ref)).isError)
+                // Their own tools (#600), which ask whatever the mode: declined here, so nothing runs.
+                answer = { ApprovalOutcome.Declined }
+                val tool = if (effect == "file_download") "browser_download" else "browser_upload"
+                assertEquals("$mode $effect", "USER_DECLINED", tools.call(tool, JSONObject().put("ref", snapshotRef(tools))).code())
                 assertEquals("$mode $effect", 1, asked.size)
+                assertTrue(approvals.inputs.isEmpty())
+                // A key on the control asks as well (the page's own download or chooser waits for the user).
+                answer = { ApprovalOutcome.Approved }
+                assertFalse(tools.call("browser_press", JSONObject().put("ref", snapshotRef(tools)).put("key", "Enter")).isError)
+                assertEquals("$mode $effect press", 2, asked.size)
                 assertTrue(approvals.inputs.isEmpty())
             }
             asked.clear()
@@ -800,5 +818,179 @@ class BrowserToolsTest {
         assertEquals(ApprovalCheck.Credential, card.check)
         assertTrue((card.action as AgentAction.Type).target.sensitive)
         assertTrue(approvals.inputs.isEmpty())
+    }
+
+    private fun downloadLink(href: String = "https://example.com/files/report.pdf") {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        host.control = JSONObject().put("role", "link").put("tag", "a").put("name", "Report").put("effect", "file_download")
+            .put("target", href)
+    }
+
+    private fun fileInput() {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        host.control = JSONObject().put("role", "button").put("tag", "input").put("name", "Photo").put("effect", "file_upload")
+    }
+
+    @Test
+    fun `a plain click on a download link or a file input is refused before asking`() = runBlocking {
+        downloadLink()
+        val tools = toolset(approvals = Approvals(ApprovalMode.AllowWebsiteInteractions, ordinary))
+        val out = tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("CAPABILITY_UNAVAILABLE", out.code())
+        assertTrue(out.output.contains("browser_download"))
+        fileInput()
+        val up = tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools)))
+        assertTrue(up.output.contains("browser_upload"))
+        assertTrue(asked.isEmpty())
+        assertTrue(host.taps.isEmpty())
+    }
+
+    @Test
+    fun `an approved download saves the link it was approved for, and its receipt names no path`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "completed")
+        host.duringTap = {
+            // What DownloadManager.start asks as the page's download comes: a same-origin redirect.
+            val claim = AgentDownloads.claim(1, "https://example.com/dl/report.pdf?token=1")!!
+            assertTrue(claim.direct)
+            claim.started(42)
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertFalse(out.output, out.isError)
+        val action = asked.single().action as AgentAction.Download
+        assertEquals("https://example.com/files/report.pdf", action.target.target)
+        assertEquals(listOf(100f to 200f), host.taps)
+        val artifact = out.result().getJSONObject("artifact")
+        assertEquals("report.pdf", artifact.getString("filename"))
+        assertEquals("completed", artifact.getString("state"))
+        assertEquals("https://example.com", artifact.getString("sourceOrigin"))
+        assertEquals("downloads", artifact.getString("location"))
+        assertTrue(artifact.getBoolean("available"))
+        assertFalse(out.output.contains("content://"))
+        // Listed for this chat only.
+        val listed = tools.call("browser_list_downloads").result().getJSONArray("artifacts")
+        assertEquals(artifact.getString("artifactId"), listed.getJSONObject(0).getString("artifactId"))
+        assertEquals(0, toolset(session = "other").call("browser_list_downloads").result().getJSONArray("artifacts").length())
+        // Removed from the downloads list: still listed, no longer available.
+        files.rows.remove(42)
+        val gone = tools.call("browser_list_downloads").result().getJSONArray("artifacts").getJSONObject(0)
+        assertEquals("removed", gone.getString("state"))
+        assertFalse(gone.getBoolean("available"))
+    }
+
+    @Test
+    fun `a download other than the approved link is held for the user and reported`() = runBlocking {
+        downloadLink()
+        host.duringTap = { assertNull(AgentDownloads.claim(1, "https://elsewhere.example/report.pdf")) }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("APPROVAL_REQUIRED", out.code())
+        assertTrue(out.output.contains("unapproved download"))
+        // Said once, not again with the next step.
+        assertFalse(AgentDownloads.takeHeld(1))
+    }
+
+    @Test
+    fun `a download no approval covers is noted with the click that caused it`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        host.duringTap = { assertNull(AgentDownloads.claim(1, "https://example.com/surprise.exe")) }
+        val tools = toolset()
+        val out = tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools)))
+        assertFalse(out.isError)
+        assertTrue(out.result().getString("heldDownload").contains("browser_download"))
+    }
+
+    @Test
+    fun `asking where to save each file leaves the approved download to the user's own prompt`() = runBlocking {
+        downloadLink()
+        files.askWhere = true
+        host.duringTap = {
+            val claim = AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!
+            assertFalse(claim.direct)
+            claim.declined()
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("DOWNLOAD_CANCELLED_BY_USER", out.code())
+        assertTrue(out.output.contains("\"action\":\"stop\""))
+    }
+
+    @Test
+    fun `a download the user cancels or that pauses is never reported as saved`() = runBlocking {
+        for ((status, code) in listOf("cancelled" to "DOWNLOAD_CANCELLED_BY_USER", "paused" to "CAPABILITY_UNAVAILABLE", "failed" to "CAPABILITY_UNAVAILABLE")) {
+            host.tabs.clear()
+            AgentTabs.clear()
+            downloadLink()
+            files.rows[7] = files.entry(7, "report.pdf", status)
+            host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(7) }
+            val tools = toolset()
+            assertEquals(status, code, tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools))).code())
+        }
+    }
+
+    @Test
+    fun `an upload is the user's pick in the picker, and the agent learns only its name, size and type`() = runBlocking {
+        fileInput()
+        host.duringTap = {
+            val intent = AgentUploads.take(1)!!
+            intent.opened.complete(true)
+            intent.result.complete(UploadIntent.Result.Picked(emptyList(), object : android.content.ContentResolver(null) {}))
+        }
+        val tools = toolset(approvals = Approvals(ApprovalMode.AllowWebsiteInteractions, ordinary))
+        val out = tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools)))
+        assertFalse(out.output, out.isError)
+        assertTrue(asked.single().action is AgentAction.Upload)
+        val upload = out.result().getJSONObject("upload")
+        assertEquals("photo.jpg", upload.getString("filename"))
+        assertEquals(1234, upload.getLong("bytes"))
+        assertEquals("image/jpeg", upload.getString("mimeType"))
+        assertEquals("attached", upload.getString("state"))
+        assertNull(AgentUploads.take(1))
+
+        // Cancelled in the picker: the user's no, not retried.
+        host.duringTap = {
+            val intent = AgentUploads.take(1)!!
+            intent.opened.complete(true)
+            intent.result.complete(UploadIntent.Result.Cancelled)
+        }
+        val cancelled = tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("FILE_UPLOAD_CANCELLED_BY_USER", cancelled.code())
+        assertTrue(cancelled.output.contains("\"action\":\"stop\""))
+
+        // Closed by the app (not the user): not their cancel.
+        host.duringTap = {
+            val intent = AgentUploads.take(1)!!
+            intent.opened.complete(true)
+            intent.result.complete(UploadIntent.Result.Withdrawn)
+        }
+        assertEquals("CAPABILITY_UNAVAILABLE", tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools))).code())
+
+        // A page that says its input holds nothing afterwards isn't reported as attached.
+        host.attachedFiles = 0
+        host.duringTap = {
+            val intent = AgentUploads.take(1)!!
+            intent.opened.complete(true)
+            intent.result.complete(UploadIntent.Result.Picked(emptyList(), object : android.content.ContentResolver(null) {}))
+        }
+        assertEquals("INTERNAL_ERROR", tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools))).code())
+    }
+
+    @Test
+    fun `upload and download refuse a control of the wrong kind before asking`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        assertEquals("ELEMENT_NOT_INTERACTABLE", tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools))).code())
+        assertEquals("ELEMENT_NOT_INTERACTABLE", tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools))).code())
+        // A link address as long as the page script hands over may have been cut: it can't be matched.
+        downloadLink()
+        val ref = snapshotRef(tools)
+        host.onScript = { if (it == "describe") host.control.put("target", "https://example.com/" + "a".repeat(4096)) }
+        assertEquals("ELEMENT_NOT_INTERACTABLE", tools.call("browser_download", JSONObject().put("ref", ref)).code())
+        assertTrue(asked.isEmpty())
     }
 }

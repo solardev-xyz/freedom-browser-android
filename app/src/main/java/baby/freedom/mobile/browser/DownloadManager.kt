@@ -369,13 +369,33 @@ class DownloadManager private constructor(context: Context) {
         // accepted after that session ended, it's dropped ([enqueue]).
         val session = if (private) privateSession() else null
         fun offer(contentLength: Long) {
+            // The one download an approved `browser_download` covers in a
+            // tab Freedom Agent holds (#600): the user's Allow on the
+            // agent's card was the yes, so it starts without this prompt
+            // (unless they ask where to save each file). Any other
+            // download from such a tab is offered as usual: held for the user.
+            val claim = if (private) null else baby.freedom.mobile.agent.AgentDownloads.claim(tabId, url)
+            if (claim?.direct == true) {
+                enqueue(
+                    url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, null, null, blob,
+                    onRow = claim::started,
+                )
+                return
+            }
             val queued = offerQueue.offer(
                 tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private,
                 mimeType = saveAsMimeType(normalizeMime(mimeType)),
-                discard = { blob?.release() },
+                discard = {
+                    blob?.release()
+                    claim?.declined()
+                },
             ) { saveTo ->
-                enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo, blob)
+                enqueue(
+                    url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo, blob,
+                    onRow = { claim?.started(it) },
+                )
             }
+            if (!queued) claim?.notQueued()
             if (!queued) blob?.release()
             if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or closed, or $MAX_PENDING_OFFERS waiting)")
         }
@@ -467,6 +487,8 @@ class DownloadManager private constructor(context: Context) {
         saveTo: PickedDocument? = null,
         /** A `blob:` download's file, held by its page ([start]). */
         blob: BlobSource? = null,
+        /** Told the new row's id once it's listed (Freedom Agent's receipt, #600). */
+        onRow: (Long) -> Unit = {},
     ) {
         val target = if (blob != null) {
             DownloadTarget.Blob(url, blob)
@@ -529,6 +551,7 @@ class DownloadManager private constructor(context: Context) {
                     dao.insert(row)
                 }
                 _events.tryEmit(DownloadEvent.Started(id, initialName))
+                onRow(id)
                 launchJob(id, resuming = false, abandoned = { blob?.release() }) {
                     run(id, target, userAgent, contentDisposition, refererOrigin, cookies, resuming = false)
                 }

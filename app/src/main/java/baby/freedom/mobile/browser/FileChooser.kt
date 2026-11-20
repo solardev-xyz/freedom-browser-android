@@ -169,6 +169,7 @@ internal class FileChooser(
             )
         // show() already told WebView the callback is ours, so it must be answered.
         if (!started) {
+            baby.freedom.mobile.agent.AgentUploads.withdrawing(ask.callback)
             runCatching { ask.callback.onReceiveValue(null) }
             if (refused) permissions.noteUploadCameraRefused()
         }
@@ -342,12 +343,15 @@ internal class FileChooser(
     fun cancelPending() {
         awaitingCamera?.let { ask ->
             awaitingCamera = null
+            baby.freedom.mobile.agent.AgentUploads.withdrawing(ask.callback)
             runCatching { ask.callback.onReceiveValue(null) }
         }
         val p = pending ?: return
         pending = null
         p.captureUri?.let(::revokeCaptureGrant)
         p.captureFile?.delete()
+        // Not the user's cancel: Freedom Agent's upload (#600) must not read it as one.
+        baby.freedom.mobile.agent.AgentUploads.withdrawing(p.callback)
         runCatching { p.callback.onReceiveValue(null) }
     }
 

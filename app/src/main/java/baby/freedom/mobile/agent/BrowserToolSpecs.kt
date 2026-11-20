@@ -8,9 +8,9 @@ import org.json.JSONObject
  * descriptions and schemas (`src/main/agent/pi-browser-tools.js`,
  * `automation/contract/operations.js`), with the wording changed only
  * where Android does it differently (a held tab instead of an Agent
- * pane; an interaction brings its tab on screen). Not here yet: frames,
- * page tools (WebMCP), uploads, downloads, wallet actions and the
- * screenshot (a tool result carries no image yet).
+ * pane; an interaction brings its tab on screen). Uploads and downloads
+ * came with #600. Not here yet: frames, page tools (WebMCP), wallet
+ * actions and the screenshot (a tool result carries no image yet).
  */
 internal object BrowserToolSpecs {
     const val LIST_TABS = "browser_list_tabs"
@@ -29,6 +29,9 @@ internal object BrowserToolSpecs {
     const val STOP_LOADING = "browser_stop_loading"
     const val GET_DIALOG = "browser_get_dialog"
     const val HANDLE_DIALOG = "browser_handle_dialog"
+    const val UPLOAD = "browser_upload"
+    const val DOWNLOAD = "browser_download"
+    const val LIST_DOWNLOADS = "browser_list_downloads"
 
     val PRESS_KEYS = listOf(
         "Enter", "Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
@@ -213,5 +216,28 @@ internal object BrowserToolSpecs {
             ),
         ),
         ToolSpec(STOP_LOADING, "Stop loading and cancel active waits in the active task tab.", obj()),
+        ToolSpec(
+            UPLOAD,
+            "Ask the user to choose one local file, then attach it to an exact file-input reference from the latest " +
+                "page snapshot (or a label for one). Freedom never reveals the local path. File selection always " +
+                "requires approval, even when ordinary website interactions are allowed; Freedom brings the tab on " +
+                "screen and the user picks the file in Android's file picker. If the user cancels the picker, do not " +
+                "retry unless they explicitly ask again.",
+            obj("ref" to str(), required = listOf("ref")),
+        ),
+        ToolSpec(
+            DOWNLOAD,
+            "Download a file through Freedom using a download link reference from the latest page snapshot. Returns " +
+                "a safe artifact receipt, never a filesystem path. Every download requires approval; Freedom brings " +
+                "the tab on screen to tap the link. If the user cancels the transfer, do not retry it unless they " +
+                "explicitly ask again.",
+            obj("ref" to str(), required = listOf("ref")),
+        ),
+        ToolSpec(
+            LIST_DOWNLOADS,
+            "List safe receipts for downloads created by this Agent conversation, including whether each file is " +
+                "still available.",
+            obj(),
+        ),
     )
 }

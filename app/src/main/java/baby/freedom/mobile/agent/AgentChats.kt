@@ -305,6 +305,8 @@ internal class AgentChats(
     suspend fun delete(sessionId: String): Boolean = withContext(NonCancellable) {
         stop(sessionId)
         forgetTools(sessionId)
+        // Its download receipts (#600); the files themselves stay in Downloads.
+        AgentFiles.port?.records?.forget(sessionId)
         try {
             dao.deleteSession(sessionId)
             true
@@ -318,6 +320,7 @@ internal class AgentChats(
     suspend fun deleteAll(): Boolean = withContext(NonCancellable) {
         lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
         for (id in registries.keys.toList()) forgetTools(id)
+        AgentFiles.port?.records?.forget(null)
         modes.clear()
         try {
             dao.deleteAll()
@@ -380,6 +383,7 @@ internal class AgentChats(
         fun get(context: Context): AgentChats = instance ?: synchronized(this) {
             instance ?: run {
                 val app = context.applicationContext
+                AgentFiles.install(app)
                 val prompt = app.assets.open(PROMPT_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }
                 lateinit var chats: AgentChats
                 chats = AgentChats(
