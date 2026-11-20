@@ -167,6 +167,16 @@
     <string name="agent_send_failed">Couldn\'t send this. Try again.</string>
     <string name="agent_model_label">%1$s · %2$s</string>
     <string name="agent_model_none">No model</string>
+    <!-- The chat's approval mode (#595): short labels for the composer's picker, a line under each in its menu. -->
+    <string name="agent_mode_every">Ask every time</string>
+    <string name="agent_mode_every_hint">Every page visit, tap, typing and scroll waits for your OK.</string>
+    <string name="agent_mode_sensitive">Ask when it matters</string>
+    <string name="agent_mode_sensitive_hint">Your model checks each step first. Ordinary browsing runs on its own; anything that sends, buys, posts or changes an account asks, and so does anything the check isn\'t sure about.</string>
+    <string name="agent_mode_allow">Allow site actions</string>
+    <string name="agent_mode_allow_hint">Page visits and page interactions run without asking.</string>
+    <string name="agent_mode_always">Whatever you pick, answering a page\'s dialog, uploads, downloads and wallet requests always ask.</string>
+    <string name="agent_mode_label">Approvals: %1$s</string>
+    <string name="agent_mode_save_failed">Couldn\'t change the approvals for this chat. Try again.</string>
     <string name="agent_thinking">Thinking…</string>
     <string name="agent_note_stopped">Stopped.</string>
     <string name="agent_note_interrupted">Stopped when the app closed.</string>
@@ -228,6 +238,8 @@
     <string name="agent_approve_message">The page says</string>
     <string name="agent_approve_prompt_answer">Answer</string>
     <string name="agent_approve_intent">The agent says: “%1$s”</string>
+    <!-- "Ask when it matters" (#595): why this one asks, in the model's words. -->
+    <string name="agent_approve_check">Your model\'s check: “%1$s”</string>
     <string name="agent_approve_untrusted">Names and messages come from the website.</string>
     <string name="agent_approve_shows_tab">Allowing shows the tab, and the agent acts in it.</string>
     <string name="agent_approve_allow">Allow</string>

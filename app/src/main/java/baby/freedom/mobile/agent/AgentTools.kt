@@ -25,8 +25,8 @@ internal interface AgentTool {
 /**
  * The tools a chat offers the model (#574): the harmless
  * [CurrentTimeTool], the browser tools ([BrowserToolset], #575),
- * which ask the user to approve every interaction, and the read-only
- * [NodeStatusTool] (#577).
+ * whose interactions ask the user as the chat's approval mode says
+ * (#595), and the read-only [NodeStatusTool] (#577).
  */
 internal class ToolRegistry(tools: List<AgentTool>) {
     private val byName = tools.associateBy { it.spec.name }
@@ -61,9 +61,14 @@ internal class ToolRegistry(tools: List<AgentTool>) {
         fun default(clock: () -> Instant = Instant::now, zone: () -> ZoneId = ZoneId::systemDefault) =
             ToolRegistry(listOf(CurrentTimeTool(clock, zone)))
 
-        /** A chat's tools: the clock, its own browser tools (#575) and the read-only node status (#577). */
-        fun forChat(sessionId: String) =
-            ToolRegistry(listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) + BrowserToolset(sessionId).tools + NodeStatusTool())
+        /**
+         * A chat's tools: the clock, its own browser tools (#575), under
+         * the chat's [approvals] (#595), and the read-only node status (#577).
+         */
+        fun forChat(sessionId: String, approvals: ChatApprovals = ChatApprovals.AskEveryTime) = ToolRegistry(
+            listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) +
+                BrowserToolset(sessionId, approvals = approvals).tools + NodeStatusTool(),
+        )
     }
 }
 

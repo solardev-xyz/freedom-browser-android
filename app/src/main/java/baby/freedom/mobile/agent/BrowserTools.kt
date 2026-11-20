@@ -14,18 +14,25 @@ import org.json.JSONObject
  * One per chat, so a chat's tools can only reach its own tabs.
  *
  * Every navigate, click, type, select, press, scroll and dialog answer
- * waits for the user's approval ([AgentApprovals]), bound to the exact
+ * is put to the chat's approval mode ([ApprovalPolicy], #595): in
+ * "every interaction" it waits for the user's approval
+ * ([AgentApprovals]); in the other two modes a website interaction the
+ * mode allows runs without a card, while dialog answers, uploads and
+ * downloads always ask. Either way the action is bound to the exact
  * request: the tab, its committed document and site, the control as it
- * was read just before asking, and the arguments. Approved, the action
- * re-checks all of that on the live tab before it runs and is refused if
- * anything moved; a click, typing, a key, a scroll or a selection runs
- * with its tab on screen, the user's approval being what brings it there.
+ * was read just before deciding, and the arguments. Approved (by the
+ * user or the mode), the action re-checks all of that on the live tab
+ * before it runs and is refused if anything moved; a click, typing, a
+ * key, a scroll or a selection runs with its tab on screen, which
+ * running it brings there.
  */
 internal class BrowserToolset(
     private val sessionId: String,
     private val browser: () -> AgentBrowserHost? = { AgentBrowser.host },
     private val ask: suspend (AgentApproval) -> ApprovalOutcome = AgentApprovals::ask,
     private val pageScript: () -> String? = { AgentBrowser.pageScript },
+    /** The chat's approval mode and classifier (#595). */
+    private val approvals: ChatApprovals = ChatApprovals.AskEveryTime,
 ) {
     @Volatile
     private var currentTab: Long? = null
@@ -601,8 +608,24 @@ internal class BrowserToolset(
         return ok(JSONObject().put("answered", true).put("accepted", h.accept))
     }
 
-    /** Asks the user; returns the approval only if they approved it. */
+    /**
+     * Puts [action] to the chat's approval mode, and to the user when the
+     * mode says to ask. Returns the approval it runs under: the user's,
+     * or one the mode gave without a card, which binds the action just
+     * the same.
+     */
     private suspend fun approve(tabId: Long, site: String, document: Int, action: AgentAction, intent: String?): AgentApproval {
+        val flatIntent = intent?.let { ApprovalText.flatten(it, BrowserToolSpecs.MAX_INTENT_CHARS) }
+        val decision = ApprovalPolicy.decide(
+            kindOf(action),
+            mode = { approvals.mode },
+            classify = { approvals.classifyInteraction(interactionInput(action, site, intent)) },
+            formSummary = {
+                val name = ApprovalBinding.targetOf(action)?.name?.takeIf { it.isNotBlank() }
+                if (name != null) "Submit “$name”." else "Submit this form."
+            },
+        )
+        val check = (decision as? PolicyDecision.Ask)?.check?.summary?.let { ApprovalText.flatten(it, 240) }?.ifEmpty { null }
         val approval = AgentApproval(
             id = AgentApprovals.nextId(),
             sessionId = sessionId,
@@ -611,8 +634,10 @@ internal class BrowserToolset(
             site = site,
             document = document,
             action = action,
-            intent = intent?.let { ApprovalText.flatten(it, BrowserToolSpecs.MAX_INTENT_CHARS) },
+            intent = flatIntent,
+            check = check,
         )
+        if (decision == PolicyDecision.Proceed) return approval
         return when (ask(approval)) {
             ApprovalOutcome.Approved -> approval
             ApprovalOutcome.Declined -> throw ToolError(
@@ -631,6 +656,56 @@ internal class BrowserToolset(
     private fun ok(result: JSONObject) = ToolOutcome(JSONObject().put("ok", true).put("result", result).toString())
 
     companion object {
+        /**
+         * What [action] is to the approval policy. A control's effect is
+         * what the page's markup says (read by a script in the page's own
+         * world), so it can only make an action ask more: a page that
+         * hides a download or a file chooser still meets the app's own
+         * download dialog and Android's file picker.
+         */
+        fun kindOf(action: AgentAction): ActionKind = when (action) {
+            is AgentAction.Navigate -> ActionKind.Navigate
+            is AgentAction.Dialog -> ActionKind.Dialog
+            is AgentAction.Click, is AgentAction.Type, is AgentAction.Select, is AgentAction.Press, is AgentAction.Scroll ->
+                when (ApprovalBinding.targetOf(action)?.effect) {
+                    "file_upload" -> ActionKind.Upload
+                    "file_download" -> ActionKind.Download
+                    "form_submission" -> ActionKind.FormSubmission
+                    else -> ActionKind.PageInteraction
+                }
+        }
+
+        /** [action] as the intent classifier is given it: typed text only as a count (desktop). */
+        fun interactionInput(action: AgentAction, site: String, intent: String?): InteractionInput {
+            val target = ApprovalBinding.targetOf(action)?.takeIf { it.role != "viewport" }
+            val base = InteractionInput(
+                operation = "",
+                intent = intent.orEmpty(),
+                origin = site,
+                label = target?.name.orEmpty(),
+                mechanism = target?.effect,
+                destinationOrigin = target?.target?.let { AgentTab.siteOf(it) }?.ifEmpty { null },
+            )
+            return when (action) {
+                is AgentAction.Navigate -> base.copy(
+                    operation = if (action.newTab) BrowserToolSpecs.CREATE_TAB else BrowserToolSpecs.NAVIGATE,
+                    // A new tab has no page yet: the site is where it goes.
+                    origin = if (action.newTab) "" else site,
+                    url = action.url,
+                )
+                is AgentAction.Click -> base.copy(operation = BrowserToolSpecs.CLICK)
+                is AgentAction.Type -> base.copy(
+                    operation = BrowserToolSpecs.TYPE,
+                    characters = action.text.codePointCount(0, action.text.length),
+                    replace = action.replace,
+                )
+                is AgentAction.Select -> base.copy(operation = BrowserToolSpecs.SELECT, values = action.values)
+                is AgentAction.Press -> base.copy(operation = BrowserToolSpecs.PRESS, key = action.key)
+                is AgentAction.Scroll -> base.copy(operation = BrowserToolSpecs.SCROLL, direction = action.direction, pages = action.pages)
+                is AgentAction.Dialog -> base.copy(operation = BrowserToolSpecs.HANDLE_DIALOG)
+            }
+        }
+
         const val MAX_ELEMENTS = 60
         const val MAX_ELEMENT_CHARS = 16_000
         const val MAX_TEXT = 4_000

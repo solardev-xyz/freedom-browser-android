@@ -63,6 +63,12 @@ internal data class AgentApproval(
     val action: AgentAction,
     /** The agent's own claim of what this does: untrusted, shown as its words. */
     val intent: String?,
+    /**
+     * In "sensitive actions" (#595), why it's asked: the intent
+     * classifier's summary (the chat's model judging page and agent
+     * text, so shown as its words), or that it sends a form.
+     */
+    val check: String? = null,
 )
 
 /** How an approval ended. Only [Declined] is the user saying no. */
@@ -75,10 +81,10 @@ internal sealed interface ApprovalOutcome {
 }
 
 /**
- * The approvals Freedom Agent is waiting on (#575): desktop's "every
- * interaction" mode, the only one phase 1 has. Each navigate, click,
- * type, select, press, scroll and dialog answer waits here for the
- * user's own tap on its card ([AgentApprovalHost]); one card at a time,
+ * The approvals Freedom Agent is waiting on (#575). Each navigate,
+ * click, type, select, press, scroll and dialog answer the chat's
+ * approval mode ([ApprovalPolicy], #595) says to ask about waits here
+ * for the user's own tap on its card ([AgentApprovalHost]); one card at a time,
  * in the order asked. An answer settles exactly the request it was
  * shown for ([answer] by id), once; a request that goes away (its turn
  * stopped, its tab taken back or closed) is withdrawn, which is never

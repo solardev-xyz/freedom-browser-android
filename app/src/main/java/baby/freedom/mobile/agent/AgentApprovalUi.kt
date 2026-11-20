@@ -180,6 +180,14 @@ private fun ApprovalBody(approval: AgentApproval) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+    approval.check?.takeIf { it.isNotBlank() }?.let {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            stringResource(R.string.agent_approve_check, it),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
     Spacer(Modifier.height(8.dp))
     if (action !is AgentAction.Navigate) {
         Text(
