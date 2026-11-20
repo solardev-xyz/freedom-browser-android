@@ -286,21 +286,31 @@ class DappCall(
     val gasLimit: BigInteger?,
     val safe: SafeCallLabel? = null,
     val swarm: SwarmFundLabel? = null,
+    val name: NameCallLabel? = null,
 ) {
     init {
         require(gasLimit == null || gasLimit.signum() > 0) { "gas limit" }
         require(safe == null || origin == null) { "a Safe's own call has no site" }
         require(swarm == null || (origin == null && safe == null)) { "the node's funding is the wallet's own call" }
+        require(name == null || (origin == null && safe == null && swarm == null)) { "a name's registration is the wallet's own call" }
     }
 
     // By content, so a send read back from the journal equals the one that was written.
     override fun equals(other: Any?): Boolean =
         other is DappCall && origin == other.origin && data.contentEquals(other.data) && gasLimit == other.gasLimit &&
-            safe == other.safe && swarm == other.swarm
+            safe == other.safe && swarm == other.swarm && name == other.name
 
     override fun hashCode(): Int =
-        (((origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()) * 31 + safe.hashCode()) * 31 + swarm.hashCode()
+        ((((origin.hashCode() * 31 + data.contentHashCode()) * 31 + gasLimit.hashCode()) * 31 + safe.hashCode()) * 31 + swarm.hashCode()) * 31 +
+            name.hashCode()
 }
+
+/**
+ * The wallet's own call registering or renewing [name] (#579,
+ * [baby.freedom.mobile.names.NameRegistrar]): [step] is `commit`, `reveal`
+ * or `renew`, for the status and the history to say which.
+ */
+data class NameCallLabel(val name: String, val step: String)
 
 /**
  * The wallet's own `SwarmNodeFunder` call (#115, [SwarmFunder]): it funds

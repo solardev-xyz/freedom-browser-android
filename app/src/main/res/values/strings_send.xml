@@ -104,6 +104,8 @@
     <string name="send_requester_safe_activation">Safe “%1$s” (activation)</string>
     <string name="send_requester_safe_owners">Safe “%1$s” (its owners’ transaction)</string>
     <string name="send_requester_swarm_node">your Swarm node (funding and a postage stamp)</string>
+    <!-- A name registration's transaction (#579). %1$s: the name -->
+    <string name="send_requester_name">registering or renewing %1$s</string>
     <string name="send_requester_pairing_code">a scanned pairing code</string>
 
     <!-- wallet/Send.kt: recipients -->

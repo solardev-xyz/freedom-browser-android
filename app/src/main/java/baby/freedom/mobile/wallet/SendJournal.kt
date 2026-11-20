@@ -205,6 +205,7 @@ internal object SendJournalCodec {
                                     .put("depositPlur", l.depositPlur?.toString() ?: JSONObject.NULL)
                             } ?: JSONObject.NULL,
                         )
+                        .put("name", it.name?.let { l -> JSONObject().put("name", l.name).put("step", l.step) } ?: JSONObject.NULL)
                 } ?: JSONObject.NULL,
             )
             .put(
@@ -260,6 +261,7 @@ internal object SendJournalCodec {
                         l.optStringOrNull("depositPlur")?.let(::BigInteger),
                     )
                 },
+                d.optJSONObject("name")?.let { l -> NameCallLabel(l.getString("name"), l.getString("step")) },
             )
         }
         val request = SendRequest(
