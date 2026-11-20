@@ -229,7 +229,7 @@ class NameRegistrarTest {
         val op = r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.REGISTER, me, 0)
         val plan = r.plan(op.id)
         val d = r.dispatch(plan) { WalletSender.Broadcast.Failed("no node answered", mayHaveGone = true, english = "no node answered") }
-        assertEquals(NameRegistrar.Dispatched.Unknown, d)
+        assertEquals(NameRegistrar.Dispatched.Unknown(), d)
         assertEquals(State.DISPATCH_UNKNOWN, r.get(op.id)!!.state)
         try {
             r.plan(op.id)
@@ -250,6 +250,78 @@ class NameRegistrarTest {
         val now = r.refresh(op.id)!!
         assertEquals(Step.REVEAL, now.step)
         assertEquals(State.WAITING_COMMITMENT, now.state)
+    }
+
+    @Test
+    fun `a reveal the wallet may have sent keeps its hash, so a revert settles it`() = runBlocking {
+        val r = registrar()
+        val op = r.start(r.check("freedom.gwei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        r.dispatch(r.plan(op.id), sent(hash1))
+        chain.commitments[op.commitment!!] = BigInteger.valueOf(chain.timestamp)
+        chain.mine(hash1)
+        r.refresh(op.id)
+        chain.timestamp += 61
+        r.refresh(op.id)
+        val d = r.dispatch(r.plan(op.id)) { WalletSender.Broadcast.Failed("no node answered", true, "no node answered", hash = hash2) }
+        assertEquals(NameRegistrar.Dispatched.Unknown(), d)
+        assertEquals(State.DISPATCH_UNKNOWN, r.get(op.id)!!.state)
+        assertEquals(hash2, r.get(op.id)!!.transactionHash)
+        assertEquals(hash2, journal.saved.single().transactionHash)
+        // Not mined yet: still unknown.
+        assertEquals(State.DISPATCH_UNKNOWN, r.refresh(op.id)!!.state)
+        // Try again in the wallet sent the same bytes, and they reverted: still revealable in its window.
+        chain.mine(hash2, ok = false)
+        val back = r.refresh(op.id)!!
+        assertEquals(State.READY, back.state)
+        assertEquals(Step.REVEAL, back.step)
+        assertNull(back.transactionHash)
+    }
+
+    @Test
+    fun `a renewal the wallet may have sent that reverted ends failed`() = runBlocking {
+        chain.available["wei"] = false
+        chain.owner["wei"] = me
+        chain.expiry["wei"] = BigInteger.valueOf(chain.timestamp + 1000)
+        val r = registrar()
+        val op = r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.RENEW, me, 0)
+        r.dispatch(r.plan(op.id)) { WalletSender.Broadcast.Failed("no node answered", true, "no node answered", hash = hash1) }
+        assertEquals(State.DISPATCH_UNKNOWN, r.get(op.id)!!.state)
+        chain.mine(hash1, ok = false)
+        assertEquals(State.FAILED, r.refresh(op.id)!!.state)
+    }
+
+    @Test
+    fun `an outcome the disk refuses is held here, not left dispatching, and saved with the next write`() = runBlocking {
+        val j = NameJournal.Memory()
+        val r = registrar(j)
+        val op = r.start(r.check("freedom.eth", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        val plan = r.plan(op.id)
+        val d = r.dispatch(plan) {
+            // The disk fills while the wallet has it.
+            j.failSaves = true
+            WalletSender.Broadcast.Sent(hash1)
+        }
+        assertEquals(NameRegistrar.Dispatched.Sent(hash1, unsaved = true), d)
+        assertEquals(State.PENDING, r.get(op.id)!!.state)
+        assertEquals(hash1, r.get(op.id)!!.transactionHash)
+        assertEquals(State.DISPATCHING, j.saved.single().state)
+        // Followed as any sent step: its commitment and receipt move it on, and that save writes it.
+        j.failSaves = false
+        chain.commitments[op.commitment!!] = BigInteger.valueOf(chain.timestamp)
+        chain.mine(hash1)
+        assertEquals(State.WAITING_COMMITMENT, r.refresh(op.id)!!.state)
+        assertEquals(hash1, j.saved.single().commitHash)
+        // An unknown outcome is held the same way, and can be dismissed.
+        val other = r.start(r.check("other.eth", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        val u = r.dispatch(r.plan(other.id)) {
+            j.failSaves = true
+            WalletSender.Broadcast.Failed("no node answered", true, "no node answered")
+        }
+        assertEquals(NameRegistrar.Dispatched.Unknown(unsaved = true), u)
+        assertEquals(State.DISPATCH_UNKNOWN, r.get(other.id)!!.state)
+        j.failSaves = false
+        r.dismiss(other.id)
+        assertNull(r.get(other.id))
     }
 
     @Test

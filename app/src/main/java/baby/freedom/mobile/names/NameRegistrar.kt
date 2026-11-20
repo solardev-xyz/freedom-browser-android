@@ -335,16 +335,23 @@ class NameRegistrar internal constructor(
         roles.map { async { chain.checkCode(it, s) } }.awaitAll()
     }
 
-    /** What happened to a [dispatch]. */
+    /**
+     * What happened to a [dispatch]. [unsaved]: the outcome is held here
+     * but the disk refused it (it's written with the next save that
+     * lands); until then a restart reads the step back as maybe sent,
+     * without its hash.
+     */
     sealed interface Dispatched {
+        val unsaved: Boolean
+
         /** The wallet broadcast it; [refresh] follows it. */
-        data class Sent(val hash: String) : Dispatched
+        data class Sent(val hash: String, override val unsaved: Boolean = false) : Dispatched
 
         /** Nothing was sent; [message] says why, and the step can be reviewed again. */
-        data class NotSent(val message: String) : Dispatched
+        data class NotSent(val message: String, override val unsaved: Boolean = false) : Dispatched
 
         /** The wallet may have sent it: it's never sent again, only settled from chain state. */
-        data object Unknown : Dispatched
+        data class Unknown(override val unsaved: Boolean = false) : Dispatched
     }
 
     /**
@@ -387,23 +394,20 @@ class NameRegistrar internal constructor(
             val outcome = try {
                 send()
             } catch (e: CancellationException) {
-                withContext(NonCancellable) {
-                    record(op.id) { it.copy(state = State.DISPATCH_UNKNOWN, message = Strings.get(R.string.namereg_state_dispatch_unknown)) }
-                }
+                withContext(NonCancellable) { unknown(op.id, hash = null) }
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "send failed: ${e.javaClass.simpleName}")
-                record(op.id) { it.copy(state = State.DISPATCH_UNKNOWN, message = Strings.get(R.string.namereg_state_dispatch_unknown)) }
-                return Dispatched.Unknown
+                return unknown(op.id, hash = null)
             }
             return when (outcome) {
                 is WalletSender.Broadcast.Sent -> {
-                    record(op.id) { it.copy(state = State.PENDING, transactionHash = outcome.hash, message = null) }
-                    Dispatched.Sent(outcome.hash)
+                    val saved = record(op.id) { it.copy(state = State.PENDING, transactionHash = outcome.hash, message = null) }
+                    Dispatched.Sent(outcome.hash, unsaved = !saved)
                 }
+                // The signed bytes' hash, when they went to a node: their receipt (a reverted reveal) settles it too.
                 is WalletSender.Broadcast.Failed -> if (outcome.mayHaveGone) {
-                    record(op.id) { it.copy(state = State.DISPATCH_UNKNOWN, message = Strings.get(R.string.namereg_state_dispatch_unknown)) }
-                    Dispatched.Unknown
+                    unknown(op.id, outcome.hash)
                 } else {
                     notSent(op.id, outcome.message)
                 }
@@ -417,8 +421,13 @@ class NameRegistrar internal constructor(
     }
 
     private suspend fun notSent(id: String, message: String): Dispatched {
-        record(id) { it.copy(state = State.READY, message = message) }
-        return Dispatched.NotSent(message)
+        val saved = record(id) { it.copy(state = State.READY, message = message) }
+        return Dispatched.NotSent(message, unsaved = !saved)
+    }
+
+    private suspend fun unknown(id: String, hash: String?): Dispatched {
+        val saved = record(id) { it.copy(state = State.DISPATCH_UNKNOWN, transactionHash = hash, message = Strings.get(R.string.namereg_state_dispatch_unknown)) }
+        return Dispatched.Unknown(unsaved = !saved)
     }
 
     /**
@@ -612,11 +621,22 @@ class NameRegistrar internal constructor(
         }
     }
 
-    /** Applies [change] to the newest copy of [id]: a dispatch's outcome is never dropped. */
-    private suspend fun record(id: String, change: (NameOperation) -> NameOperation) {
-        writing.withLock {
-            val current = _operations.value.orEmpty().firstOrNull { it.id == id } ?: return
-            saveLocked(change(current), current.revision)
+    /**
+     * Applies [change] to the newest copy of [id]: a dispatch's outcome is
+     * never dropped. It's held here even when the disk refuses it (false),
+     * so the operation never stays dispatching — which nothing could move
+     * on or dismiss — after the wallet answered; the next save that lands
+     * writes it too.
+     */
+    private suspend fun record(id: String, change: (NameOperation) -> NameOperation): Boolean = writing.withLock {
+        val current = _operations.value.orEmpty().firstOrNull { it.id == id } ?: return@withLock true
+        try {
+            saveLocked(change(current), current.revision, holdUnsaved = true)
+            true
+        } catch (e: NameException) {
+            if (e.code != NameException.Code.SECURE_STORAGE) throw e
+            Log.w(TAG, "a dispatch's outcome is held unsaved")
+            false
         }
     }
 
@@ -626,7 +646,8 @@ class NameRegistrar internal constructor(
      */
     private suspend fun save(op: NameOperation, expectedRevision: Int?): NameOperation = writing.withLock { saveLocked(op, expectedRevision) }
 
-    private suspend fun saveLocked(op: NameOperation, expectedRevision: Int?): NameOperation {
+    /** [holdUnsaved]: when the disk refuses, the list here takes [op] anyway, and it still throws. */
+    private suspend fun saveLocked(op: NameOperation, expectedRevision: Int?, holdUnsaved: Boolean = false): NameOperation {
         val current = _operations.value.orEmpty()
         val stored = current.firstOrNull { it.id == op.id }
         if ((stored?.revision) != expectedRevision) refuse(NameException.Code.CONFLICT, Strings.get(R.string.namereg_error_changed))
@@ -638,7 +659,10 @@ class NameRegistrar internal constructor(
             val drop = next.filter { it.state.terminal }.takeLast(next.size - NameJournalCodec.MAX).map { it.id }.toSet()
             next = next.filter { it.id !in drop }
         }
-        if (!withContext(io) { journal.save(next) }) refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
+        if (!withContext(io) { journal.save(next) }) {
+            if (holdUnsaved) _operations.value = next
+            refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
+        }
         _operations.value = next
         return saved
     }

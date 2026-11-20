@@ -166,4 +166,6 @@
     <string name="namereg_action_price">price the transaction</string>
     <string name="namereg_sent_commit">Commit sent. Freedom checks for it and tells you when step 2 can go.</string>
     <string name="namereg_sent">Sent. Freedom checks for its confirmation.</string>
+    <!-- Added after the outcome of a send when the phone couldn't save it; the operation is followed while the app stays open. -->
+    <string name="namereg_outcome_unsaved">This phone couldn\'t save that outcome. Freedom keeps following it while the app is open, but after a restart it may show as possibly sent. Check the free space.</string>
 </resources>

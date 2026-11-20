@@ -308,13 +308,16 @@ fun NameRegistrationScreen(
                                         val q = r.quote
                                         if (!q.request.from.isLedger && !vault.unlockedNow()) vault.unlock(auth)
                                         val signer = WalletSender.signerFor(context, vault, q.request.from, fresh = { !sender.isStale(q) })
-                                        when (val d = registrar.dispatch(r.plan) { sender.submitAndAwaitBroadcast(q, signer) }) {
-                                            is NameRegistrar.Dispatched.Sent -> notice = Strings.get(
+                                        val d = registrar.dispatch(r.plan) { sender.submitAndAwaitBroadcast(q, signer) }
+                                        val said = when (d) {
+                                            is NameRegistrar.Dispatched.Sent -> Strings.get(
                                                 if (r.plan.step == Step.COMMIT) R.string.namereg_sent_commit else R.string.namereg_sent,
                                             )
-                                            is NameRegistrar.Dispatched.NotSent -> notice = d.message
-                                            NameRegistrar.Dispatched.Unknown -> notice = Strings.get(R.string.namereg_state_dispatch_unknown)
+                                            is NameRegistrar.Dispatched.NotSent -> d.message
+                                            is NameRegistrar.Dispatched.Unknown -> Strings.get(R.string.namereg_state_dispatch_unknown)
                                         }
+                                        // The outcome is held, but not on flash: said after what happened, never instead of it.
+                                        notice = if (d.unsaved) said + " " + Strings.get(R.string.namereg_outcome_unsaved) else said
                                         carriedOn = null
                                         reviewing = null
                                     } catch (e: CancellationException) {

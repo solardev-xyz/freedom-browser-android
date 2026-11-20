@@ -1439,10 +1439,12 @@ class WalletSender internal constructor(
 
         /**
          * It didn't go out — or, with [mayHaveGone], can't be told (the wallet page offers Try again).
-         * [english]: [message] for the peer that asked (#280).
+         * [english]: [message] for the peer that asked (#280). [hash]: with [mayHaveGone], the
+         * signed bytes' hash when they were handed to a node (Try again resends those same
+         * bytes), so the caller can look for their receipt; null when nothing was signed yet.
          */
-        data class Failed(val message: String, val mayHaveGone: Boolean, val english: String) : Broadcast {
-            constructor(said: Said, mayHaveGone: Boolean) : this(said.text, mayHaveGone, said.english)
+        data class Failed(val message: String, val mayHaveGone: Boolean, val english: String, val hash: String? = null) : Broadcast {
+            constructor(said: Said, mayHaveGone: Boolean, hash: String? = null) : this(said.text, mayHaveGone, said.english, hash)
         }
 
         /** [Submit.BUSY]: another send is still unresolved; nothing signed. */
@@ -1474,16 +1476,21 @@ class WalletSender internal constructor(
             Submit.STALE -> return Broadcast.Stale(droppedSigned = false)
             Submit.STARTED -> Unit
         }
-        val s = status.first { it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting) }
+        // The signed bytes' hash, once they're broadcasting: kept even if the send is then stopped on the phone.
+        var signedHash: String? = null
+        val s = status.first {
+            if (it?.quote === quote && it.hash != null) signedHash = it.hash
+            it?.quote !== quote || (it.stage != SendStatus.Stage.Signing && it.stage != SendStatus.Stage.Broadcasting)
+        }
         if (s?.quote !== quote) {
             // Stopped on the phone (Stop tracking, or the wallet removed) while it was going out.
-            return Broadcast.Failed(Strings.said(R.string.send_stopped_on_phone), true)
+            return Broadcast.Failed(Strings.said(R.string.send_stopped_on_phone), true, signedHash)
         }
         return when (val stage = s.stage) {
             is SendStatus.Stage.Failed -> when {
                 stage.stale -> Broadcast.Stale(stage.droppedSigned)
                 stage.rejected -> Broadcast.Rejected
-                else -> Broadcast.Failed(stage.message, stage.mayHaveGone, stage.english ?: NOT_SENT_ENGLISH)
+                else -> Broadcast.Failed(stage.message, stage.mayHaveGone, stage.english ?: NOT_SENT_ENGLISH, if (stage.mayHaveGone) s.hash ?: signedHash else null)
             }
             else -> s.hash?.let { Broadcast.Sent(it) } ?: Broadcast.Failed(Strings.said(R.string.send_no_hash), true)
         }
