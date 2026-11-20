@@ -1209,6 +1209,34 @@ class BrowserToolsTest {
     }
 
     @Test
+    fun `a start wait that runs out after the user took the tab back says so, not that a later step will report`() = runBlocking {
+        downloadLink()
+        // Taken back right after the tap; the page starts nothing.
+        host.duringTap = { AgentTabs.release(1) }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("POLICY_DENIED", out.code())
+        assertFalse(out.output, out.output.contains("lateDownload"))
+        // Nothing kept for the tab: the link's download now is the user's.
+        AgentTabs.hold(1, "chat", private = false)
+        assertNull(AgentDownloads.claim(1, "https://example.com/files/report.pdf"))
+        assertNull(AgentDownloads.takeLate(1))
+    }
+
+    @Test
+    fun `a download is described as one, so a plain link with an address qualifies`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "completed")
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(42) }
+        val tools = toolset()
+        tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        val described = host.scripts.filter { it.contains("PAGE(\"describe\"") }
+        assertTrue(described.isNotEmpty())
+        // The card's description and the re-check before the tap alike.
+        assertTrue(described.toString(), described.all { it.contains("\"action\":\"download\"") })
+    }
+
+    @Test
     fun `the approved link's download after the start wait ran out is reported with the next step, not asked again`() = runBlocking {
         downloadLink()
         val tools = toolset()

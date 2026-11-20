@@ -299,6 +299,24 @@ class AgentFilesTest {
     }
 
     @Test
+    fun `a wait that runs out after the user took the tab back ends taken back, and keeps nothing`() {
+        var holder: String? = "chat"
+        AgentDownloads.holderOf = { if (it == 1L) holder else null }
+        val i = intent()
+        assertTrue(AgentDownloads.arm(i))
+        // Taken back during the start wait (released), then the wait runs out.
+        holder = null
+        AgentDownloads.released(1)
+        assertFalse(AgentDownloads.lapse(i))
+        assertEquals(DownloadIntent.Start.TakenBack, i.start.getCompleted())
+        // Nothing kept: the link's download, coming now, is the user's like any other.
+        holder = "chat"
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertNull(AgentDownloads.takeLate(1))
+        assertTrue(AgentDownloads.takeHeld(1))
+    }
+
+    @Test
     fun `a lapse is forgotten after its window, and when the tab goes back to the user`() {
         var now = 1_000L
         AgentDownloads.clock = { now }

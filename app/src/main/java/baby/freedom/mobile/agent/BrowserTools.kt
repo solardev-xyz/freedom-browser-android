@@ -731,7 +731,8 @@ internal class BrowserToolset(
     private suspend fun downloadOn(port: AgentFilesPort, tab: AgentTab, rawRef: String): JSONObject {
         val ref = resolveRef(tab, rawRef)
         if (ref.viewport) throw ToolError(ToolError.INVALID_ARGUMENT, "Use the viewport reference only with browser_scroll.")
-        val raw = describeRaw(tab, ref, "click")
+        // Described as a download: any link with an address is one (desktop's download(ref)), not only `download` ones.
+        val raw = describeRaw(tab, ref, "download")
         val target = pageTarget(raw)
         val href = raw.optString("target")
         if (target.effect != "file_download" || href.isEmpty()) {
@@ -760,7 +761,7 @@ internal class BrowserToolset(
             throw ToolError(ToolError.APPROVAL_REQUIRED, "${lateDownloadNote(href)} Nothing else was done.")
         }
         val approval = approve(tab.id, tab.site, tab.document, AgentAction.Download(target), null, needsScreen = true)
-        val run = onScreen(tab, ref, approval, "click", null)
+        val run = onScreen(tab, ref, approval, "download", null)
         // Read as the intent is armed: a change made while the card was up counts.
         val direct = !port.askWhereToSave()
         val intent = DownloadIntent(sessionId, tab.id, href, direct)

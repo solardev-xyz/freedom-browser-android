@@ -209,11 +209,17 @@ internal object AgentDownloads {
      * user like any other, but is noted apart ([takeLate]): kept past the
      * next step's start, so the agent hears of it and doesn't ask again
      * for a file already waiting in the offer prompt. Later than that, the
-     * same address is an ordinary held download.
+     * same address is an ordinary held download. If the user took the tab
+     * back meanwhile, nothing is kept (no later step on it is the chat's to
+     * say it): it ends [DownloadIntent.Start.TakenBack], and false.
      */
     @Synchronized
     fun lapse(intent: DownloadIntent): Boolean {
         if (!disarm(intent)) return false
+        if (holderOf(intent.tabId) != intent.sessionId) {
+            intent.start.complete(DownloadIntent.Start.TakenBack)
+            return false
+        }
         lapsed[intent.tabId] = intent to clock()
         return true
     }

@@ -472,12 +472,14 @@
     var inputType = normalize(element.getAttribute('type')).toLowerCase();
     var submitsForm = Boolean(element.form) &&
       ((tag === 'button' && (!inputType || inputType === 'submit')) || (tag === 'input' && (inputType === 'submit' || inputType === 'image')));
-    var activates = action === 'click' || (action === 'press' && (key === 'Enter' || key === 'Space'));
+    // A download is a tap on the link: any link with an address, as desktop's download(ref) describes it.
+    var downloads = action === 'download' && (tag === 'a' || tag === 'area') && element.hasAttribute('href');
+    var activates = action === 'click' || action === 'download' || (action === 'press' && (key === 'Enter' || key === 'Space'));
     var implicitSubmit = action === 'press' && key === 'Enter' && Boolean(element.form) && tag === 'input' &&
       ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].indexOf(inputType) < 0;
     var out = { role: info.role, tag: tag, name: info.name.slice(0, 300) };
     if (choosesFile(element, tag, inputType)) out.effect = 'file_upload';
-    else if ((tag === 'a' || tag === 'area') && element.hasAttribute('download') && activates) out.effect = 'file_download';
+    else if (downloads || ((tag === 'a' || tag === 'area') && element.hasAttribute('download') && activates)) out.effect = 'file_download';
     else if ((submitsForm && activates) || implicitSubmit) out.effect = 'form_submission';
     if ((tag === 'a' || tag === 'area') && element.hasAttribute('href') && activates) out.target = String(element.href).slice(0, 4096);
     else if (out.effect === 'form_submission') out.target = String(element.form.action).slice(0, 4096);
