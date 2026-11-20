@@ -49,8 +49,8 @@ import baby.freedom.mobile.browser.restartsTapGuard
 /**
  * Where the node tools' sheets (#598) come up: on the browser screen,
  * over everything (the chat included), next to [AgentApprovalHost] and
- * [AgentTransferHost]; of the three, the one asked first shows
- * ([AgentSheets]). While it's composed the tools may ask
+ * [AgentTransferHost] and [AgentDomainHost]; of the four, the one asked
+ * first shows ([agentSheetFirst]). While it's composed the tools may ask
  * ([AgentNodeAsks.hostUp]); once it's gone every waiting ask is withdrawn.
  *
  * Built only from what the app checked: the service, the action or the
@@ -71,8 +71,9 @@ internal fun NodeAskHost() {
     val ask by AgentNodeAsks.shown.collectAsState()
     val approval by AgentApprovals.shown.collectAsState()
     val transfer by AgentTransfers.shown.collectAsState()
+    val domain by AgentDomains.shown.collectAsState()
     val shown = ask ?: return
-    if (!AgentSheets.shows(shown.id, approval?.id, transfer?.id)) return
+    if (!agentSheetFirst(shown.id, approval?.id, transfer?.id, domain?.id)) return
     key(shown.id) {
         val tap = rememberArmedTapGuard(shown.id, PromptTapGuard.PROTECTION_MS)
         val guard = tap.guard

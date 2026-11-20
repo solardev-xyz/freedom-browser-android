@@ -54,11 +54,6 @@ internal interface NodeControls {
     fun logs(source: NodeLogSource): String?
 }
 
-/** Which agent sheet shows: the one asked first, of a page approval, a transfer and a node action. */
-internal object AgentSheets {
-    fun shows(id: Long, vararg others: Long?): Boolean = others.none { it != null && it < id }
-}
-
 /** What a node action asks the user about. */
 internal sealed interface NodeAskKind {
     data class Request(val args: NodeRequestArgs) : NodeAskKind

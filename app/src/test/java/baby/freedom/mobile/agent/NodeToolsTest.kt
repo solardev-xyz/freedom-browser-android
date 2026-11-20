@@ -817,10 +817,12 @@ class NodeToolsTest {
 
     @Test
     fun `the oldest sheet shows, whichever host it's on`() {
-        assertTrue(AgentSheets.shows(3, null, null))
-        assertTrue(AgentSheets.shows(3, 4, null))
-        assertFalse(AgentSheets.shows(3, null, 2))
-        assertFalse(AgentSheets.shows(5, 4, 6))
+        assertTrue(agentSheetFirst(3, null, null))
+        assertTrue(agentSheetFirst(3, 4, null))
+        assertFalse(agentSheetFirst(3, null, 2))
+        assertFalse(agentSheetFirst(5, 4, 6))
+        // Four hosts (#595 approvals, #596 transfers, #598 node, #599 names): an older name sheet holds a node sheet back.
+        assertFalse(agentSheetFirst(5, null, 6, 4))
     }
 
     @Test
@@ -829,5 +831,8 @@ class NodeToolsTest {
         assertTrue(names.containsAll(listOf("node_status", "node_request", "node_operation_status", "node_lifecycle", "node_diagnostics")))
         // #597's tools stay in every chat beside #598's.
         assertTrue(names.containsAll(listOf("swarm_publish", "swarm_publication_status", "wallet_transfer")))
+        // #599's name tools too.
+        assertTrue(names.containsAll(listOf("domain_inspect", "domain_prepare", "domain_execute", "domain_operation_status")))
+        assertEquals(names.size, names.toSet().size)
     }
 }

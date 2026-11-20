@@ -228,7 +228,8 @@ internal class AppTransferWallet(context: Context) : TransferWallet {
  * each answer settling exactly the ask it was shown for, a withdrawal
  * never read as the user's no — but kept apart, since a transfer is
  * bound to no tab. Its ids come from [AgentApprovals.nextId], so the
- * two hosts can show whichever was asked first and never both at once.
+ * hosts (with [AgentDomains]' name transactions, #599) show whichever was
+ * asked first and never two at once ([agentSheetFirst]).
  *
  * [wallet] is installed by the browser screen's host while it's up
  * ([AgentTransferHost]): with no host, nothing could show the sheet,

@@ -485,4 +485,9 @@
     <string name="agent_node_diagnostics_amount_value">Up to the last %1$d lines (%2$d KB), with the node\'s status and the app and Android versions</string>
     <string name="agent_node_diagnostics_note">Logs can name peers, addresses and what the node fetched. They go to the model provider with the rest of the chat.</string>
     <string name="agent_node_allow_share">Share logs</string>
+
+    <!-- Freedom Agent's name transactions (#599): agent/DomainToolsUi.kt -->
+    <string name="agent_domain_title">Freedom Agent wants to send a name transaction</string>
+    <string name="agent_domain_note">Freedom Agent prepared this from your request. Check the name and what it changes: nothing is sent until you confirm.</string>
+    <string name="agent_domain_repriced">The network fee was priced again since the last review.</string>
 </resources>

@@ -3759,6 +3759,7 @@ fun BrowserScreen(
     baby.freedom.mobile.agent.AgentApprovalHost()
     baby.freedom.mobile.agent.AgentTransferHost()
     baby.freedom.mobile.agent.NodeAskHost()
+    baby.freedom.mobile.agent.AgentDomainHost()
     DisposableEffect(tabs) {
         val show: (Long) -> Boolean = { id ->
             val closedChat = showAgent

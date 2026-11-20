@@ -66,9 +66,10 @@ internal fun AgentApprovalHost() {
     val approval by AgentApprovals.shown.collectAsState()
     val transfer by AgentTransfers.shown.collectAsState()
     val node by AgentNodeAsks.shown.collectAsState()
+    val domain by AgentDomains.shown.collectAsState()
     val shown = approval ?: return
-    // A wallet transfer's (#596) or node action's (#598) sheet asked earlier comes first: never two at once.
-    if (!AgentSheets.shows(shown.id, transfer?.id, node?.id)) return
+    // A wallet transfer's (#596), node action's (#598) or name transaction's (#599) sheet asked earlier comes first: never two at once.
+    if (!agentSheetFirst(shown.id, transfer?.id, node?.id, domain?.id)) return
     androidx.compose.runtime.key(shown.id) {
         val tap = rememberArmedTapGuard(shown.id)
         val guard = tap.guard

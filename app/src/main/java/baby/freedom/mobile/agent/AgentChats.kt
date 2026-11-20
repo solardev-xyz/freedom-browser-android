@@ -357,6 +357,7 @@ internal class AgentChats(
         AgentApprovals.withdrawSession(sessionId)
         AgentTransfers.withdrawSession(sessionId)
         AgentNodeAsks.withdrawSession(sessionId)
+        AgentDomains.withdrawSession(sessionId)
         AgentTabs.releaseChat(sessionId)
     }
 
@@ -403,11 +404,14 @@ internal class AgentChats(
         fun get(context: Context): AgentChats = instance ?: synchronized(this) {
             instance ?: run {
                 val app = context.applicationContext
-                val prompt = app.assets.open(PROMPT_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }
+                val skills = AgentSkills.load { path -> app.assets.open(path).use { it.readBytes() } }
+                // Desktop's catalog of built-in skills follows the prompt, for the `read` tool (#599).
+                val prompt = app.assets.open(PROMPT_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }.trim() +
+                    if (skills.isEmpty) "" else "\n\n" + skills.catalog()
                 lateinit var chats: AgentChats
                 chats = AgentChats(
                     AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt,
-                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId), NodeOperations.get(app)) { app } },
+                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId), NodeOperations.get(app), skills) { app } },
                     forgetNodeOperations = { sessionId ->
                         val store = NodeOperations.get(app).store
                         if (sessionId == null) store.deleteAll() else store.deleteOwner(sessionId)

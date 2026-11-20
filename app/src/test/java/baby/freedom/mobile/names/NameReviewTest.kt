@@ -166,4 +166,46 @@ class NameReviewTest {
         assertEquals(1, Regex("Check again in a moment").findAll(operationStatus(mined, 0)).count())
         assertTrue(operationStatus(unseen.copy(message = null), 0).startsWith("The transaction went through"))
     }
+
+    private fun recordRows(record: NameRecord, before: String, intent: Intent, reference: String? = null, own: List<WalletAccount>? = null): Map<String, String> {
+        val o = op(intent = intent, step = Step.RECORD, commitQuote = null).copy(duration = 0, record = record, before = before, reference = reference)
+        val data = NameContracts.setTextData(NameContracts.parse("freedom.eth"), "k", "v")
+        val p = NameRegistrar.Plan(o.id, 1, Step.RECORD, NameContracts.Role.RESOLVER.address, data, BigInteger.ZERO, null, NameContracts.Role.RESOLVER)
+        val r = nameReview(o, p, quote(p), own)!!
+        assertNull("a record write has no term or price", r.rows.firstOrNull { it.label == "Term" || it.label == "Price" })
+        return r.rows.associate { it.label to it.value }
+    }
+
+    @Test
+    fun `a record write shows each kind's own empty and cleared values, never reading text as a hash or an address`() {
+        // A text that reads "0x", or forty zeros, is text: shown as is, not as empty or cleared.
+        var rows = recordRows(NameRecord(NameRecord.Kind.TEXT, "0x", "note"), "0x" + "0".repeat(40), Intent.SET_TEXT)
+        assertEquals("Text record", rows["Record"])
+        assertEquals("note", rows["Key"])
+        assertEquals("0x" + "0".repeat(40), rows["Now"])
+        assertEquals("0x", rows["New"])
+        // An empty text clears the record; an empty current text is empty.
+        rows = recordRows(NameRecord(NameRecord.Kind.TEXT, "", "note"), "", Intent.SET_TEXT)
+        assertEquals("(empty)", rows["Now"])
+        assertEquals("(cleared)", rows["New"])
+        // A hidden character in someone else's record shows as an escape.
+        rows = recordRows(NameRecord(NameRecord.Kind.TEXT, "new", "url"), "a\u202Eb", Intent.SET_TEXT)
+        assertEquals("a\\u202Eb", rows["Now"])
+        // The website: no bytes is empty, 0x clears it, a reference is shown as its bzz:// address.
+        rows = recordRows(NameRecord(NameRecord.Kind.CONTENTHASH, "0x"), "0xe40101fa011b20" + "ab".repeat(32), Intent.CLEAR_WEBSITE)
+        assertEquals("Website (content hash)", rows["Record"])
+        assertEquals("(cleared)", rows["New"])
+        rows = recordRows(NameRecord(NameRecord.Kind.CONTENTHASH, "0xe40101fa011b20" + "cd".repeat(32)), "0x", Intent.SET_WEBSITE, reference = "cd".repeat(32))
+        assertEquals("(empty)", rows["Now"])
+        assertEquals("bzz://" + "cd".repeat(32), rows["New"])
+        // An address: the zero address is empty, and whether it's this wallet's is said.
+        val mine = WalletAccount(1, "Savings", "0x3333333333333333333333333333333333333333")
+        rows = recordRows(NameRecord(NameRecord.Kind.ADDRESS, mine.address), NameContracts.ZERO_ADDRESS, Intent.SET_ADDRESS, own = listOf(mine))
+        assertEquals("(empty)", rows["Now"])
+        assertEquals("Your wallet account “Savings”", rows["Belongs to"])
+        rows = recordRows(NameRecord(NameRecord.Kind.ADDRESS, "0x4444444444444444444444444444444444444444"), "", Intent.SET_ADDRESS, own = listOf(mine))
+        assertTrue(rows["Belongs to"]!!.startsWith("Not one of your wallet accounts"))
+        rows = recordRows(NameRecord(NameRecord.Kind.ADDRESS, "0x4444444444444444444444444444444444444444"), "", Intent.SET_ADDRESS)
+        assertTrue(rows["Belongs to"]!!.startsWith("Freedom couldn't read your wallet accounts"))
+    }
 }
