@@ -3,6 +3,7 @@ package baby.freedom.mobile.names
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -560,7 +561,8 @@ private fun OperationCard(
             Text(operationStatus(op, nowSeconds), style = MaterialTheme.typography.bodyMedium)
             revealDeadline(op)?.let { MutedText(it) }
             MutedText(account?.let { stringResource(R.string.namereg_op_account, it.name, it.address) } ?: stringResource(R.string.namereg_op_account_missing))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            // Wraps at a large font rather than squeezing a label mid-word.
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (op.state == State.READY) {
                     Button(onClick = onReview, enabled = !busy && account != null) { Text(stringResource(R.string.namereg_review_step)) }
                 }
