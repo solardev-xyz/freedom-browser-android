@@ -50,17 +50,17 @@
     <string name="namereg_state_commitment_expired">The commit is too old to register with now. A new registration would need a new commit and its network fee.</string>
     <string name="namereg_state_reverted">The transaction failed on chain. Its network fee was spent; nothing else was paid.</string>
     <!-- Record writes, which only the agent's domain tools prepare (#599) -->
-    <string name="namereg_error_reference">That isn't a Swarm website reference Freedom can point a name at.</string>
-    <string name="namereg_error_record_too_large">A record on this name is too large to edit here. Use the registry's own app.</string>
-    <string name="namereg_error_resolver_unsupported">This name isn't active, or its records are kept by a resolver Freedom doesn't write to. Freedom won't replace the resolver; use the registry's own app.</string>
-    <string name="namereg_error_not_record_owner">This account isn't allowed to change this name's records.</string>
+    <string name="namereg_error_reference">That isn\'t a Swarm website reference Freedom can point a name at.</string>
+    <string name="namereg_error_record_too_large">A record on this name is too large to edit here. Use the registry\'s own app.</string>
+    <string name="namereg_error_resolver_unsupported">This name isn\'t active, or its records are kept by a resolver Freedom doesn\'t write to. Freedom won\'t replace the resolver; use the registry\'s own app.</string>
+    <string name="namereg_error_not_record_owner">This account isn\'t allowed to change this name\'s records.</string>
     <string name="namereg_error_record_unchanged">The record already holds that value. Nothing needs to be sent.</string>
-    <string name="namereg_error_record_changed">The name's owner, resolver or this record changed since it was prepared. Nothing was sent. Prepare it again.</string>
-    <string name="namereg_error_record_invalid">The saved record doesn't match what it was prepared for. Dismiss it and start again.</string>
+    <string name="namereg_error_record_changed">The name\'s owner, resolver or this record changed since it was prepared. Nothing was sent. Prepare it again.</string>
+    <string name="namereg_error_record_invalid">The saved record doesn\'t match what it was prepared for. Dismiss it and start again.</string>
     <string name="namereg_error_address">Enter one exact Ethereum address, not the zero address.</string>
     <string name="namereg_error_text_record">A text record needs a key of up to 128 characters and a value of up to 2048, with no control characters.</string>
     <!-- %1$s: the name -->
-    <string name="namereg_error_open_operation">%1$s already has an open operation for this account. Finish or dismiss it on the wallet's Names page first.</string>
+    <string name="namereg_error_open_operation">%1$s already has an open operation for this account. Finish or dismiss it on the wallet\'s Names page first.</string>
     <string name="namereg_state_reveal_reverted">The registration failed on chain: its network fee was spent, but the name wasn\'t bought and its price wasn\'t paid. The commit is still valid, so you can review step 2 again.</string>
 
     <!-- names/NameRegistrationScreen.kt -->

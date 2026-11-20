@@ -34,115 +34,11 @@ class NameRegistrarTest {
     private val me = "0x1111111111111111111111111111111111111111"
     private val someoneElse = "0x2222222222222222222222222222222222222222"
 
-    /** A tiny mainnet: the name contracts' state, keyed by what the registrar asks. */
-    private class FakeChain : NameReads {
-        var block = 100L
-        var timestamp = 1_800_000_000L
-        val available = HashMap<String, Boolean>()
-        val owner = HashMap<String, String>()
-        val expiry = HashMap<String, BigInteger>()
-        val commitments = HashMap<String, BigInteger>()
-        val receipts = HashMap<String, JSONObject>()
-        var base = BigInteger("3000000000000000")
-        var premium = BigInteger.ZERO
-        var nftFee = BigInteger("1000000000000000")
-        var unverified = false
-        var receiptsUnverified = false
-        var balance: BigInteger = BigInteger.TEN.pow(18)
-        var revertSimulation = false
-        val tampered = HashSet<String>()
-        val simulated = ArrayList<Pair<ByteArray, BigInteger?>>()
-
-        fun code(address: String) = "0x" + address.removePrefix("0x").lowercase() + if (address.lowercase() in tampered) "ff" else ""
-
-        val pinned: (Role) -> String = { role -> NameContracts.hex(Keccak256.digest(NameRegistrar.hexBytes("0x" + role.address.removePrefix("0x").lowercase()))) }
-
-        private fun check() {
-            if (unverified) refuse(NameException.Code.UNVERIFIED, "unverified")
-        }
-
-        override suspend fun latest(): NameChain.Snapshot {
-            check()
-            return NameChain.Snapshot(block, timestamp)
-        }
-
-        override suspend fun at(number: Long) = NameChain.Snapshot(number, timestamp)
-
-        override suspend fun code(address: String, block: Long): String {
-            check()
-            return code(address)
-        }
-
-        override suspend fun receipt(hash: String): JSONObject? {
-            if (receiptsUnverified) refuse(NameException.Code.UNVERIFIED, "unverified")
-            return receipts[hash]
-        }
-
-        override suspend fun balance(address: String, block: Long): BigInteger = balance
-
-        private fun word(v: BigInteger) = NameAbi.uint(v).bytes
-        private fun ret(vararg words: ByteArray) = "0x" + words.joinToString("") { w -> w.joinToString("") { "%02x".format(it) } }
-        private fun addr(a: String) = NameAbi.address(a).bytes
-        private fun bool(b: Boolean) = word(if (b) BigInteger.ONE else BigInteger.ZERO)
-        private fun str(s: String): String = "0x" + NameAbi.encode(listOf(NameAbi.string(s))).joinToString("") { "%02x".format(it) }
-
-        override suspend fun call(to: String, data: ByteArray, block: Long, from: String?, value: BigInteger?): String {
-            check()
-            val sel = data.copyOfRange(0, 4)
-            fun s(sig: String) = sel.contentEquals(NameAbi.selector(sig))
-            val role = Role.byAddress(to) ?: error("unknown contract $to")
-            if (from != null) {
-                simulated += data to value
-                if (revertSimulation) throw ChainRpcException.Rpc(3, "execution reverted", "0x")
-                return "0x"
-            }
-            val words = NameAbi.words("0x" + data.copyOfRange(4, data.size).joinToString("") { "%02x".format(it) })!!
-            val label = { NameAbi.dynamicString(words, 0)!! }
-            return when {
-                s("owner(bytes32)") -> ret(addr(owner["eth"] ?: NameContracts.ZERO_ADDRESS))
-                s("nameExpires(uint256)") -> ret(word(expiry["eth"] ?: BigInteger.ZERO))
-                s("ownerOf(uint256)") -> ret(addr(owner[if (role == Role.BASE) "eth" else role.name.lowercase()]!!))
-                s("controllers(address)") -> ret(bool(true))
-                s("available(string)") -> ret(bool(available["eth"] ?: true))
-                s("valid(string)") -> ret(bool(label().length >= 3))
-                s("rentPrice(string,uint256)") -> ret(word(base), word(premium))
-                s("commitments(bytes32)") -> ret(word(commitments[NameContracts.hex(words[0])] ?: BigInteger.ZERO))
-                s("minCommitmentAge()") -> ret(word(BigInteger.valueOf(60)))
-                s("maxCommitmentAge()") -> ret(word(BigInteger.valueOf(86_400)))
-                s("MIN_REGISTRATION_DURATION()") -> ret(word(BigInteger.valueOf(28 * 86_400)))
-                s("isAvailable(string,uint256)") -> ret(bool(available[role.name.lowercase()] ?: true))
-                s("records(uint256)") -> {
-                    val key = role.name.lowercase()
-                    val l = if (owner[key] != null) "freedom" else ""
-                    val enc = NameAbi.encode(
-                        listOf(NameAbi.string(l), NameAbi.uint(0), NameAbi.uint(expiry[key] ?: BigInteger.ZERO), NameAbi.uint(1), NameAbi.uint(0)),
-                    )
-                    "0x" + enc.joinToString("") { "%02x".format(it) }
-                }
-                s("getFee(uint256)") -> ret(word(nftFee))
-                s("getPremium(uint256)") -> ret(word(premium))
-                s("normalize(string)") -> str(label())
-                s("computeId(string)") -> ret(word(NameContracts.parse(label()).tokenId))
-                else -> error("unexpected call ${sel.joinToString("") { "%02x".format(it) }}")
-            }
-        }
-
-        fun mine(hash: String, ok: Boolean = true) {
-            block++
-            receipts[hash] = JSONObject().put("transactionHash", hash).put("status", if (ok) "0x1" else "0x0").put("blockNumber", "0x" + block.toString(16))
-        }
-    }
-
-    private object PlainSecrets : NameSecrets {
-        override fun seal(secret: ByteArray): String = Base64.getEncoder().encodeToString(secret)
-        override fun open(sealed: String): ByteArray = Base64.getDecoder().decode(sealed)
-    }
-
-    private val chain = FakeChain()
+    private val chain = FakeNameChain()
     private val journal = NameJournal.Memory()
 
     private fun registrar(j: NameJournal = journal) = NameRegistrar(
-        chain, j, PlainSecrets, CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
+        chain, j, PlainNameSecrets, CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
         random = SecureRandom(), io = Dispatchers.Unconfined, pinned = chain.pinned,
     ).also { runBlocking { it.awaitLoaded() } }
 
@@ -782,5 +678,148 @@ class NameRegistrarTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    private fun ownWei() {
+        chain.owner["wei"] = me
+        chain.expiry["wei"] = BigInteger.valueOf(chain.timestamp + NameContracts.YEAR)
+        chain.available["wei"] = false
+    }
+
+    private fun refused(code: NameException.Code, block: suspend () -> Unit) = runBlocking {
+        try {
+            block()
+            fail("not refused")
+        } catch (e: NameException) {
+            assertEquals(e.english, code, e.code)
+        }
+    }
+
+    @Test
+    fun `a text record write on a wei name is built from what it holds now and settles when the record is set`() = runBlocking {
+        ownWei()
+        val r = registrar()
+        val record = NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "https://alice.example")
+        val op = r.startRecord("alice.wei", Intent.SET_TEXT, record, me, 0, chat = "chat-1")
+        assertEquals(Step.RECORD, op.step)
+        assertEquals(State.READY, op.state)
+        assertEquals("", op.before)
+        assertEquals("chat-1", op.chat)
+        assertNull(op.encryptedSecret)
+
+        val plan = r.plan(op.id)
+        assertEquals(Role.WEI.address, plan.to)
+        assertEquals(BigInteger.ZERO, plan.value)
+        assertArrayEquals(NameContracts.setTextData(NameContracts.parse("alice.wei"), "url", "https://alice.example"), plan.data)
+
+        assertEquals(NameRegistrar.Dispatched.Sent(hash1), r.dispatch(plan, sent(hash1)))
+        chain.text["wei"] = hashMapOf("url" to "https://alice.example")
+        chain.mine(hash1)
+        assertEquals(State.COMPLETED, r.refresh(op.id)!!.state)
+        // A record operation reads back from the journal whole.
+        assertEquals(r.get(op.id), NameJournalCodec.decode(NameJournalCodec.encode(journal.saved)).single().copy(revision = r.get(op.id)!!.revision))
+    }
+
+    @Test
+    fun `a record that already holds the value, a name the account doesn't own and an unsupported resolver are refused`() {
+        ownWei()
+        chain.text["wei"] = hashMapOf("url" to "same")
+        val r = registrar()
+        refused(NameException.Code.INVALID) {
+            r.startRecord("alice.wei", Intent.SET_TEXT, NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "same"), me, 0)
+        }
+        // An unsent write of what's already there would read back as done: nothing is prepared.
+        assertTrue(journal.saved.isEmpty())
+        refused(NameException.Code.UNSUPPORTED) {
+            r.startRecord("alice.wei", Intent.SET_TEXT, NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "new"), someoneElse, 1)
+        }
+        chain.owner["eth"] = me
+        chain.expiry["eth"] = BigInteger.valueOf(chain.timestamp + NameContracts.YEAR)
+        chain.resolver["eth"] = someoneElse
+        refused(NameException.Code.UNSUPPORTED) {
+            r.startRecord("freedom.eth", Intent.CLEAR_WEBSITE, NameRegistrar.recordFor(Intent.CLEAR_WEBSITE), me, 0)
+        }
+        assertTrue(journal.saved.isEmpty())
+    }
+
+    @Test
+    fun `an eth address write goes to the public resolver, and an approved operator may write it`() = runBlocking {
+        chain.owner["eth"] = someoneElse
+        chain.expiry["eth"] = BigInteger.valueOf(chain.timestamp + NameContracts.YEAR)
+        chain.available["eth"] = false
+        chain.approvedForAll += someoneElse to me
+        val r = registrar()
+        val record = NameRegistrar.recordFor(Intent.SET_ADDRESS, address = me)
+        val op = r.startRecord("freedom.eth", Intent.SET_ADDRESS, record, me, 0)
+        val plan = r.plan(op.id)
+        assertEquals(Role.RESOLVER.address, plan.to)
+        assertArrayEquals(NameContracts.setAddrData(NameContracts.parse("freedom.eth"), me), plan.data)
+        // The approval is withdrawn before it's sent: nothing goes, and it's out of date.
+        chain.approvedForAll.clear()
+        refused(NameException.Code.UNSUPPORTED) { r.dispatch(plan, sent(hash1)) }
+    }
+
+    @Test
+    fun `a record write whose owner, generation or record changed after it was prepared is never sent`() = runBlocking {
+        ownWei()
+        val r = registrar()
+        val record = NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "new")
+        val op = r.startRecord("alice.wei", Intent.SET_TEXT, record, me, 0)
+        chain.recordVersion["wei"] = BigInteger.TWO
+        refused(NameException.Code.STALE) { r.plan(op.id) }
+        chain.recordVersion.remove("wei")
+        val plan = r.plan(op.id)
+        chain.text["wei"] = hashMapOf("url" to "someone else's")
+        var sends = 0
+        refused(NameException.Code.STALE) { r.dispatch(plan) { sends++; WalletSender.Broadcast.Sent(hash1) } }
+        assertEquals(0, sends)
+        assertEquals(State.STALE, r.get(op.id)!!.state)
+    }
+
+    @Test
+    fun `a record write the wallet may have sent is settled by the record on chain, never sent again`() = runBlocking {
+        ownWei()
+        val r = registrar()
+        val record = NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "new")
+        val op = r.startRecord("alice.wei", Intent.SET_TEXT, record, me, 0)
+        assertEquals(NameRegistrar.Dispatched.Unknown(), r.dispatch(r.plan(op.id)) { throw IllegalStateException("lost") })
+        assertEquals(State.DISPATCH_UNKNOWN, r.refresh(op.id)!!.state)
+        chain.text["wei"] = hashMapOf("url" to "new")
+        assertEquals(State.COMPLETED, r.refresh(op.id)!!.state)
+    }
+
+    @Test
+    fun `a record is checked as desktop checks it, and a saved one that doesn't match its intent is refused`() = runBlocking {
+        assertEquals(NameRecord(NameRecord.Kind.CONTENTHASH, "0xe40101fa011b20" + "cd".repeat(32)), NameRegistrar.recordFor(Intent.SET_WEBSITE, reference = "cd".repeat(32)))
+        assertEquals(NameRecord(NameRecord.Kind.CONTENTHASH, "0x"), NameRegistrar.recordFor(Intent.CLEAR_WEBSITE))
+        assertEquals(
+            NameRecord(NameRecord.Kind.ADDRESS, "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"),
+            NameRegistrar.recordFor(Intent.SET_ADDRESS, address = "0x9858effd232b4033e47d90003d41ec34ecaeda94"),
+        )
+        for (bad in listOf(
+            { NameRegistrar.recordFor(Intent.SET_ADDRESS, address = NameContracts.ZERO_ADDRESS) },
+            { NameRegistrar.recordFor(Intent.SET_ADDRESS, address = "0x9858EfFD232B4033E47d90003D41EC34EcaEda9") },
+            { NameRegistrar.recordFor(Intent.SET_ADDRESS, address = "0x9858EFFD232B4033E47d90003D41EC34EcaEda94") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "", value = "x") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "k".repeat(129), value = "x") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "x".repeat(2049)) },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "a\u202Eb") },
+            { NameRegistrar.recordFor(Intent.SET_TEXT, key = "u\nrl", value = "x") },
+            { NameRegistrar.recordFor(Intent.SET_WEBSITE, reference = "zz") },
+        )) {
+            try {
+                bad()
+                fail("accepted")
+            } catch (e: NameException) {
+                assertEquals(NameException.Code.INVALID, e.code)
+            }
+        }
+        ownWei()
+        val r = registrar()
+        val op = r.startRecord("alice.wei", Intent.SET_TEXT, NameRegistrar.recordFor(Intent.SET_TEXT, key = "url", value = "new"), me, 0)
+        // A journal edited to point the write somewhere else isn't built.
+        val tampered = op.copy(intent = Intent.SET_WEBSITE)
+        val r2 = registrar(NameJournal.Memory(listOf(tampered)))
+        refused(NameException.Code.UNSUPPORTED) { r2.plan(op.id) }
     }
 }

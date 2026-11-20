@@ -199,4 +199,79 @@ class NameContractsTest {
         // An offset past the data is malformed, not read out of bounds.
         assertEquals(null, NameAbi.dynamicString(listOf(NameAbi.uint(4096).bytes), 0))
     }
+
+    @Test
+    fun `record writes and reads match ethers' encodeFunctionData, for the resolver and the NameNFT`() {
+        val eth = NameContracts.parse("alice.eth")
+        val wei = NameContracts.parse("alice.wei")
+        val sub = NameContracts.parse("blog.alice.gwei")
+        val a = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        val other = "0x1111111111111111111111111111111111111111"
+        val ch = NameContracts.swarmContenthash("ab".repeat(32))
+        assertEquals("0xe40101fa011b20" + "ab".repeat(32), ch)
+        val chBytes = NameRegistrar.hexBytes(ch)
+        val chData = "00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000027e40101fa011b20" +
+            "ab".repeat(32) + "00000000000000000000000000000000000000000000000000"
+        val ethNode = "787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+        val weiId = "ab8b935a479940b3bfb3690f7fa08a8ed1cfecc06dd69662d9b6f7cdcbdbed66"
+        assertEquals("0x304e6ade$ethNode$chData", hex(NameContracts.setContenthashData(eth, chBytes)))
+        assertEquals(
+            "0x304e6ade$ethNode" + "0000000000000000000000000000000000000000000000000000000000000040" + "0".repeat(64),
+            hex(NameContracts.setContenthashData(eth, ByteArray(0))),
+        )
+        assertEquals("0xd5fa2b00$ethNode" + "0000000000000000000000009858effd232b4033e47d90003d41ec34ecaeda94", hex(NameContracts.setAddrData(eth, a)))
+        assertEquals(
+            "0x10f13a8c$ethNode" +
+                "0000000000000000000000000000000000000000000000000000000000000060" +
+                "00000000000000000000000000000000000000000000000000000000000000a0" +
+                "0000000000000000000000000000000000000000000000000000000000000003" +
+                "75726c0000000000000000000000000000000000000000000000000000000000" +
+                "0000000000000000000000000000000000000000000000000000000000000016" +
+                "68747470733a2f2f6578616d706c652e636f6d2fc3bc00000000000000000000",
+            hex(NameContracts.setTextData(eth, "url", "https://example.com/ü")),
+        )
+        assertEquals("0x88f97a67$weiId$chData", hex(NameContracts.setContenthashData(wei, chBytes)))
+        assertEquals("0xeba36dbd$weiId" + "0000000000000000000000009858effd232b4033e47d90003d41ec34ecaeda94", hex(NameContracts.setAddrData(wei, a)))
+        assertEquals(
+            "0x3fb2478278feeede0859121975592f290901bbac8d50b2e69f8e4d6b69903a1b4b67a189" +
+                "0000000000000000000000000000000000000000000000000000000000000060" +
+                "00000000000000000000000000000000000000000000000000000000000000a0" +
+                "0000000000000000000000000000000000000000000000000000000000000006" +
+                "6176617461720000000000000000000000000000000000000000000000000000" +
+                "0000000000000000000000000000000000000000000000000000000000000001" +
+                "7800000000000000000000000000000000000000000000000000000000000000",
+            hex(NameContracts.setTextData(sub, "avatar", "x")),
+        )
+        val urlArg = "0000000000000000000000000000000000000000000000000000000000000040" +
+            "0000000000000000000000000000000000000000000000000000000000000003" +
+            "75726c0000000000000000000000000000000000000000000000000000000000"
+        assertEquals("0x59d1d43c$ethNode$urlArg", hex(NameContracts.textData(eth, "url")))
+        assertEquals("0x3b3b57de$ethNode", hex(NameContracts.addressData(eth)))
+        assertEquals("0xbc1c58d1$ethNode", hex(NameContracts.contenthashData(eth)))
+        assertEquals("0x4f896d4f$weiId", hex(NameContracts.addressData(wei)))
+        assertEquals("0xcb323d76$weiId", hex(NameContracts.contenthashData(wei)))
+        assertEquals("0x308e3386$weiId$urlArg", hex(NameContracts.textData(wei, "url")))
+        assertEquals("0x0178b8bf$ethNode", hex(NameContracts.registryResolverData(eth.node)))
+        assertEquals(
+            "0xe985e9c5" + "0000000000000000000000009858effd232b4033e47d90003d41ec34ecaeda94" + "0000000000000000000000001111111111111111111111111111111111111111",
+            hex(NameContracts.isApprovedForAllData(a, other)),
+        )
+        assertEquals(
+            "0xa9784b3e" + "0000000000000000000000009858effd232b4033e47d90003d41ec34ecaeda94" + ethNode + "0000000000000000000000001111111111111111111111111111111111111111",
+            hex(NameContracts.isApprovedForData(a, eth.node, other)),
+        )
+        assertEquals("0x6f40aeb5$weiId", hex(NameContracts.nftRecordVersionData(wei.tokenId)))
+        // A reference that isn't 64 lowercase hex digits is refused, as desktop's swarmContenthash refuses it.
+        for (bad in listOf("AB".repeat(32), "ab".repeat(31), "bzz://" + "ab".repeat(32), "")) {
+            try {
+                NameContracts.swarmContenthash(bad)
+                fail("took $bad")
+            } catch (e: NameException) {
+                assertEquals(NameException.Code.INVALID, e.code)
+            }
+        }
+        // The contenthash record decodes back as written.
+        val words = NameAbi.words("0x$ethNode$chData")!!
+        assertEquals(ch, hex(NameAbi.dynamicBytes(words, 1)!!))
+    }
 }
