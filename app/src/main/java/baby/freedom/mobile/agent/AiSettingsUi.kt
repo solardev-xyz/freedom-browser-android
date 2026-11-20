@@ -435,6 +435,9 @@ private fun ProviderPage(
     var line by remember(target.providerId) { mutableStateOf<String?>(null) }
     var filter by rememberSaveable(target.providerId) { mutableStateOf("") }
     var confirmRemove by remember { mutableStateOf(false) }
+    // A pasted Sign in with ChatGPT callback (#602): held here, not in the
+    // list item (scrolling it off would drop it), and never in saved state.
+    var pasted by remember(target.providerId) { mutableStateOf("") }
     if (reveal) SecureWindow()
     // A finished or failed sign-in isn't shown again on the next visit.
     // Here, not in the list item, which scrolling off disposes.
@@ -581,6 +584,8 @@ private fun ProviderPage(
                             definition = definition,
                             connected = connection != null,
                             enabled = !busy,
+                            pasted = pasted,
+                            onPasted = { pasted = it },
                         )
                         definition.keyUrl?.let { link ->
                             Text(
@@ -715,8 +720,9 @@ private fun ProviderPage(
     }
 }
 
-private fun loginLine(failure: LoginFailure): String = Strings.get(
-    when (failure) {
+private fun loginLine(providerId: String, failure: LoginFailure): String = Strings.get(
+    // Sign in with ChatGPT has opened a page by then: say only that nothing was saved.
+    if (failure == LoginFailure.BadReply && providerId == ChatGptLogin.PROVIDER) R.string.agent_sign_in_bad_grant else when (failure) {
         LoginFailure.Denied -> R.string.agent_sign_in_denied
         LoginFailure.Expired -> R.string.agent_sign_in_expired
         LoginFailure.NotEnabled -> R.string.agent_sign_in_not_enabled
@@ -727,6 +733,11 @@ private fun loginLine(failure: LoginFailure): String = Strings.get(
         LoginFailure.TimedOut -> R.string.agent_sign_in_timed_out
         LoginFailure.BadReply -> R.string.agent_sign_in_bad_reply
         LoginFailure.SaveFailed -> R.string.agent_sign_in_save_failed
+        LoginFailure.PortBusy -> R.string.agent_sign_in_port_busy
+        LoginFailure.NoCallback -> R.string.agent_sign_in_no_callback
+        LoginFailure.NotCompleted -> R.string.agent_sign_in_not_completed
+        LoginFailure.NotAccepted -> R.string.agent_sign_in_not_accepted
+        LoginFailure.NoDeviceId -> R.string.agent_sign_in_no_device_id
     },
 )
 
@@ -744,6 +755,8 @@ private fun SubscriptionSignIn(
     definition: ProviderDefinition,
     connected: Boolean,
     enabled: Boolean,
+    pasted: String,
+    onPasted: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -808,10 +821,83 @@ private fun SubscriptionSignIn(
                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
+            is LoginState.Browser -> {
+                // Opened by itself once, right after Sign in (as on desktop);
+                // the button opens it again.
+                LaunchedEffect(mine) {
+                    if (providers.claimOpen(mine)) {
+                        note = if (SignInPage.open(context, mine.url)) null else Strings.get(R.string.agent_sign_in_open_failed, mine.url)
+                    }
+                }
+                Text(
+                    stringResource(R.string.agent_chatgpt_waiting),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = {
+                            note = if (SignInPage.open(context, mine.url)) {
+                                null
+                            } else {
+                                Strings.get(R.string.agent_sign_in_open_failed, mine.url)
+                            }
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(stringResource(R.string.agent_sign_in_open)) }
+                    TextButton(
+                        onClick = {
+                            note = null
+                            onPasted("")
+                            scope.launch { providers.cancelLogin(definition.id) }
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(stringResource(R.string.agent_sign_in_cancel)) }
+                }
+                OutlinedTextField(
+                    value = pasted,
+                    onValueChange = { if (it.length <= MAX_PASTED) onPasted(it) },
+                    label = { Text(stringResource(R.string.agent_chatgpt_paste_label)) },
+                    supportingText = {
+                        Text(stringResource(R.string.agent_chatgpt_paste_help, "http://127.0.0.1:${ChatGptLogin.PORT}/"))
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedButton(
+                    onClick = {
+                        when (providers.submitCallback(pasted)) {
+                            ChatGptLogin.Submitted.Accepted, ChatGptLogin.Submitted.Late, null -> {
+                                note = null
+                                onPasted("")
+                            }
+                            ChatGptLogin.Submitted.Invalid -> note = Strings.get(R.string.agent_chatgpt_paste_invalid)
+                        }
+                    },
+                    enabled = pasted.isNotBlank(),
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) { Text(stringResource(R.string.agent_chatgpt_paste_continue)) }
+                note?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
+            }
+            is LoginState.Finishing -> Text(
+                stringResource(R.string.agent_chatgpt_finishing),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
             else -> {
                 if (!connected) {
                     Text(
-                        stringResource(R.string.agent_sign_in_how),
+                        stringResource(
+                            if (definition.id == ChatGptLogin.PROVIDER) R.string.agent_chatgpt_how else R.string.agent_sign_in_how,
+                        ),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -841,7 +927,7 @@ private fun SubscriptionSignIn(
                     ) { Text(stringResource(R.string.agent_sign_in_cancel)) }
                 }
                 val status = when (mine) {
-                    is LoginState.Failed -> loginLine(mine.failure)
+                    is LoginState.Failed -> loginLine(definition.id, mine.failure)
                     is LoginState.Done -> Strings.get(R.string.agent_sign_in_done, definition.name)
                     else -> null
                 }
@@ -874,6 +960,9 @@ private fun BusyLabel(busy: Boolean, idleRes: Int, busyRes: Int, color: Color = 
         Text(if (busy) working else idle, color = color)
     }
 }
+
+/** A pasted callback address is a few hundred characters; anything longer isn't one. */
+private const val MAX_PASTED = 8 * 1024
 
 /** Past this many models the page offers a filter. */
 private const val FILTER_FROM = 12

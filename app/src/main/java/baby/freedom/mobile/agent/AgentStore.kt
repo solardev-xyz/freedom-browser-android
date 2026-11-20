@@ -196,6 +196,23 @@ internal class AgentStore(
         }
     }
 
+    /**
+     * This installation's id (a random UUID), which Sign in with ChatGPT
+     * (#602) gives OpenAI as its `ext_agent_host_id`, as desktop does:
+     * made on first use and kept. Sent nowhere else. Null if it couldn't
+     * be read or saved.
+     */
+    suspend fun deviceId(): String? {
+        var id: String? = null
+        val ok = guarded("installation id") {
+            store.edit { prefs ->
+                val saved = prefs[DEVICE_ID]?.takeIf { UUID_TEXT.matches(it) }
+                id = saved ?: java.util.UUID.randomUUID().toString().also { prefs[DEVICE_ID] = it }
+            }
+        }
+        return id.takeIf { ok }
+    }
+
     /** Stores [models] for [connectionId], or forgets its list (`null`). */
     suspend fun setModels(connectionId: String, models: List<AgentModel>?): Boolean = guarded("models") {
         modelStore.edit { prefs ->
@@ -340,6 +357,8 @@ internal class AgentStore(
         private val DEFAULT = stringPreferencesKey("default_model_v1")
         private val KEYS = stringPreferencesKey("keys_v1")
         private val NEXT_REVISION = longPreferencesKey("next_revision")
+        private val DEVICE_ID = stringPreferencesKey("device_id")
+        private val UUID_TEXT = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
         private const val MODELS_PREFIX = "models:"
         private const val KEY_RETRY_MS = 2_000L
         private const val KEY_RETRY_MAX_MS = 60_000L

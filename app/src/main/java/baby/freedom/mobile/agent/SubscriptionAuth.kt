@@ -40,19 +40,24 @@ import org.json.JSONObject
  * [AgentStore]'s key blob). [access] goes in requests; [refresh] gets a
  * new one: ChatGPT's refresh token, or Meta's identity token, which mints
  * a new Model API key (a day's worth). [expiresAt] is wall-clock
- * milliseconds. [accountId] is ChatGPT's account, sent with its requests.
+ * milliseconds. [accountId] is ChatGPT's account, sent with its requests
+ * (device-code sign-in). [clientId] is the client OpenAI issued a
+ * Sign in with ChatGPT (#602, [ChatGptLogin]): its refreshes are asked
+ * for as that client.
  */
 internal data class SubscriptionCredential(
     val access: String,
     val refresh: String,
     val expiresAt: Long,
     val accountId: String? = null,
+    val clientId: String? = null,
 ) {
     fun encode(): String = JSONObject()
         .put("access", access)
         .put("refresh", refresh)
         .put("expires", expiresAt)
         .apply { accountId?.let { put("accountId", it) } }
+        .apply { clientId?.let { put("clientId", it) } }
         .toString()
 
     /** Due for a new [access]: past [expiresAt], or within [margin] of it. */
@@ -68,10 +73,12 @@ internal data class SubscriptionCredential(
             val access = o.opt("access") as? String ?: return null
             val refresh = o.opt("refresh") as? String ?: return null
             val accountId = o.opt("accountId") as? String
+            val clientId = o.opt("clientId") as? String
             if (!SubscriptionAuth.headerSafe(access) || !SubscriptionAuth.headerSafe(refresh)) return null
             if (accountId != null && !SubscriptionAuth.headerSafe(accountId)) return null
+            if (clientId != null && !ChatGptLogin.isClientId(clientId)) return null
             val expires = o.optLong("expires", 0)
-            return SubscriptionCredential(access, refresh, expires, accountId)
+            return SubscriptionCredential(access, refresh, expires, accountId, clientId)
         }
     }
 }
@@ -114,6 +121,23 @@ internal enum class LoginFailure {
 
     /** Signed in, but the phone couldn't save it. */
     SaveFailed,
+
+    // Sign in with ChatGPT (#602, [ChatGptLogin]):
+
+    /** Something else on the phone holds the sign-in's port (1455): another sign-in, or another app's. */
+    PortBusy,
+
+    /** The browser never came back to the phone before the sign-in's time ran out. */
+    NoCallback,
+
+    /** OpenAI ended the sign-in with an error other than the user's no. */
+    NotCompleted,
+
+    /** OpenAI refused to finish the sign-in (the code or its PKCE verifier wasn't accepted). */
+    NotAccepted,
+
+    /** This installation's id ([AgentStore.deviceId]) couldn't be read or saved; nothing was sent. */
+    NoDeviceId,
 }
 
 /** A sign-in's progress, as Settings → AI shows it ([AgentProviders.login]). */
@@ -125,6 +149,20 @@ internal sealed interface LoginState {
 
     /** The code is ready: waiting for the user to enter it on the provider's page. */
     data class Waiting(override val providerId: String, val code: DeviceCode) : LoginState
+
+    /**
+     * Sign in with ChatGPT (#602): the phone is listening for the
+     * browser's return, and the user signs in on [url] (checked by
+     * [ChatGptLogin.isAuthorizeUrl]). [attempt] tells one sign-in's page
+     * from the next, so each is opened by itself only once.
+     */
+    data class Browser(override val providerId: String, val url: String, val attempt: Long) : LoginState {
+        // The address carries the sign-in's state and PKCE challenge.
+        override fun toString() = "Browser($providerId, $attempt)"
+    }
+
+    /** The browser came back; the phone is finishing the sign-in with the provider. */
+    data class Finishing(override val providerId: String) : LoginState
 
     data class Failed(override val providerId: String, val failure: LoginFailure) : LoginState
 
@@ -214,9 +252,9 @@ internal class SubscriptionAuth(
                     .build(),
             )
             when {
-                reply is Reply.Failed -> RefreshOutcome.Failed(reply.failure)
+                reply is AuthReply.Failed -> RefreshOutcome.Failed(reply.failure)
                 // A refresh token that's been used, revoked or expired.
-                reply is Reply.Answer && reply.code in 400..403 -> RefreshOutcome.SignInAgain
+                reply is AuthReply.Answer && reply.code in 400..403 -> RefreshOutcome.SignInAgain
                 else -> when (val t = codexTokens(reply)) {
                     is Finished.Done -> RefreshOutcome.Fresh(t.credential)
                     is Finished.Failed -> RefreshOutcome.Failed(t.failure)
@@ -240,8 +278,8 @@ internal class SubscriptionAuth(
             JSONObject().put("client_id", CODEX_CLIENT_ID).toString().toRequestBody(JSON),
         )
         val body = when (reply) {
-            is Reply.Failed -> return Started.Failed(reply.failure)
-            is Reply.Answer -> {
+            is AuthReply.Failed -> return Started.Failed(reply.failure)
+            is AuthReply.Answer -> {
                 if (reply.code == 404) return Started.Failed(LoginFailure.NotEnabled)
                 if (reply.code !in 200..299) return Started.Failed(failureOf(reply.code))
                 reply.json() ?: return Started.Failed(LoginFailure.BadReply)
@@ -269,8 +307,8 @@ internal class SubscriptionAuth(
             endpoints.openAiAuth + "/api/accounts/deviceauth/token",
             JSONObject().put("device_auth_id", code.handle).put("user_code", code.userCode).toString().toRequestBody(JSON),
         )
-        if (reply is Reply.Failed) return pollFailure(reply.failure)
-        reply as Reply.Answer
+        if (reply is AuthReply.Failed) return pollFailure(reply.failure)
+        reply as AuthReply.Answer
         if (reply.code in 200..299) {
             val body = reply.json() ?: return Poll.Failed(LoginFailure.BadReply)
             val authCode = body.opt("authorization_code") as? String
@@ -310,10 +348,10 @@ internal class SubscriptionAuth(
     }
 
     /** A token answer: access and refresh tokens, a lifetime, and the account inside the access token. */
-    private fun codexTokens(reply: Reply): Finished {
+    private fun codexTokens(reply: AuthReply): Finished {
         val body = when (reply) {
-            is Reply.Failed -> return Finished.Failed(reply.failure)
-            is Reply.Answer -> {
+            is AuthReply.Failed -> return Finished.Failed(reply.failure)
+            is AuthReply.Answer -> {
                 if (reply.code !in 200..299) return Finished.Failed(failureOf(reply.code))
                 reply.json() ?: return Finished.Failed(LoginFailure.BadReply)
             }
@@ -340,8 +378,8 @@ internal class SubscriptionAuth(
             FormBody.Builder().add("client_id", META_CLIENT_ID).build(),
         )
         val body = when (reply) {
-            is Reply.Failed -> return Started.Failed(reply.failure)
-            is Reply.Answer -> {
+            is AuthReply.Failed -> return Started.Failed(reply.failure)
+            is AuthReply.Answer -> {
                 if (reply.code !in 200..299) return Started.Failed(failureOf(reply.code))
                 reply.json() ?: return Started.Failed(LoginFailure.BadReply)
             }
@@ -373,8 +411,8 @@ internal class SubscriptionAuth(
                 .add("client_id", META_CLIENT_ID)
                 .build(),
         )
-        if (reply is Reply.Failed) return pollFailure(reply.failure)
-        reply as Reply.Answer
+        if (reply is AuthReply.Failed) return pollFailure(reply.failure)
+        reply as AuthReply.Answer
         val body = reply.json()
         val token = body?.opt("access_token") as? String
         if (reply.code in 200..299 && !token.isNullOrEmpty()) {
@@ -403,8 +441,8 @@ internal class SubscriptionAuth(
             mapOf("Authorization" to "Bearer $identity", "x-api-version" to "1.0.0"),
         )
         val body = when (reply) {
-            is Reply.Failed -> return Mint.Failed(reply.failure)
-            is Reply.Answer -> {
+            is AuthReply.Failed -> return Mint.Failed(reply.failure)
+            is AuthReply.Answer -> {
                 // The identity token can't be renewed: the session is over.
                 if (reply.code == 401 || reply.code == 403) return Mint.SignInAgain
                 if (reply.code !in 200..299) return Mint.Failed(failureOf(reply.code))
@@ -442,63 +480,10 @@ internal class SubscriptionAuth(
     private fun pollFailure(failure: LoginFailure): Poll =
         if (failure == LoginFailure.Unreachable || failure == LoginFailure.TimedOut) Poll.Pending else Poll.Failed(failure)
 
-    private sealed interface Reply {
-        /** The server answered: its status and as much of its body as [MAX_BODY_BYTES] allows. */
-        data class Answer(val code: Int, val text: String?) : Reply {
-            fun json(): JSONObject? = text?.let(AgentWire::parseObject)
-            override fun toString() = "Answer($code)"
-        }
+    private suspend fun post(url: String, body: RequestBody, headers: Map<String, String> = emptyMap()): AuthReply =
+        AuthHttp.post(http, url, body, headers)
 
-        data class Failed(val failure: LoginFailure) : Reply
-    }
-
-    private suspend fun post(url: String, body: RequestBody, headers: Map<String, String> = emptyMap()): Reply {
-        val target = url.toHttpUrlOrNull() ?: return Reply.Failed(LoginFailure.BadReply)
-        val request = Request.Builder().url(target).post(body).apply {
-            header("Accept", "application/json")
-            headers.forEach { (k, v) -> header(k, v) }
-        }.build()
-        val call = http.newCall(request)
-        return suspendCancellableCoroutine { cont ->
-            cont.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    cont.resume(
-                        Reply.Failed(if (e is InterruptedIOException) LoginFailure.TimedOut else LoginFailure.Unreachable),
-                    )
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    // On OkHttp's thread: nothing may escape.
-                    val reply = try {
-                        response.use { Reply.Answer(it.code, read(it)) }
-                    } catch (e: InterruptedIOException) {
-                        Reply.Failed(LoginFailure.TimedOut)
-                    } catch (e: Throwable) {
-                        Reply.Failed(LoginFailure.Unreachable)
-                    }
-                    cont.resume(reply)
-                }
-            })
-        }
-    }
-
-    /** At most [MAX_BODY_BYTES] of the body; a longer one is no answer at all. */
-    private fun read(response: Response): String? {
-        val source = response.body?.source() ?: return null
-        val buffer = Buffer()
-        while (true) {
-            if (source.read(buffer, 8L * 1024) == -1L) break
-            if (buffer.size > MAX_BODY_BYTES) return null
-        }
-        return buffer.readUtf8()
-    }
-
-    private fun failureOf(code: Int): LoginFailure = when (code) {
-        429 -> LoginFailure.RateLimited
-        in 500..599 -> LoginFailure.ServerError
-        else -> LoginFailure.BadReply
-    }
+    private fun failureOf(code: Int): LoginFailure = AuthHttp.failureOf(code)
 
     private fun positive(value: Any?): Double? =
         (value as? Number)?.toDouble()?.takeIf { it.isFinite() && it > 0 }
@@ -540,9 +525,6 @@ internal class SubscriptionAuth(
         private const val DEFAULT_INTERVAL_MS = 5_000L
         private const val SLOW_DOWN_STEP_MS = 5_000L
         private const val MIN_INTERVAL_MS = 1_000L
-
-        /** An auth answer is a few hundred bytes. */
-        private const val MAX_BODY_BYTES = 64L * 1024
 
         private val JSON = "application/json".toMediaType()
         private val USER_CODE = Regex("^[A-Za-z0-9._-]{4,64}$")
@@ -598,5 +580,75 @@ internal class SubscriptionAuth(
         } catch (e: IllegalArgumentException) {
             null
         }
+    }
+}
+
+/** What an auth request came to: the server's status and body, or why there was none. */
+internal sealed interface AuthReply {
+    /** The server answered: its status and as much of its body as [AuthHttp.MAX_BODY_BYTES] allows. */
+    data class Answer(val code: Int, val text: String?) : AuthReply {
+        fun json(): JSONObject? = text?.let(AgentWire::parseObject)
+        override fun toString() = "Answer($code)"
+    }
+
+    data class Failed(val failure: LoginFailure) : AuthReply
+}
+
+/** The sign-ins' requests ([SubscriptionAuth], [ChatGptLogin]): one POST, cancelled with its caller. */
+internal object AuthHttp {
+    /** An auth answer is a few hundred bytes. */
+    const val MAX_BODY_BYTES = 64L * 1024
+
+    suspend fun post(
+        http: OkHttpClient,
+        url: String,
+        body: RequestBody,
+        headers: Map<String, String> = emptyMap(),
+    ): AuthReply {
+        val target = url.toHttpUrlOrNull() ?: return AuthReply.Failed(LoginFailure.BadReply)
+        val request = Request.Builder().url(target).post(body).apply {
+            header("Accept", "application/json")
+            headers.forEach { (k, v) -> header(k, v) }
+        }.build()
+        val call = http.newCall(request)
+        return suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    cont.resume(
+                        AuthReply.Failed(if (e is InterruptedIOException) LoginFailure.TimedOut else LoginFailure.Unreachable),
+                    )
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    // On OkHttp's thread: nothing may escape.
+                    val reply = try {
+                        response.use { AuthReply.Answer(it.code, read(it)) }
+                    } catch (e: InterruptedIOException) {
+                        AuthReply.Failed(LoginFailure.TimedOut)
+                    } catch (e: Throwable) {
+                        AuthReply.Failed(LoginFailure.Unreachable)
+                    }
+                    cont.resume(reply)
+                }
+            })
+        }
+    }
+
+    /** At most [MAX_BODY_BYTES] of the body; a longer one is no answer at all. */
+    private fun read(response: Response): String? {
+        val source = response.body?.source() ?: return null
+        val buffer = Buffer()
+        while (true) {
+            if (source.read(buffer, 8L * 1024) == -1L) break
+            if (buffer.size > MAX_BODY_BYTES) return null
+        }
+        return buffer.readUtf8()
+    }
+
+    fun failureOf(code: Int): LoginFailure = when (code) {
+        429 -> LoginFailure.RateLimited
+        in 500..599 -> LoginFailure.ServerError
+        else -> LoginFailure.BadReply
     }
 }

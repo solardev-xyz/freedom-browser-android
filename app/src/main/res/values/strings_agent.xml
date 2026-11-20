@@ -50,7 +50,8 @@
     <string name="agent_desc_anthropic">Claude models with an API key</string>
     <string name="agent_desc_xai">Grok models with an API key</string>
     <string name="agent_desc_meta">Muse models with an API key</string>
-    <string name="agent_desc_codex">Sign in with your ChatGPT plan</string>
+    <string name="agent_desc_chatgpt">Sign in with your ChatGPT account in the browser</string>
+    <string name="agent_desc_codex">Sign in with a code from your ChatGPT plan</string>
     <string name="agent_desc_meta_subscription">Sign in with your Meta account</string>
     <string name="agent_desc_openrouter">Models from many providers through one key</string>
     <string name="agent_desc_venice">Models with privacy options</string>
@@ -61,6 +62,7 @@
     <string name="agent_privacy_openai">Requests go to OpenAI under its API data policy.</string>
     <string name="agent_privacy_anthropic">Requests go to Anthropic under its API data policy.</string>
     <string name="agent_privacy_xai">Requests go to xAI. Standard API retention applies; this connection doesn\'t turn on account-level zero retention.</string>
+    <string name="agent_privacy_chatgpt">Uses Sign in with ChatGPT. Requests go to OpenAI through its Responses API.</string>
     <string name="agent_privacy_codex">Uses your ChatGPT subscription. Requests go to OpenAI.</string>
     <string name="agent_privacy_meta_subscription">Uses Sign in with Meta. Requests go to Meta through its Model API.</string>
     <string name="agent_privacy_meta">Requests go to the Meta Model API under your developer account\'s data policy.</string>
@@ -274,6 +276,31 @@
     <string name="agent_sign_in_timed_out">The provider didn\'t answer in time. Try again.</string>
     <string name="agent_sign_in_bad_reply">The provider\'s answer couldn\'t be used, so nothing was opened or saved.</string>
     <string name="agent_sign_in_save_failed">Signed in, but couldn\'t save it. Try again.</string>
+    <string name="agent_sign_in_bad_grant">OpenAI\'s answer couldn\'t be used, so nothing was saved. Sign in again.</string>
+    <string name="agent_sign_in_no_device_id">Freedom couldn\'t save this phone\'s sign-in id. Try again.</string>
+    <string name="agent_sign_in_port_busy">Something else on this phone is using the sign-in port (1455), maybe another sign-in. Close it and try again.</string>
+    <string name="agent_sign_in_no_callback">The browser didn\'t come back in time. Sign in again.</string>
+    <string name="agent_sign_in_not_completed">The sign-in wasn\'t finished on OpenAI\'s page. Try again.</string>
+    <string name="agent_sign_in_not_accepted">OpenAI didn\'t accept the sign-in, so nothing was saved. Sign in again.</string>
+    <string name="agent_chatgpt_how">Freedom opens OpenAI\'s sign-in page in your browser. Sign in there; the browser then comes back here and this page finishes by itself.</string>
+    <string name="agent_chatgpt_waiting">Sign in on OpenAI\'s page in your browser. When you\'re done, this page finishes by itself.</string>
+    <string name="agent_chatgpt_finishing">Finishing the sign-in…</string>
+    <string name="agent_chatgpt_paste_label">Address the browser ended on</string>
+    <string name="agent_chatgpt_paste_help">Only if the sign-in doesn\'t finish by itself: copy the address from the browser\'s address bar and paste it here. It starts with %1$s</string>
+    <string name="agent_chatgpt_paste_continue">Continue</string>
+    <string name="agent_chatgpt_paste_invalid">That address isn\'t this sign-in\'s. Copy the whole address the browser ended on, or sign in again.</string>
+    <string name="agent_sign_in_channel_name">AI sign-in</string>
+    <string name="agent_sign_in_channel_description">Shown while Freedom waits for you to finish signing in to an AI provider in the browser.</string>
+    <string name="agent_sign_in_notification_title">Signing in to ChatGPT</string>
+    <string name="agent_sign_in_notification_text">Freedom is waiting for the browser to come back once you\'ve signed in.</string>
+    <string name="agent_chatgpt_page_success_title">ChatGPT connected</string>
+    <string name="agent_chatgpt_page_success">Go back to Freedom to continue. You can close this tab.</string>
+    <string name="agent_chatgpt_page_cancelled_title">Connection cancelled</string>
+    <string name="agent_chatgpt_page_cancelled">ChatGPT wasn\'t connected to Freedom. Close this tab and try again from Settings → AI.</string>
+    <string name="agent_chatgpt_page_failed_title">Connection unsuccessful</string>
+    <string name="agent_chatgpt_page_failed">ChatGPT couldn\'t be connected to Freedom. Go back to Settings → AI and try again.</string>
+    <string name="agent_chatgpt_page_invalid_title">Invalid sign-in link</string>
+    <string name="agent_chatgpt_page_invalid">This link doesn\'t match the sign-in under way. Go back to Freedom and finish that sign-in, or start again.</string>
 
     <!-- Voice dictation in the chat's composer (#578). -->
     <string name="agent_dictate_on_device">Dictate with Android\'s on-device recognizer</string>
