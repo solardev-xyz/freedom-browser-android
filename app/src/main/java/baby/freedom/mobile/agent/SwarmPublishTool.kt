@@ -264,7 +264,7 @@ internal class AgentPublications(
         return _records.value[id]
     }
 
-    /** A deleted chat's receipts go with it. */
+    /** A deleted chat's receipts go with it (not from a journal that can't be read: that is never written over). */
     fun deleteSession(sessionId: String) = synchronized(lock) {
         ensureLoaded()
         if (!loaded || _records.value.values.none { it.sessionId == sessionId }) return@synchronized

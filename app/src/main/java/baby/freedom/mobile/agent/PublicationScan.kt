@@ -724,7 +724,8 @@ internal object PublicationScan {
     }
 
     /**
-     * Every byte that will be uploaded, read as text: a NUL in the first
+     * A file's bytes, read as text (the agent's inline text skips this,
+     * [scanBytes]' `inlineText`): a NUL in the first
      * 8 KiB means binary (images, fonts, databases), which is read as
      * Latin-1, one character per byte, so an ASCII credential anywhere in
      * it is still seen, and only the secret rules run there.
