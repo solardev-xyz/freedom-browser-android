@@ -2630,6 +2630,8 @@ fun BrowserScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+            // A tab Freedom Agent holds (#575): says so, and gives it back.
+            baby.freedom.mobile.agent.AgentTabStrip(state, Modifier.align(Alignment.TopCenter))
         }
 
         // The strip of reserved mode (#66) and of a reveal (#65):
@@ -3716,6 +3718,30 @@ fun BrowserScreen(
     // Desktop Freedom's signing requests (#113): a dialog over whatever is up,
     // the scan page it was connected from included.
     RemoteSigningHost()
+
+    // Freedom Agent's approvals (#575): over everything, the chat included.
+    // Allowing an input brings its tab on screen through [AgentBrowser.showTab]:
+    // the agent's chat and the plain panels close; a wallet page stays.
+    baby.freedom.mobile.agent.AgentApprovalHost()
+    DisposableEffect(tabs) {
+        val show: (Long) -> Unit = { id ->
+            showAgent = false
+            showTabSwitcher = false
+            showHistory = false
+            showBookmarks = false
+            showDownloads = false
+            showSettings = false
+            showNodes = false
+            nodeDetail = null
+            showLogs = null
+            val index = tabs.tabs.indexOfFirst { it.id == id }
+            if (index >= 0) tabs.switchTo(index)
+        }
+        baby.freedom.mobile.agent.AgentBrowser.showTab = show
+        onDispose {
+            if (baby.freedom.mobile.agent.AgentBrowser.showTab === show) baby.freedom.mobile.agent.AgentBrowser.showTab = null
+        }
+    }
 
     // Snackbars over a full-screen panel (Downloads' open() failures
     // and retry outcomes, a download finishing while Settings is up):

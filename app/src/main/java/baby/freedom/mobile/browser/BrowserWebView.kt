@@ -1082,6 +1082,8 @@ fun BrowserWebViewHost(
             onCreateWindow = { isUserGesture ->
                 val activate = isUserGesture || sitePermissions.isOnScreen(tab.id)
                 val popup = tabs.adoptPopup(opener = tab, activate = activate)
+                // A page the agent holds can't hand a site a tab outside it (#575).
+                baby.freedom.mobile.agent.AgentTabs.popupOpened(tab.id, popup.id, popup.private)
                 // A client-certificate Deny in the opener holds here too (#333 R5-F1).
                 ClientCertificates.onPopup(popup.id, tab.id)
                 attach(popup.also { it.beginLoad(inWebView = true) })
@@ -1254,6 +1256,7 @@ fun BrowserWebViewHost(
             // Take down any permission prompt the tab still had up;
             // its request is denied along with the page.
             sitePermissions.onTabClosed(id)
+            baby.freedom.mobile.agent.AgentTabs.closed(id)
             ClientCertificates.onTabClosed(id)
             RadicleProviders.onTabClosed(id)
             EthereumProviders.onTabClosed(id)
@@ -1452,6 +1455,9 @@ fun BrowserWebViewHost(
         factory = { frame },
         modifier = modifier.fillMaxSize(),
     )
+
+    // Freedom Agent's tools reach the tabs through here (#575).
+    baby.freedom.mobile.agent.AgentBrowserBridge(tabs, covered) { id -> webViews[id] }
 
     // A full-screen panel covers the pages ([covered]): none of them may
     // hold Android focus underneath it. Page script can take it back at
@@ -4917,6 +4923,18 @@ internal class PageWebView(context: Context) : WebView(context) {
 
     /** A private tab's (#86): the page's own text fields ask the keyboard not to learn. */
     var privateTab = false
+
+    /**
+     * Freedom Agent's input (#575), after the user approved it: handed to
+     * Chromium as it is, past [dispatchTouchEvent]/[dispatchKeyEvent] and
+     * the keyboard-edit recorder, so it never counts as the user's own
+     * gesture (an app link, [userGestures]).
+     */
+    fun agentTouch(event: MotionEvent): Boolean = super.dispatchTouchEvent(event)
+
+    fun agentKey(event: KeyEvent): Boolean = super.dispatchKeyEvent(event)
+
+    fun agentInputConnection(outAttrs: EditorInfo): InputConnection? = super.onCreateInputConnection(outAttrs)
 
     /** This tab's WebAuthn mode ([PasskeyGate]); set where the tab builds it. */
     var passkeys: PasskeyGate? = null

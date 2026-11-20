@@ -41,7 +41,8 @@ internal class AgentChats(
     private val providers: AgentProviders,
     /** The system prompt with `{{identity}}` still in it. */
     private val promptTemplate: String,
-    private val tools: ToolRegistry = ToolRegistry.default(),
+    /** A chat's tools, by session: built once per chat, so its browser tools keep their tabs and references. */
+    private val toolsFor: (String) -> ToolRegistry = { ToolRegistry.default() },
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: () -> ZoneId = ZoneId::systemDefault,
@@ -65,6 +66,10 @@ internal class AgentChats(
      * Only in memory, so a server that gains tool support is tried again.
      */
     private val noTools: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private val registries = java.util.concurrent.ConcurrentHashMap<String, ToolRegistry>()
+
+    private fun toolsOf(sessionId: String): ToolRegistry = registries.getOrPut(sessionId) { toolsFor(sessionId) }
 
     /** Set once turns a stopped app left running are marked interrupted: nothing starts before. */
     private val swept = CompletableDeferred<Unit>()
@@ -159,7 +164,7 @@ internal class AgentChats(
                     val toolsKey = "${target.connection.id}\u0000${target.connection.revision}\u0000${model.modelId}"
                     val loop = AgentLoop(
                         model = { request, onText -> providers.streamStep(target, request, onText) },
-                        tools = tools,
+                        tools = toolsOf(turn.sessionId),
                         limits = limitsOf(target.definition),
                         modelId = model.modelId,
                         systemPrompt = { prompt + "\n\n" + TimeContext.block(Instant.ofEpochMilli(clock()), zone()) },
@@ -246,6 +251,7 @@ internal class AgentChats(
      */
     suspend fun delete(sessionId: String): Boolean = withContext(NonCancellable) {
         stop(sessionId)
+        forgetTools(sessionId)
         try {
             dao.deleteSession(sessionId)
             true
@@ -258,6 +264,7 @@ internal class AgentChats(
     /** Deletes every chat, stopping what's running first; uncancellable, like [delete]. */
     suspend fun deleteAll(): Boolean = withContext(NonCancellable) {
         lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
+        for (id in registries.keys.toList()) forgetTools(id)
         try {
             dao.deleteAll()
             true
@@ -265,6 +272,13 @@ internal class AgentChats(
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")
             false
         }
+    }
+
+    /** A deleted chat's tools go, and the tabs it held go back to the user (#575). */
+    private fun forgetTools(sessionId: String) {
+        registries.remove(sessionId)
+        AgentApprovals.withdrawSession(sessionId)
+        AgentTabs.releaseChat(sessionId)
     }
 
     companion object {
@@ -311,7 +325,10 @@ internal class AgentChats(
             instance ?: run {
                 val app = context.applicationContext
                 val prompt = app.assets.open(PROMPT_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }
-                AgentChats(AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt)
+                AgentChats(
+                    AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt,
+                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId) },
+                )
             }.also { instance = it }
         }
     }

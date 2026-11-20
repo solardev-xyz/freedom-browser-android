@@ -1199,10 +1199,13 @@ class TabsState(
      * Activity relaunch, a reopened tab) that isn't on screen. Its page
      * loads once it's shown, not all of them at once at a cold start.
      * One handed a navigation in the meantime gets its WebView at once,
-     * so that navigation isn't left waiting with no WebView to take it.
+     * so that navigation isn't left waiting with no WebView to take it,
+     * and so does one Freedom Agent holds.
      */
     fun defersWebView(tab: BrowserState): Boolean =
         tab.pendingRestore != null && tab !== active &&
+            // Freedom Agent works in the tabs it holds wherever they are (#575).
+            !baby.freedom.mobile.agent.AgentTabs.isHeld(tab.id) &&
             !(tab.navCounter > tab.handedNavCounter && tab.pendingUrl.isNotEmpty())
 
     /**

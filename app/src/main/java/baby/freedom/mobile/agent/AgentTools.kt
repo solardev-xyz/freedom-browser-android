@@ -19,9 +19,9 @@ internal interface AgentTool {
 }
 
 /**
- * The tools a chat offers the model (#574). Phase one's only one is the
- * harmless [CurrentTimeTool]; the browser tools come with #575, under
- * per-interaction approval.
+ * The tools a chat offers the model (#574): the harmless
+ * [CurrentTimeTool] and the browser tools ([BrowserToolset], #575),
+ * which ask the user to approve every interaction.
  */
 internal class ToolRegistry(tools: List<AgentTool>) {
     private val byName = tools.associateBy { it.spec.name }
@@ -55,6 +55,10 @@ internal class ToolRegistry(tools: List<AgentTool>) {
 
         fun default(clock: () -> Instant = Instant::now, zone: () -> ZoneId = ZoneId::systemDefault) =
             ToolRegistry(listOf(CurrentTimeTool(clock, zone)))
+
+        /** A chat's tools: the clock and its own browser tools (#575). */
+        fun forChat(sessionId: String) =
+            ToolRegistry(listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) + BrowserToolset(sessionId).tools)
     }
 }
 
