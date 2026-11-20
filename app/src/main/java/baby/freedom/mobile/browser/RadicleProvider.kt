@@ -1023,6 +1023,7 @@ sealed interface RadicleAsk {
         val replyTo: String = "",
         val ruleOn: Boolean = false,
         val limited: Boolean = false,
-        val agentHeld: Boolean = false,
+        /** No default: an ask that forgot custody must not compile (#591). */
+        val agentHeld: Boolean,
     ) : RadicleAsk
 }

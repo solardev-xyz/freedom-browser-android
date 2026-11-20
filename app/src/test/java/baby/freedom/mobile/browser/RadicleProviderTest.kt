@@ -53,7 +53,12 @@ class RadicleProviderTest {
         /** origin → the wall-clock times its rule wrote without asking. */
         val counted = HashMap<String, MutableList<Long>>()
         var saves = true
-        override suspend fun autoWrites(origin: String, did: String) = rules[origin] == did && map[origin] == did
+        /** Run on each rule read: a tab the agent takes while the rule is being read (#591). */
+        var onRuleRead: () -> Unit = {}
+        override suspend fun autoWrites(origin: String, did: String): Boolean {
+            onRuleRead()
+            return rules[origin] == did && map[origin] == did
+        }
         override suspend fun allowAutoWrites(origin: String, did: String): Boolean {
             if (!saves || map[origin] != did) return false
             rules[origin] = did
@@ -411,7 +416,7 @@ class RadicleProviderTest {
         assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_commentIssue", comment("hello"))).code)
         assertEquals(0, writes())
         val ask = asked.single() as RadicleAsk.Write
-        assertEquals(RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "hello"), ask)
+        assertEquals(RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "hello", agentHeld = false), ask)
         answer = true
         ok(req("radicle_commentIssue", comment()))
         ok(req("radicle_commentIssue", comment()))
@@ -434,12 +439,12 @@ class RadicleProviderTest {
         req("radicle_commentIssue", comment().put("replyTo", "cccccc"))
         assertEquals(
             listOf(
-                RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", body = "line 1\nline 2", labels = listOf("bug")),
-                RadicleAsk.Write(site, "radicle_editIssueState", rid, target = "abcdef", state = "closed"),
+                RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", body = "line 1\nline 2", labels = listOf("bug"), agentHeld = false),
+                RadicleAsk.Write(site, "radicle_editIssueState", rid, target = "abcdef", state = "closed", agentHeld = false),
                 // The comment goes to the revision; the patch is only the page's word.
-                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "bbbbbb", claimedPatch = "aaaaaa", body = "c"),
-                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "aaaaaa", body = "c"),
-                RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b", replyTo = "cccccc"),
+                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "bbbbbb", claimedPatch = "aaaaaa", body = "c", agentHeld = false),
+                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "aaaaaa", body = "c", agentHeld = false),
+                RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b", replyTo = "cccccc", agentHeld = false),
             ),
             asked,
         )
@@ -452,7 +457,7 @@ class RadicleProviderTest {
         assertEquals(listOf("bug"), lines["Label (1)"])
         assertEquals(listOf("aaaaaa"), radicleWriteLines(asked[2] as RadicleAsk.Write).single { it.label.startsWith("The page says") }.rows.map(::rowText))
         // Hidden characters are shown, not obeyed.
-        val spoof = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = "ok\u202Eevil"))
+        val spoof = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = "ok\u202Eevil", agentHeld = false))
         assertEquals(listOf(RadicleWriteRow.Text("ok\\u202Eevil")), spoof.last().rows)
         // Nothing is asked about a write that would fail anyway.
         asked.clear()
@@ -462,7 +467,7 @@ class RadicleProviderTest {
 
     @Test
     fun `a write prompt can't pad what's published out of view (#544)`() {
-        fun body(text: String) = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = text)).last().rows
+        fun body(text: String) = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = text, agentHeld = false)).last().rows
         // Blank lines, of any kind of space, are counted, not drawn: the hidden text is right under "LGTM".
         assertEquals(
             listOf(RadicleWriteRow.Text("LGTM"), RadicleWriteRow.Blank(400), RadicleWriteRow.Text("<malicious text>")),
@@ -489,12 +494,12 @@ class RadicleProviderTest {
         assertEquals("5000 spaces", rowText(RadicleWriteRow.Spaces(5000)))
         // A one-line field can't open blank lines at all: its line breaks are escapes.
         val issue = radicleWriteLines(
-            RadicleAsk.Write(site, "radicle_createIssue", rid, title = "Fix" + "\n".repeat(3) + "evil", labels = listOf("bug, wontfix")),
+            RadicleAsk.Write(site, "radicle_createIssue", rid, title = "Fix" + "\n".repeat(3) + "evil", labels = listOf("bug, wontfix"), agentHeld = false),
         ).associate { it.label to it.rows }
         assertEquals(listOf(RadicleWriteRow.Text("Fix\\n\\n\\nevil")), issue["Title"])
         // One label with a comma in it is one boxed row under "Label (1)", two labels are two.
         assertEquals(listOf(RadicleWriteRow.Text("bug, wontfix")), issue["Label (1)"])
-        val two = radicleWriteLines(RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", labels = listOf("bug", "wontfix")))
+        val two = radicleWriteLines(RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", labels = listOf("bug", "wontfix"), agentHeld = false))
             .single { it.boxed }
         assertEquals("Labels (2)", two.label)
         assertEquals(listOf(RadicleWriteRow.Text("bug"), RadicleWriteRow.Text("wontfix")), two.rows)
@@ -634,26 +639,15 @@ class RadicleProviderTest {
     }
 
     @Test
-    fun `custody is read at the write, after the rule (#591)`() {
+    fun `custody is read after the rule, so a tab taken while it's read is prompted (#591)`() {
         grants.map[site] = ME
         grants.rules[site] = ME
-        var reads = 0
-        // Held from the second read on: a tab the agent takes between two writes is prompted on the next.
-        val r = runBlocking {
-            provider.request(site, "radicle_commentIssue", comment(), agentHeld = { reads++ > 0 }) { a ->
-                asked += a
-                RadicleAnswer(true, null)
-            }
-        }
-        ok(r)
-        assertTrue(asked.isEmpty())
-        runBlocking {
-            provider.request(site, "radicle_commentIssue", comment(), agentHeld = { reads++ > 0 }) { a ->
-                asked += a
-                RadicleAnswer(true, null)
-            }
-        }
+        // The agent takes the tab while the rule is read: the custody read that
+        // follows sees it, and the write asks rather than going out on the rule.
+        grants.onRuleRead = { held = true }
+        ok(req("radicle_commentIssue", comment()))
         assertTrue((asked.single() as RadicleAsk.Write).agentHeld)
+        assertTrue(grants.counted[site].orEmpty().isEmpty())
     }
 
     @Test
@@ -718,7 +712,7 @@ class RadicleProviderTest {
     fun `a write prompt's answer keeps the user's switch even if the page has gone`() {
         val tab = BrowserState(9_501L)
         try {
-            val write = RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b")
+            val write = RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b", agentHeld = false)
             val answer = runBlocking {
                 val result = async { RadicleProviders.askOnTab(tab, 0, write, waitMs = 5_000) }
                 while (tab.radiclePrompt == null) kotlinx.coroutines.yield()
