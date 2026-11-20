@@ -466,6 +466,17 @@ internal class DictationSettings private constructor(private val context: Contex
         }
         .map { it[PREFER_SERVICE] == true }
 
+    /** The last [preferService] this process read; null before the first read. */
+    @Volatile
+    var lastPreferService: Boolean? = null
+        private set
+
+    /** [preferService] that also remembers each answer as [lastPreferService]. */
+    val preferServiceOrUnread: Flow<Boolean?> = preferService.map<Boolean, Boolean?> { prefer ->
+        lastPreferService = prefer
+        prefer
+    }
+
     /** Sets [preferService]; false when the write failed. */
     suspend fun setPreferService(prefer: Boolean): Boolean = try {
         context.dictationSettings.edit { if (prefer) it[PREFER_SERVICE] = true else it.remove(PREFER_SERVICE) }

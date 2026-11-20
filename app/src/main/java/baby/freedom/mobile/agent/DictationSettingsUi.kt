@@ -32,6 +32,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.FullScreenScaffold
 import baby.freedom.mobile.browser.SectionCard
@@ -44,21 +45,43 @@ internal fun nativeLanguageName(tag: String): String {
     return locale.getDisplayName(locale).replaceFirstChar { if (it.isLowerCase()) it.titlecase(locale) else it.toString() }
 }
 
-/** The phone's recognizers and the one dictation uses ([kind], null: none). */
-internal data class DictationRecognizer(val available: Set<RecognizerKind>, val kind: RecognizerKind?)
+/**
+ * The phone's recognizers and the one dictation uses ([kind], null: none).
+ * [ready] false: the user's pick isn't read yet, so [kind] isn't known
+ * either; nothing is built or named from it until it is.
+ */
+internal data class DictationRecognizer(val available: Set<RecognizerKind>, val kind: RecognizerKind?, val ready: Boolean = true)
 
 /**
  * The recognizer dictation uses, with the user's pick from Settings:
  * the composer, the Settings row and the Settings page all read this,
  * so each names the destination the microphone actually sends to.
+ * The phone's recognizers are read again each time the app comes back
+ * on screen, so one turned on or installed meanwhile counts at once;
+ * and nothing is picked until the stored choice is read (the last one
+ * this process read stands in), so a user who picked the service never
+ * gets an on-device recognizer built for a frame first.
  */
 @Composable
 internal fun rememberDictationRecognizer(): DictationRecognizer {
     val context = LocalContext.current
-    val available = remember(context) { DictationRecognizers.available(context) }
-    val preferService by remember(context) { DictationSettings.get(context).preferService }.collectAsState(initial = false)
-    return DictationRecognizer(available, DictationRecognizers.pick(available, preferService))
+    var available by remember(context) { mutableStateOf(DictationRecognizers.available(context)) }
+    LifecycleResumeEffect(context) {
+        available = DictationRecognizers.available(context)
+        onPauseOrDispose { }
+    }
+    val settings = remember(context) { DictationSettings.get(context) }
+    val preferService by remember(settings) { settings.preferServiceOrUnread }.collectAsState(initial = settings.lastPreferService)
+    return dictationRecognizer(available, preferService)
 }
+
+/** [available]'s recognizer for the user's pick ([preferService] null: not read yet, so none and not [DictationRecognizer.ready]). */
+internal fun dictationRecognizer(available: Set<RecognizerKind>, preferService: Boolean?): DictationRecognizer =
+    if (preferService == null) {
+        DictationRecognizer(available, kind = null, ready = false)
+    } else {
+        DictationRecognizer(available, DictationRecognizers.pick(available, preferService))
+    }
 
 /** The Voice dictation row's line: where audio goes and the language, or that there's no recognizer. */
 @Composable
@@ -100,7 +123,8 @@ internal fun AiDictationPage(onBack: () -> Unit) {
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            item("where") {
+            // Not before the user's recognizer pick is read: never the wrong destination.
+            if (recognizer.ready) item("where") {
                 SectionCard(title = stringResource(R.string.agent_dictation_where)) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(

@@ -61,6 +61,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -145,10 +146,12 @@ private val ModelRefSaver = Saver<MutableState<ModelRef?>, String>(
  * Freedom Agent's chat (#574), from the main menu while AI is on: the
  * current chat, a model picker, a composer with Send (Stop while a reply
  * comes in), and the list of past chats. Closes itself if AI is turned
- * off while it's up.
+ * off while it's up. [covered]: a page or sheet of the browser's own is
+ * up over it (a wallet page, Desktop Freedom's signing sheet), which
+ * stops dictation the way an agent approval does.
  */
 @Composable
-internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
+internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings: () -> Unit, covered: Boolean = false) {
     // [aiOn] null: the switch isn't read yet (just after a rotation); only
     // a definite off closes the page.
     LaunchedEffect(aiOn) { if (aiOn == false) onDismiss() }
@@ -205,6 +208,7 @@ internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings
                 onOpenSettings = onOpenSettings,
                 scope = scope,
                 sending = sending,
+                covered = covered,
             )
         }
     }
@@ -220,6 +224,7 @@ private fun ChatView(
     onOpenSettings: () -> Unit,
     scope: kotlinx.coroutines.CoroutineScope,
     sending: MutableState<Boolean>,
+    covered: Boolean,
 ) {
     val session by remember(sessionId) { sessionId?.let { chats.session(it) } ?: flowOf(null) }.collectAsState(initial = null)
     val turns by remember(sessionId) { sessionId?.let { chats.turns(it) } ?: flowOf(emptyList()) }.collectAsState(initial = emptyList())
@@ -247,11 +252,16 @@ private fun ChatView(
     val dictationStatus by remember(dictation) {
         dictation?.status ?: MutableStateFlow(DictationStatus.Idle)
     }.collectAsState()
+    val approval by AgentApprovals.shown.collectAsState()
+    // An approval card or another page over the chat: no dictating into the hidden draft.
+    val hidden = approval != null || covered
+    val hiddenNow by rememberUpdatedState(hidden)
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             // Not into a draft that's being sent (Send can't be tapped
-            // over the dialog, but its send may still be under way).
-            if (!sending.value) dictation?.start(draft, language)
+            // over the dialog, but its send may still be under way), nor
+            // one a page that opened meanwhile now covers.
+            if (!sending.value && !hiddenNow) dictation?.start(draft, language)
         } else {
             // The same refusal bookkeeping as a site's microphone: a
             // refusal here still lets a site the user later allows the
@@ -260,7 +270,6 @@ private fun ChatView(
             dictation?.refused()
         }
     }
-    val approval by AgentApprovals.shown.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(dictation, lifecycle) {
         // The microphone is let go of once the app is out of sight.
@@ -283,9 +292,9 @@ private fun ChatView(
             dictation?.destroy()
         }
     }
-    // Another chat, an approval card over the chat, or a new language:
-    // dictation stops, keeping what the draft shows.
-    LaunchedEffect(sessionId, approval != null, language) { dictation?.cancel() }
+    // Another chat, an approval card or another page over the chat, or a
+    // new language: dictation stops, keeping what the draft shows.
+    LaunchedEffect(sessionId, hidden, language) { dictation?.cancel() }
     // A finished run's or a failure's line is about the chat it was in.
     LaunchedEffect(sessionId) { dictation?.dismiss() }
 

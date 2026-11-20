@@ -184,10 +184,11 @@ internal fun AiSection(
         )
         if (state.enabled && "ai-dictation" in visible) {
             val pick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
-            val kind = rememberDictationRecognizer().kind
+            val recognizer = rememberDictationRecognizer()
             PageRow(
                 title = stringResource(R.string.agent_dictation),
-                subtitle = dictationSummary(kind, pick),
+                // Not before the user's recognizer pick is read: never the wrong destination.
+                subtitle = if (recognizer.ready) dictationSummary(recognizer.kind, pick) else "",
                 style = PageRowStyle.Inset,
                 leadingIcon = Icons.Filled.Mic,
                 onClick = onOpenDictation,

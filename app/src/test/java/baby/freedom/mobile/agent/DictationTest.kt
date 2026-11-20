@@ -22,6 +22,20 @@ class DictationTest {
     }
 
     @Test
+    fun `no recognizer until the user's pick is read, then the picked one`() {
+        val unread = dictationRecognizer(both, preferService = null)
+        assertFalse(unread.ready)
+        assertNull(unread.kind)
+        assertEquals(both, unread.available)
+        val service = dictationRecognizer(both, preferService = true)
+        assertTrue(service.ready)
+        assertEquals(RecognizerKind.Service, service.kind)
+        assertEquals(RecognizerKind.OnDevice, dictationRecognizer(both, preferService = false).kind)
+        assertNull(dictationRecognizer(emptySet(), preferService = false).kind)
+        assertTrue(dictationRecognizer(emptySet(), preferService = false).ready)
+    }
+
+    @Test
     fun `the speech service when there's no on-device recognizer`() {
         val available = DictationRecognizers.available(31, { false }, { true })
         assertEquals(RecognizerKind.Service, DictationRecognizers.pick(available, preferService = false))
