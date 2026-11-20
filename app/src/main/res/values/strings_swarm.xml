@@ -14,7 +14,7 @@
     <string name="swarm_publish_request">wants to publish to Swarm</string>
     <string name="swarm_publish_warning">Anyone with its address can read what\'s published, and it can\'t be taken back. It uses your storage.</string>
     <string name="swarm_publish_approve">Publish</string>
-    <string name="swarm_publish_always">Always allow this site to publish without asking (chunks the site signed itself still ask)</string>
+    <string name="swarm_publish_always">Always allow this site to publish without asking (chunks it hands over already signed, by anyone, still ask)</string>
     <!-- A single owner chunk the site sent, signed by one of the user's own keys: allowing refuses it, which the site sees -->
     <string name="swarm_publish_own_identity_warning">This chunk is signed by one of your own identities: a wallet account, your Ant wallet or your node. Freedom won\'t publish it. Allowing only tells the site that this identity is yours, so don\'t allow unless you mean to share that.</string>
     <string name="swarm_manifest_title">App permissions</string>
@@ -73,7 +73,7 @@
 
     <!-- SwarmManifestSheet.kt: the permission-manifest sheet -->
     <string name="swarm_manifest_publish_label">Publish content</string>
-    <string name="swarm_manifest_publish_meaning">Upload to Swarm with your storage and data, without asking each time. Chunks the site signed itself still ask.</string>
+    <string name="swarm_manifest_publish_meaning">Upload to Swarm with your storage and data, without asking each time. Chunks it hands over already signed, by anyone, still ask.</string>
     <string name="swarm_manifest_feeds_label">Manage feeds</string>
     <string name="swarm_manifest_feeds_meaning">Create and update this app\'s feeds without asking each time.</string>
     <string name="swarm_manifest_signing_label">Sign Swarm content</string>

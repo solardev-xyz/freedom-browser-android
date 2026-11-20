@@ -599,6 +599,8 @@ class SwarmProviderTest {
             assertEquals(label, SwarmChunks.checksum(PublisherKeys.address(key).removePrefix("0x").hexToBytesOrNull()!!), ask.owner)
             assertTrue(label, ask.ownIdentity)
             assertEquals(label, "This chunk is signed by one of your own identities: a wallet account, your Ant wallet or your node. Freedom won't publish it. Allowing only tells the site that this identity is yours, so don't allow unless you mean to share that.", swarmPromptCopy(ask).warning)
+            // Allow publishes nothing here, so the button says Allow, not Publish.
+            assertEquals(label, "Allow", swarmPromptCopy(ask).approve)
         }
         assertTrue(node.uploads().isEmpty())
         // The site's own key still goes through, its sheet with the usual warning.
@@ -608,6 +610,7 @@ class SwarmProviderTest {
         val theirs = asked.single() as SwarmAsk.Publish
         assertFalse(theirs.ownIdentity)
         assertEquals(swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).warning, swarmPromptCopy(theirs).warning)
+        assertEquals("Publish", swarmPromptCopy(theirs).approve)
     }
 
     @Test
@@ -703,7 +706,7 @@ class SwarmProviderTest {
         // Its sheet has no "always allow" switch; publishChunk's keeps one.
         assertEquals(null, swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.SignedSoc, 5, null, null, emptyList(), owner = pageOwner)).always)
         assertEquals(
-            "Always allow this site to publish without asking (chunks the site signed itself still ask)",
+            "Always allow this site to publish without asking (chunks it hands over already signed, by anyone, still ask)",
             swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).always,
         )
         assertTrue(okJson(call("swarm_getCapabilities")).getJSONObject("extensions").getBoolean("pageSignedSingleOwnerChunks"))
@@ -1801,8 +1804,8 @@ class SwarmProviderTest {
     fun `a Swarm site's line says what it may do without asking`() {
         fun grant(vararg auto: String) = baby.freedom.mobile.data.SwarmGrantStore.Grant(site, 1, auto.toSet())
         assertEquals("Asks before each upload and signature", swarmSiteSummary(grant()))
-        assertEquals("Publishes (except chunks it signed itself) without asking", swarmSiteSummary(grant("publish")))
-        assertEquals("Publishes (except chunks it signed itself), manages feeds, signs without asking", swarmSiteSummary(grant("signing", "publish", "feeds")))
+        assertEquals("Publishes (except already-signed chunks) without asking", swarmSiteSummary(grant("publish")))
+        assertEquals("Publishes (except already-signed chunks), manages feeds, signs without asking", swarmSiteSummary(grant("signing", "publish", "feeds")))
         val messaging = baby.freedom.mobile.data.SwarmGrantStore.Grant(site, 1, setOf("messaging"), messaging = true)
         assertEquals("Sends messages without asking · Can send and receive messages", swarmSiteSummary(messaging))
         assertEquals("Asks before each upload and signature · Can send and receive messages", swarmSiteSummary(messaging.copy(autoApprove = emptySet())))
