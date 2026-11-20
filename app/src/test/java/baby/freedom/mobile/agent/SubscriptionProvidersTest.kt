@@ -463,8 +463,11 @@ class SubscriptionProvidersTest {
         routes["/openai/oauth/token"] = { renewed("second") }
         file.beforeWrite = { throw java.io.IOException("disk full") }
         assertEquals(jwt("acct-1", "second"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        assertTrue(providers.holdsUnsavedRenewal(SubscriptionAuth.CODEX))
         file.beforeWrite = null
         assertTrue(providers.remove(SubscriptionAuth.CODEX))
+        // Signing out drops the held tokens at once, not at the next look-up.
+        assertFalse(providers.holdsUnsavedRenewal(SubscriptionAuth.CODEX))
         assertTrue(providers.chatTarget(ref) is ChatTarget.Unavailable)
         assertTrue(state.keys.isEmpty())
         // A new sign-in is its own, not the held renewal of the old one.
@@ -472,6 +475,23 @@ class SubscriptionProvidersTest {
         signIn(SubscriptionAuth.CODEX)
         assertEquals(jwt("acct-1"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
         assertEquals("rt-1", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
+    }
+
+    @Test
+    fun `signing in again drops a renewal held from the earlier sign-in`() = runBlocking {
+        codexServer(expiresIn = 60)
+        assertTrue(providers.setEnabled(true))
+        signIn(SubscriptionAuth.CODEX)
+        val ref = ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")
+        routes["/openai/oauth/token"] = { renewed("second") }
+        file.beforeWrite = { throw java.io.IOException("disk full") }
+        assertEquals(jwt("acct-1", "second"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        assertTrue(providers.holdsUnsavedRenewal(SubscriptionAuth.CODEX))
+        file.beforeWrite = null
+        codexServer(expiresIn = 3600)
+        signIn(SubscriptionAuth.CODEX)
+        assertFalse(providers.holdsUnsavedRenewal(SubscriptionAuth.CODEX))
+        assertEquals(jwt("acct-1"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
     }
 
     @Test

@@ -226,7 +226,7 @@ internal class AgentProviders(
     suspend fun remove(connectionId: String): Boolean = locked { s ->
         // Signing out also ends a sign-in to the same provider under way.
         endLogin(connectionId)
-        val old = s.connection(connectionId) ?: return@locked true
+        val old = s.connection(connectionId) ?: return@locked true.also { unsaved.remove(connectionId) }
         gate.bump(connectionId, null)
         val ok = store.edit { cur ->
             cur.copy(
@@ -237,6 +237,9 @@ internal class AgentProviders(
         }
         if (ok) {
             store.setModels(connectionId, null)
+            // A renewal held because its save failed ([unsaved]) goes too:
+            // its tokens shouldn't stay in memory once signed out.
+            unsaved.remove(connectionId)
             _signedOut.update { it - connectionId }
         } else {
             gate.bump(connectionId, old.revision)
@@ -563,11 +566,16 @@ internal class AgentProviders(
      * [replaces]. It's the one used, and saved again on the next look-up,
      * as long as the connection is still that sign-in: the refresh token
      * the stored one holds was used up by the renewal. In memory only.
-     * Guarded by [refreshLock].
+     * Written under [lock] (by a renewal, signing out and signing in
+     * again), so signing out can drop it without waiting for a renewal
+     * under way ([refreshLock]); read under [refreshLock].
      */
     private class Unsaved(val revision: Long, val replaces: String?, val credential: SubscriptionCredential)
 
-    private val unsaved = HashMap<String, Unsaved>()
+    private val unsaved = java.util.concurrent.ConcurrentHashMap<String, Unsaved>()
+
+    /** Whether a renewal [connectionId]'s save failed for is held in memory ([unsaved]). For tests. */
+    internal fun holdsUnsavedRenewal(connectionId: String): Boolean = unsaved.containsKey(connectionId)
 
     /** [connectionId]'s credential in [s]: one renewed but not saved yet, else the stored one. Under [refreshLock]. */
     private fun inEffect(s: AgentState, connectionId: String): SubscriptionCredential? {
@@ -847,7 +855,9 @@ internal class AgentProviders(
             )
         }
         if (ok) {
-            // A renewal held from the earlier sign-in ([unsaved]) no longer matches its revision.
+            // A renewal held from the earlier sign-in ([unsaved]) is that
+            // sign-in's, not this one's: dropped, its tokens with it.
+            unsaved.remove(id)
             _signedOut.update { it - id }
             publish(generation, LoginState.Done(id))
         } else {
