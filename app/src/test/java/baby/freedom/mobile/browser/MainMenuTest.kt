@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import baby.freedom.mobile.browser.MainMenuRow.Agent
 import baby.freedom.mobile.browser.MainMenuRow.AddToHomeScreen
 import baby.freedom.mobile.browser.MainMenuRow.BlockAds
 import baby.freedom.mobile.browser.MainMenuRow.Bookmarks
@@ -86,19 +87,28 @@ class MainMenuTest {
 
     @Test
     fun `no group is ever empty, so no two dividers meet`() {
-        for (home in listOf(true, false)) for (bits in 0 until 16) {
+        for (home in listOf(true, false)) for (bits in 0 until 32) {
             val c = MainMenuContext(
                 isHome = home,
                 hasNameTrust = bits and 1 != 0,
                 canOpenPrivateTab = bits and 2 != 0,
                 hasAdblock = bits and 4 != 0,
                 canAddToHomeScreen = bits and 8 != 0,
+                canOpenAgent = bits and 16 != 0,
             )
             val groups = mainMenuGroups(c)
             assertTrue(groups.none { it.isEmpty() })
             // Each row at most once, and Wallet and Settings always there.
             assertEquals(groups.flatten().size, groups.flatten().toSet().size)
             assertTrue(Wallet in groups.flatten() && Settings in groups.flatten())
+        }
+    }
+
+    @Test
+    fun `Freedom Agent heads the app group, on home and on pages, only when it can open (#574)`() {
+        for (home in listOf(true, false)) {
+            assertEquals(listOf(Agent, Settings, Nodes), mainMenuGroups(everything.copy(isHome = home, canOpenAgent = true)).last())
+            assertFalse(Agent in mainMenuGroups(everything.copy(isHome = home)).flatten())
         }
     }
 

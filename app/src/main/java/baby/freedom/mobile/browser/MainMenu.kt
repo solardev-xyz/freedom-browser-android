@@ -36,6 +36,8 @@ internal enum class MainMenuRow {
     Wallet,
 
     // The app.
+    /** Freedom Agent's chat (#574). */
+    Agent,
     Settings,
     Nodes,
 }
@@ -55,6 +57,12 @@ internal data class MainMenuContext(
      * address another app could open, and a launcher that takes pins.
      */
     val canAddToHomeScreen: Boolean = false,
+    /**
+     * Freedom Agent's chat can be opened (#574): AI is on, and the tab
+     * isn't private (a private tab never feeds the agent, as desktop's
+     * private windows can't open it).
+     */
+    val canOpenAgent: Boolean = false,
 )
 
 /**
@@ -101,7 +109,7 @@ internal fun mainMenuGroups(c: MainMenuContext): List<List<MainMenuRow>> {
         MainMenuRow.Downloads,
         MainMenuRow.Wallet,
     )
-    val app = listOf(MainMenuRow.Settings, MainMenuRow.Nodes)
+    val app = listOfNotNull(MainMenuRow.Agent.takeIf { c.canOpenAgent }, MainMenuRow.Settings, MainMenuRow.Nodes)
     return listOf(trust, tabs, page, library, app).filter { it.isNotEmpty() }
 }
 

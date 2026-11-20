@@ -1,6 +1,7 @@
 {
   "own": [
     "adblock/README.md",
+    "agent/system_prompt.md",
     "error/error.html",
     "openlv/shell.html",
     "openlv/shim.js",

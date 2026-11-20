@@ -35,7 +35,8 @@ internal enum class TestResult {
  * Nothing contacts a provider unless AI is on and the user connected
  * that provider: the gate refuses a request otherwise, and only the
  * user's Refresh models and Test connection (and the model list fetched
- * right after a key or server is saved) make one.
+ * right after a key or server is saved) and a message the user sends in
+ * a chat (#574, [streamStep]) make one.
  */
 internal class AgentProviders(
     private val store: AgentStore,
@@ -310,6 +311,65 @@ internal class AgentProviders(
         }
     }
 
+    /**
+     * What a chat needs to reach [ref]'s model (#574), pinned to its
+     * connection's revision at that moment: a key rotated, a server moved
+     * or AI turned off since then cancels the chat's requests rather than
+     * sending them with what replaced it (desktop audit L1).
+     */
+    suspend fun chatTarget(ref: ModelRef): ChatTarget = withContext(Dispatchers.IO) {
+        val s = locked { it }
+        if (!s.enabled) return@withContext ChatTarget.Unavailable(ChatError.AiOff)
+        val connection = s.connection(ref.connectionId) ?: return@withContext ChatTarget.Unavailable(ChatError.NoModel)
+        val definition = ProviderCatalog.definition(connection.providerId)
+            ?: return@withContext ChatTarget.Unavailable(ChatError.NoModel)
+        val base = baseOf(connection, definition) ?: return@withContext ChatTarget.Unavailable(ChatError.BadUrl)
+        if (s.keyLost(connection)) return@withContext ChatTarget.Unavailable(ChatError.NoKey)
+        ChatTarget.Ready(connection, definition, base, s.keys[connection.id], ref.modelId)
+    }
+
+    /** Streams one step of a chat to [target]; [onText] gets each piece of reply text. */
+    suspend fun streamStep(target: ChatTarget.Ready, request: StepRequest, onText: (String) -> Unit): StepOutcome =
+        withContext(Dispatchers.IO) {
+            val (url, body) = AgentWire.build(target.definition, target.base, request)
+            val parser = AgentWire.parser(target.definition.wire)
+            val end = client.stream(
+                target.connection.id, target.connection.revision, url,
+                ProviderClient.authHeaders(target.definition, target.key), body,
+            ) { event, data ->
+                val delta = parser.onEvent(event, data)
+                if (delta.isNotEmpty()) onText(delta)
+            }
+            when (end) {
+                StreamEnd.Ended -> try {
+                    StepOutcome.Ok(parser.finish())
+                } catch (e: WireException) {
+                    StepOutcome.Failed(chatErrorOf(e.error))
+                }
+                is StreamEnd.Wire -> StepOutcome.Failed(chatErrorOf(end.error))
+                // The server answered: never "couldn't reach" it.
+                is StreamEnd.Status -> StepOutcome.Failed(
+                    when (end.code) {
+                        401, 403 -> ChatError.Unauthorized
+                        404 -> ChatError.ModelNotFound
+                        413 -> ChatError.ContextTooLong
+                        429, 529 -> ChatError.RateLimited
+                        in 500..599 -> ChatError.ServerError
+                        else -> ChatError.Refused
+                    },
+                    // A refusal that says so; on a server on the network
+                    // (Ollama and the like, whose wording varies) any 400.
+                    noTools = end.noTools || (end.code == 400 && target.definition.kind == ProviderKind.Lan),
+                )
+                StreamEnd.Unreachable -> StepOutcome.Failed(ChatError.Unreachable)
+                StreamEnd.TimedOut -> StepOutcome.Failed(ChatError.TimedOut)
+                // The gate stopped it: AI went off, or the connection changed under it.
+                StreamEnd.Cancelled -> StepOutcome.Failed(
+                    if (store.state.first().enabled) ChatError.KeyChanged else ChatError.AiOff,
+                )
+            }
+        }
+
     companion object {
         /** Desktop's bound on a key's length. */
         const val MAX_KEY_LENGTH = 16_384
@@ -327,4 +387,28 @@ internal class AgentProviders(
             instance ?: AgentProviders(AgentStore.create(context)).also { instance = it }
         }
     }
+}
+
+/** Whether a chat can reach a model now (#574), and with what. */
+internal sealed interface ChatTarget {
+    data class Ready(
+        val connection: AgentConnection,
+        val definition: ProviderDefinition,
+        val base: HttpUrl,
+        val key: String?,
+        val modelId: String,
+    ) : ChatTarget {
+        // Never print a key.
+        override fun toString() = "Ready(${connection.id}, $modelId)"
+    }
+
+    data class Unavailable(val error: ChatError) : ChatTarget
+}
+
+internal fun chatErrorOf(error: WireError): ChatError = when (error) {
+    WireError.RateLimited -> ChatError.RateLimited
+    WireError.ContextTooLong -> ChatError.ContextTooLong
+    WireError.ServerError -> ChatError.ServerError
+    WireError.Refused -> ChatError.Refused
+    WireError.BadReply -> ChatError.BadReply
 }
