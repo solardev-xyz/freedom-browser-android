@@ -3,7 +3,8 @@
   Android 11 and lower (`fullBackupContent`): the same exclusions as
   data_extraction_rules.xml: the encrypted RPC API keys, the AI
   providers' keys and connections (AgentStore, #573), the dictation
-  language beside them (#578), and Freedom
+  picks beside them (#578: the language, and whether the phone's speech
+  service may hear the audio), and Freedom
   Agent's chats (`freedom_agent.db`, #574), the stores
   that let a site act on the wallet or node without asking (#229), and
   the Swarm permission manifests' record of which of those grants it owns,

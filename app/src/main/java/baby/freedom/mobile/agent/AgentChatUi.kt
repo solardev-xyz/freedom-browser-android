@@ -562,7 +562,9 @@ private fun DictationLine(status: DictationStatus, language: String, serviceOffe
         )
         is DictationStatus.Failed -> Row(verticalAlignment = Alignment.CenterVertically) {
             val locale = LocalConfiguration.current.locales[0]
-            val languageName = java.util.Locale.forLanguageTag(language).getDisplayName(locale)
+            // The language of the run that failed: the app's (or the pick)
+            // may have changed since, with this line still up.
+            val languageName = java.util.Locale.forLanguageTag(status.language ?: language).getDisplayName(locale)
             val line = when (status.failure) {
                 DictationFailure.NoSpeech -> stringResource(R.string.agent_dictation_no_speech)
                 DictationFailure.Permission -> stringResource(R.string.agent_dictation_permission)

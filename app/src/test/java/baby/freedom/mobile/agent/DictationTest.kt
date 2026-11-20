@@ -165,7 +165,7 @@ class DictationTest {
         assertEquals(DictationStatus.Idle, d.status.value)
         d.start("", "en")
         fake.last.error(SpeechRecognizer.ERROR_CLIENT)
-        assertEquals(DictationStatus.Failed(DictationFailure.Other, RecognizerKind.OnDevice), d.status.value)
+        assertEquals(DictationStatus.Failed(DictationFailure.Other, RecognizerKind.OnDevice, "en"), d.status.value)
     }
 
     @Test
@@ -230,7 +230,7 @@ class DictationTest {
         d.start("Draft", "en")
         fake.last.error(SpeechRecognizer.ERROR_NO_MATCH)
         assertEquals("", draft()) // never written
-        assertEquals(DictationStatus.Failed(DictationFailure.NoSpeech, RecognizerKind.OnDevice), d.status.value)
+        assertEquals(DictationStatus.Failed(DictationFailure.NoSpeech, RecognizerKind.OnDevice, "en"), d.status.value)
     }
 
     @Test
@@ -240,8 +240,20 @@ class DictationTest {
         fake.last.partial("konnichiwa")
         fake.last.error(12)
         assertEquals("konnichiwa", draft())
-        assertEquals(DictationStatus.Failed(DictationFailure.LanguageUnsupported, RecognizerKind.OnDevice), d.status.value)
+        // The failure names the run's own language, whatever the app's is later.
+        assertEquals(DictationStatus.Failed(DictationFailure.LanguageUnsupported, RecognizerKind.OnDevice, "ja"), d.status.value)
         assertEquals(1, fake.languages.size)
+    }
+
+    @Test
+    fun `a language failure keeps naming the run's language after the language changes`() {
+        val (d, fake, _) = setUp(RecognizerKind.OnDevice)
+        d.start("", "fr")
+        fake.last.error(12)
+        // What the composer does on a new language (an app-language change
+        // handled in place): the failure's line stays, still about French.
+        d.cancel()
+        assertEquals(DictationStatus.Failed(DictationFailure.LanguageUnsupported, RecognizerKind.OnDevice, "fr"), d.status.value)
     }
 
     @Test
@@ -299,7 +311,7 @@ class DictationTest {
         // Another failure's line, or a run, isn't touched.
         d.start("", "en")
         fake.last.error(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
-        val recognizers = DictationStatus.Failed(DictationFailure.RecognizerPermission, RecognizerKind.OnDevice)
+        val recognizers = DictationStatus.Failed(DictationFailure.RecognizerPermission, RecognizerKind.OnDevice, "en")
         assertEquals(recognizers, d.status.value)
         d.permissionGranted()
         assertEquals(recognizers, d.status.value)
@@ -313,7 +325,7 @@ class DictationTest {
         var draft = "x"
         val d = Dictation(RecognizerKind.OnDevice, { throw IllegalStateException() }, setDraft = { draft = it })
         d.start("x", "en")
-        assertEquals(DictationStatus.Failed(DictationFailure.Other, RecognizerKind.OnDevice), d.status.value)
+        assertEquals(DictationStatus.Failed(DictationFailure.Other, RecognizerKind.OnDevice, "en"), d.status.value)
         assertEquals("x", draft)
     }
 

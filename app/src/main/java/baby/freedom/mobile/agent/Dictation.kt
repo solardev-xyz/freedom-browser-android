@@ -185,8 +185,13 @@ internal sealed interface DictationStatus {
      */
     data class Listening(val kind: RecognizerKind, val hearing: Boolean, val finishing: Boolean = false) : DictationStatus
 
-    /** The last run stopped on [failure]; the draft keeps whatever it showed. */
-    data class Failed(val failure: DictationFailure, val kind: RecognizerKind) : DictationStatus
+    /**
+     * The last run stopped on [failure]; the draft keeps whatever it showed.
+     * [language] is the tag that run was for (null for the microphone
+     * refusal, which no run reached): a language failure's line
+     * names it, not whatever the language is by the time the line shows.
+     */
+    data class Failed(val failure: DictationFailure, val kind: RecognizerKind, val language: String? = null) : DictationStatus
 }
 
 /** One recognizer, for one listening run at a time. Calls back on the main thread. */
@@ -251,7 +256,7 @@ internal class Dictation(
             null
         }.also { recognizer = it }
         if (r == null) {
-            _status.value = DictationStatus.Failed(DictationFailure.Other, kind)
+            _status.value = DictationStatus.Failed(DictationFailure.Other, kind, language)
             return
         }
         val mine = ++run
@@ -287,7 +292,7 @@ internal class Dictation(
                         // The recognizer's answer to our own stop, not a failure.
                         finishing && code == SpeechRecognizer.ERROR_CLIENT ->
                             if (heard.isNotBlank()) DictationStatus.Done else DictationStatus.Idle
-                        else -> DictationStatus.Failed(failure, kind)
+                        else -> DictationStatus.Failed(failure, kind, language)
                     },
                 )
             }
@@ -296,7 +301,7 @@ internal class Dictation(
             r.start(language, events)
         } catch (e: RuntimeException) {
             Log.w(TAG, "starting the speech recognizer failed (${e.javaClass.simpleName})")
-            end(DictationStatus.Failed(DictationFailure.Other, kind))
+            end(DictationStatus.Failed(DictationFailure.Other, kind, language))
         }
     }
 

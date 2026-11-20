@@ -26,7 +26,7 @@ class BackupRulesTest {
         "RadicleGrantStore.kt" to "freedom_radicle_grants",
         // The AI providers' encrypted API keys and connections, and their model lists (#573).
         "../agent/AgentStore.kt" to "freedom_agent",
-        // The dictation language (#578), kept beside the other AI settings.
+        // The dictation picks (#578: language, speech service or on-device), kept beside the other AI settings.
         "../agent/Dictation.kt" to "freedom_agent_dictation",
     )
 
