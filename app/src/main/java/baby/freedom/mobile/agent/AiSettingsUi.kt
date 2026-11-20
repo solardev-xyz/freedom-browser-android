@@ -314,7 +314,14 @@ private fun testLine(result: TestResult, model: String, keyed: Boolean, subscrip
     TestResult.Unauthorized ->
         Strings.get(if (subscription) R.string.agent_test_account_refused else R.string.agent_test_unauthorized)
     TestResult.ModelNotFound ->
-        Strings.get(if (keyed) R.string.agent_test_model_not_found else R.string.agent_test_model_not_found_server, model)
+        Strings.get(
+            when {
+                subscription -> R.string.agent_test_model_not_found_account
+                keyed -> R.string.agent_test_model_not_found
+                else -> R.string.agent_test_model_not_found_server
+            },
+            model,
+        )
     TestResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
     TestResult.ServerError -> Strings.get(R.string.agent_test_server_error)
     TestResult.Refused -> Strings.get(R.string.agent_test_refused)

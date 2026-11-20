@@ -113,6 +113,7 @@
     <string name="agent_test_account_refused">The provider refused this account. Your plan may not include it.</string>
     <string name="agent_test_sign_in_again">Your sign-in has ended. Sign in again.</string>
     <string name="agent_test_model_not_found">The provider doesn\'t offer %1$s to this key.</string>
+    <string name="agent_test_model_not_found_account">The provider doesn\'t offer %1$s to this account.</string>
     <string name="agent_test_model_not_found_server">The server doesn\'t offer %1$s.</string>
     <string name="agent_test_rate_limited">The provider is limiting requests. Try again later.</string>
     <string name="agent_test_server_error">The provider had an error. Try again later.</string>

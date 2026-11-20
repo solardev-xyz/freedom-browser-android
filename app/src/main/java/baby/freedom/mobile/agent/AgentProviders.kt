@@ -599,8 +599,9 @@ internal class AgentProviders(
             wrote = true
             now.copy(keys = now.keys + (id to fresh.encode()))
         }
-        // The new token works, whether or not it's on flash yet.
-        if (ok || wrote) _signedOut.update { it - id }
+        // The new token works, whether or not it's on flash yet: every
+        // outcome but "not this sign-in any more" (ok, nothing written).
+        if (!ok || wrote) _signedOut.update { it - id }
         return when {
             ok && wrote -> true.also { unsaved.remove(id) }
             ok -> null.also { unsaved.remove(id) }

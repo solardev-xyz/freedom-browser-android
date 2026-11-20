@@ -434,10 +434,15 @@ class SubscriptionProvidersTest {
         assertTrue(providers.setEnabled(true))
         signIn(SubscriptionAuth.CODEX)
         val ref = ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")
+        routes["/openai/oauth/token"] = { json(JSONObject().put("error", "invalid_grant"), 400) }
+        assertEquals(ChatTarget.Unavailable(ChatError.SignInAgain), providers.chatTarget(ref))
+        assertTrue(SubscriptionAuth.CODEX in providers.signedOut.value)
         routes["/openai/oauth/token"] = { renewed("second") }
         file.beforeWrite = { throw java.io.IOException("disk full") }
-        // rt-1 is used up by this refresh: its answer is the sign-in now.
+        // rt-1 is used up by this refresh: its answer is the sign-in now,
+        // and the row no longer says signed out, though it's not saved yet.
         assertEquals(jwt("acct-1", "second"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        assertFalse(SubscriptionAuth.CODEX in providers.signedOut.value)
         assertEquals("rt-1", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
         val refreshes = requests("/openai/oauth/token").size
         // Still not saved: the held one is used, never the spent rt-1 again.
