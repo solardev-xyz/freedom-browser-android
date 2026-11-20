@@ -1118,7 +1118,6 @@ internal class BrowserToolset(
         /** A link address the page script cut ([page.js] `describe`): too long to match a download against. */
         const val MAX_LINK_CHARS = 4_096
 
-        /** [link]'s download (approved earlier) came after browser_download stopped waiting for it. */
         /**
          * [href]'s wait ran out, but meanwhile a download came at [earlier]'s
          * address, an earlier link whose own wait had run out. Android says
@@ -1137,6 +1136,7 @@ internal class BrowserToolset(
             )
         }
 
+        /** [link]'s download (approved earlier) came after browser_download stopped waiting for it. */
         fun lateDownloadNote(link: String) = "The download of $link, approved earlier, started after " +
             "browser_download had stopped waiting for it. It was not saved: it waits for the user in Freedom's " +
             "download prompt. Do not call browser_download for that link again; tell the user it is waiting for " +

@@ -284,9 +284,11 @@ internal class FileChooser(
         }
         // Not the user's cancel (#600): what they chose may not be uploaded,
         // or the picker or camera handed back nothing at all.
-        // A capture only ever takes the camera's own data URI (finishCapture).
+        // A capture only ever takes the camera's own data URI (finishCapture);
+        // one that just echoes our EXTRA_OUTPUT back handed back nothing.
         val data = result.data
-        val handedBack = data?.data != null || (p.captureFile == null && (data?.clipData?.itemCount ?: 0) > 0)
+        val handedBack = if (p.captureFile != null) captureHandedBack(data?.data, p.captureUri!!)
+        else data?.data != null || (data?.clipData?.itemCount ?: 0) > 0
         when (unattachedPick(result.resultCode == android.app.Activity.RESULT_OK, uris != null, handedBack)) {
             UnattachedPick.REFUSED -> baby.freedom.mobile.agent.AgentUploads.refusing(p.callback)
             UnattachedPick.EMPTY -> baby.freedom.mobile.agent.AgentUploads.emptyHanded(p.callback)
@@ -503,6 +505,15 @@ internal fun <U : Any> finishCapture(
     if (ok && returned != null && uploadable(returned)) return returned
     return null
 }
+
+/**
+ * Whether a camera result handed back a file of its own: [returned] (its
+ * data URI) is set and isn't just [captureUri], our EXTRA_OUTPUT, echoed
+ * back. Some cameras echo it; when they wrote nothing to it, nothing was
+ * captured ([UnattachedPick.EMPTY]), not a file Freedom refused.
+ */
+internal fun <U : Any> captureHandedBack(returned: U?, captureUri: U): Boolean =
+    returned != null && returned != captureUri
 
 /** Why a picker or camera result attached nothing, beyond the user's cancel; see [unattachedPick]. */
 internal enum class UnattachedPick {
