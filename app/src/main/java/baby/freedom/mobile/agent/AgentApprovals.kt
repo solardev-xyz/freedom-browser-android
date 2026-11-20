@@ -19,8 +19,18 @@ internal sealed interface AgentAction {
     data class Press(val target: PageTarget, val key: String) : AgentAction
     data class Scroll(val target: PageTarget?, val direction: String, val pages: Double) : AgentAction
 
-    /** Answer the page's [kind] dialog: OK ([accept]) or Cancel, with a prompt's [promptText]. */
-    data class Dialog(val kind: String, val message: String, val accept: Boolean, val promptText: String?) : AgentAction
+    /**
+     * Answer the page's [kind] dialog: OK ([accept]) or Cancel, with a
+     * prompt's [promptText]. [from]: the site of the frame that opened it,
+     * which the card names (an embedded page's can differ from the tab's).
+     */
+    data class Dialog(
+        val kind: String,
+        val message: String,
+        val accept: Boolean,
+        val promptText: String?,
+        val from: String = "",
+    ) : AgentAction
 }
 
 /**
@@ -166,6 +176,36 @@ internal object ApprovalText {
         }
         val s = out.toString().trim()
         return if (cut) "$s…" else s
+    }
+
+    private fun isLineBreak(c: Char) = c == '\n' || c == '\r' || c == '\u2028' || c == '\u2029'
+
+    fun hasLineBreak(text: String): Boolean = text.any(::isLineBreak)
+
+    /** Nothing but line breaks: what Chromium's input connection would send as the Enter key. */
+    fun onlyLineBreaks(text: String): Boolean = text.isNotEmpty() && text.all(::isLineBreak)
+
+    /** Typed text as a Type card shows it ([typed]). */
+    sealed interface Typed {
+        /** No text at all. */
+        data object Empty : Typed
+
+        /** Only blank space: [count] characters of it, which flattening alone would show as nothing. */
+        data class Blank(val count: Int) : Typed
+
+        data class Shown(val text: String) : Typed
+    }
+
+    /**
+     * What a Type card shows for [text]: flattened, with each line break
+     * marked ↵ rather than run into a space, so the card says where a new
+     * line goes; text that's only blank space is counted, not shown blank.
+     */
+    fun typed(text: String, max: Int): Typed {
+        if (text.isEmpty()) return Typed.Empty
+        val marked = text.replace("\r\n", "\n").map { if (isLineBreak(it)) " ↵ " else it.toString() }.joinToString("")
+        val shown = flatten(marked, max)
+        return if (shown.isEmpty()) Typed.Blank(text.codePointCount(0, text.length)) else Typed.Shown(shown)
     }
 }
 

@@ -165,4 +165,17 @@ class AgentApprovalsTest {
         assertEquals("😀😀…", ApprovalText.flatten(emoji, max = 2))
         assertEquals("abc", ApprovalText.flatten("abc", max = 3))
     }
+
+    @Test
+    fun `typed text shows its line breaks, and blank text is counted, not shown blank`() {
+        assertEquals(ApprovalText.Typed.Empty, ApprovalText.typed("", 2_000))
+        assertEquals(ApprovalText.Typed.Blank(3), ApprovalText.typed("   ", 2_000))
+        assertEquals(ApprovalText.Typed.Blank(1), ApprovalText.typed("\u00A0", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("↵"), ApprovalText.typed("\n", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("Dear Ann, ↵ ↵ see you"), ApprovalText.typed("Dear Ann,\r\n\nsee you", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("a ↵ b"), ApprovalText.typed("a\u2028b", 2_000))
+        assertTrue(ApprovalText.onlyLineBreaks("\r\n"))
+        assertFalse(ApprovalText.onlyLineBreaks(" \n"))
+        assertFalse(ApprovalText.onlyLineBreaks(""))
+    }
 }

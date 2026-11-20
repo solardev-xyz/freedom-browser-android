@@ -32,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import baby.freedom.mobile.l10n.pluralText
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -125,7 +126,8 @@ private fun ApprovalBody(approval: AgentApproval) {
     }
     Spacer(Modifier.height(8.dp))
     Text(headline(action), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-    val site = ApprovalText.flatten(approval.site, 200)
+    // A dialog names the frame that opened it; anything else, the tab's committed page.
+    val site = ApprovalText.flatten((action as? AgentAction.Dialog)?.from?.ifEmpty { null } ?: approval.site, 200)
     if (!(action is AgentAction.Navigate && action.newTab)) {
         Text(
             if (site.isEmpty()) stringResource(R.string.agent_approve_site_none) else stringResource(R.string.agent_approve_site, site),
@@ -141,8 +143,14 @@ private fun ApprovalBody(approval: AgentApproval) {
             TargetRows(action.target)
             Field(
                 stringResource(R.string.agent_approve_text),
-                action.text.takeIf { it.isNotEmpty() }?.let { ApprovalText.flatten(it, BrowserArgs.MAX_TYPED_CHARS) }
-                    ?: stringResource(R.string.agent_approve_text_empty),
+                when (val typed = ApprovalText.typed(action.text, BrowserArgs.MAX_TYPED_CHARS)) {
+                    ApprovalText.Typed.Empty -> stringResource(
+                        if (action.replace) R.string.agent_approve_text_empty else R.string.agent_approve_text_nothing,
+                    )
+                    is ApprovalText.Typed.Blank ->
+                        pluralText(R.plurals.agent_approve_text_blank, typed.count, typed.count)
+                    is ApprovalText.Typed.Shown -> typed.text
+                },
                 mono = true,
             )
         }

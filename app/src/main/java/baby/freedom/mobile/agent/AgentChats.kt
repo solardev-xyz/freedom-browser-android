@@ -211,7 +211,7 @@ internal class AgentChats(
                 val o = outcome
                 val status = when (o?.error) {
                     null -> if (o == null) ChatStatus.CANCELLED else ChatStatus.COMPLETED
-                    ChatError.CutShort -> ChatStatus.COMPLETED
+                    ChatError.CutShort, ChatError.Declined -> ChatStatus.COMPLETED
                     ChatError.AiOff, ChatError.KeyChanged -> ChatStatus.CANCELLED
                     else -> ChatStatus.FAILED
                 }

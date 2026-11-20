@@ -57,8 +57,18 @@ internal data class AgentTab(
     }
 }
 
-/** A JavaScript dialog the page in a tab is waiting on. */
-internal data class AgentDialog(val kind: String, val message: String, val defaultValue: String?, val url: String?)
+/**
+ * A JavaScript dialog the page in a tab is waiting on. [serial] tells
+ * one request from another that reads the same (a reload showing the
+ * same `confirm()` again), so an answer goes only to the one approved.
+ */
+internal data class AgentDialog(
+    val kind: String,
+    val message: String,
+    val defaultValue: String?,
+    val url: String?,
+    val serial: Long = 0,
+)
 
 /**
  * What the browser lends the agent's tools (#575), installed by
@@ -86,11 +96,12 @@ internal interface AgentBrowserHost {
      */
     suspend fun bringToFront(id: Long): Boolean
 
-    /** A tap at ([x], [y]) in the WebView's own pixels. */
-    suspend fun tap(id: Long, x: Float, y: Float): Boolean
-
-    /** A slow drag by ([dx], [dy]) pixels from ([x], [y]), with no fling at the end. */
-    suspend fun drag(id: Long, x: Float, y: Float, dx: Float, dy: Float): Boolean
+    /**
+     * A tap at ([x], [y]) in the WebView's own pixels. [proceed] is asked
+     * before the finger lifts: false cancels the touch instead (the tab
+     * was taken back mid-tap), and the tap returns false.
+     */
+    suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean = { true }): Boolean
 
     /** Presses and releases [keyCode] in the focused element. */
     fun key(id: Long, keyCode: Int): Boolean
@@ -238,36 +249,28 @@ private class BrowserTabsHost(
 
     private fun page(id: Long): PageWebView? = (webViewFor(id) as? PageWebView)?.takeIf { onScreen(id) }
 
-    override suspend fun tap(id: Long, x: Float, y: Float): Boolean {
+    override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean): Boolean {
         val wv = page(id) ?: return false
         if (x < 0 || y < 0 || x >= wv.width || y >= wv.height) return false
         val down = SystemClock.uptimeMillis()
-        wv.agentTouch(motion(down, down, MotionEvent.ACTION_DOWN, x, y))
+        touch(wv, down, down, MotionEvent.ACTION_DOWN, x, y)
         delay(60)
-        wv.agentTouch(motion(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y))
-        return true
+        // Taken back (or gone) while the finger was down: cancelled, so
+        // the page sees no click, and no long press either.
+        val go = proceed() && page(id) === wv
+        touch(wv, down, SystemClock.uptimeMillis(), if (go) MotionEvent.ACTION_UP else MotionEvent.ACTION_CANCEL, x, y)
+        return go
     }
 
-    override suspend fun drag(id: Long, x: Float, y: Float, dx: Float, dy: Float): Boolean {
-        val wv = page(id) ?: return false
-        val down = SystemClock.uptimeMillis()
-        wv.agentTouch(motion(down, down, MotionEvent.ACTION_DOWN, x, y))
-        val steps = 24
-        for (i in 1..steps) {
-            delay(16)
-            val f = i.toFloat() / steps
-            wv.agentTouch(motion(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, x + dx * f, y + dy * f))
+    /** One touch event into [wv], handed back to the pool once Chromium has it. */
+    private fun touch(wv: PageWebView, down: Long, at: Long, action: Int, x: Float, y: Float) {
+        val event = MotionEvent.obtain(down, at, action, x, y, 0).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
+        try {
+            wv.agentTouch(event)
+        } finally {
+            event.recycle()
         }
-        // Held still before the lift, so the page doesn't fling on past the drag.
-        delay(180)
-        wv.agentTouch(motion(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, x + dx, y + dy))
-        delay(60)
-        wv.agentTouch(motion(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x + dx, y + dy))
-        return true
     }
-
-    private fun motion(down: Long, at: Long, action: Int, x: Float, y: Float): MotionEvent =
-        MotionEvent.obtain(down, at, action, x, y, 0).apply { source = android.view.InputDevice.SOURCE_TOUCHSCREEN }
 
     override fun key(id: Long, keyCode: Int): Boolean {
         val wv = page(id) ?: return false
@@ -279,6 +282,9 @@ private class BrowserTabsHost(
     }
 
     override suspend fun commitText(id: Long, text: String): Boolean {
+        // Chromium's input connection sends a lone line break as the Enter
+        // key, which no Type card shows; the tools refuse it before asking.
+        if (ApprovalText.onlyLineBreaks(text)) return false
         val wv = page(id) ?: return false
         if (!wv.hasFocus()) wv.requestFocus()
         val ic = wv.agentInputConnection(EditorInfo()) ?: return false
@@ -298,8 +304,13 @@ private class BrowserTabsHost(
         return withTimeoutOrNull(3_000) { done.await() } == true
     }
 
+    /** A number per dialog request, held weakly: the request goes with its tab. */
+    private val dialogSerials = java.util.WeakHashMap<baby.freedom.mobile.browser.JsDialogRequest, Long>()
+    private var nextDialogSerial = 0L
+
     override fun dialog(id: Long): AgentDialog? {
         val request = state(id)?.jsDialog?.takeIf { !it.answered } ?: return null
+        val serial = dialogSerials.getOrPut(request) { ++nextDialogSerial }
         return AgentDialog(
             kind = when (request.kind) {
                 JsDialogKind.ALERT -> "alert"
@@ -310,6 +321,7 @@ private class BrowserTabsHost(
             message = request.message.orEmpty(),
             defaultValue = request.defaultValue,
             url = request.url,
+            serial = serial,
         )
     }
 

@@ -34,6 +34,9 @@ class BrowserToolsTest {
         /** The control the page's describe/point answers name. */
         var control = JSONObject().put("role", "button").put("tag", "button").put("name", "Search")
 
+        /** Run as each page script goes in, with its op. */
+        var onScript: (String) -> Unit = {}
+
         /** Run when the tool brings the tab to the front, before the action. */
         var onFront: () -> Unit = {}
 
@@ -73,6 +76,7 @@ class BrowserToolsTest {
         override suspend fun evaluate(id: Long, script: String, timeoutMs: Long): String {
             scripts += script
             val op = script.substringAfter("PAGE(\"").substringBefore('"')
+            onScript(op)
             return when (op) {
                 "snapshot" -> JSONObject()
                     .put("url", tabs[id]!!.url)
@@ -81,6 +85,8 @@ class BrowserToolsTest {
                     .toString()
                 "describe" -> JSONObject().put("ok", true).put("target", control).toString()
                 "point" -> JSONObject().put("ok", true).put("x", 100).put("y", 200).toString()
+                "scroll", "scrollState" -> JSONObject().put("ok", true)
+                    .put("scroll", JSONObject().put("x", 0).put("y", if (op == "scroll") 0 else 800)).toString()
                 else -> JSONObject().put("ok", true).toString()
             }
         }
@@ -93,14 +99,34 @@ class BrowserToolsTest {
             return canFront
         }
 
-        override suspend fun tap(id: Long, x: Float, y: Float): Boolean {
+        /** Run between a tap's touch down and its lift. */
+        var duringTap: () -> Unit = {}
+        val cancelledTaps = ArrayList<Pair<Float, Float>>()
+
+        override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean): Boolean {
+            duringTap()
+            if (!proceed()) {
+                cancelledTaps += x to y
+                return false
+            }
             taps += x to y
             return true
         }
 
-        override suspend fun drag(id: Long, x: Float, y: Float, dx: Float, dy: Float) = true
-        override fun key(id: Long, keyCode: Int) = true
-        override suspend fun commitText(id: Long, text: String) = true
+        val keys = ArrayList<Int>()
+        override fun key(id: Long, keyCode: Int): Boolean {
+            keys += keyCode
+            return true
+        }
+
+        val commits = ArrayList<String>()
+
+        /** What commitText answers, and what happens as it does. */
+        var commitAnswer: (String) -> Boolean = { true }
+        override suspend fun commitText(id: Long, text: String): Boolean {
+            commits += text
+            return commitAnswer(text)
+        }
         var dialog: AgentDialog? = null
         val answers = ArrayList<Pair<Boolean, String?>>()
         override fun dialog(id: Long): AgentDialog? = dialog
@@ -440,5 +466,124 @@ class BrowserToolsTest {
         for (url in listOf("", "about:blank", "ABOUT:srcdoc", "data:text/html,<b>x</b>", "javascript:alert(1)", "file:///sdcard/a", "content://x/y", "chrome://version")) {
             assertFalse(url, agentReadable(url))
         }
+    }
+
+    private suspend fun typeRef(tag: String): Pair<BrowserToolset, String> {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        host.control = JSONObject().put("role", "textbox").put("tag", tag).put("name", "Message")
+        val tools = toolset()
+        return tools to snapshotRef(tools)
+    }
+
+    @Test
+    fun `a lone line break is never typed, since it would press Enter`() = runBlocking {
+        val (tools, ref) = typeRef("textarea")
+        for (text in listOf("\n", "\r\n", "\r")) {
+            for (replace in listOf(true, false)) {
+                val out = tools.call("browser_type", JSONObject().put("ref", ref).put("text", text).put("replace", replace))
+                assertEquals("INVALID_ARGUMENT", out.code())
+                assertTrue(out.output.contains("browser_press"))
+            }
+        }
+        assertTrue(asked.isEmpty())
+        assertTrue(host.commits.isEmpty())
+    }
+
+    @Test
+    fun `line breaks go only into a multi-line field, and the card marks them`() = runBlocking {
+        val (tools, ref) = typeRef("input")
+        assertEquals("INVALID_ARGUMENT", tools.call("browser_type", JSONObject().put("ref", ref).put("text", "hi\nthere")).code())
+        assertTrue(asked.isEmpty())
+        host.control = JSONObject().put("role", "textbox").put("tag", "textarea").put("name", "Message")
+        val ref2 = snapshotRef(tools)
+        assertFalse(tools.call("browser_type", JSONObject().put("ref", ref2).put("text", "hi\nthere")).isError)
+        assertEquals(listOf("hi\nthere"), host.commits)
+        val typed = (asked.single().action as AgentAction.Type).text
+        assertEquals(ApprovalText.Typed.Shown("hi ↵ there"), ApprovalText.typed(typed, 2_000))
+    }
+
+    @Test
+    fun `taking the tab back between typing's steps stops the rest`() = runBlocking {
+        val (tools, ref) = typeRef("input")
+        // No input connection the first time; the tab is taken back before the tap fallback.
+        host.commitAnswer = { AgentTabs.release(1); false }
+        val out = tools.call("browser_type", JSONObject().put("ref", ref).put("text", "secret"))
+        assertEquals("POLICY_DENIED", out.code())
+        assertTrue(out.output.contains("part"))
+        assertEquals(1, host.commits.size)
+        assertTrue(host.taps.isEmpty())
+        assertTrue(host.cancelledTaps.isEmpty())
+    }
+
+    @Test
+    fun `taking the tab back mid-tap cancels the touch`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        host.duringTap = { AgentTabs.release(1) }
+        assertEquals("POLICY_DENIED", tools.call("browser_click", JSONObject().put("ref", ref)).code())
+        assertTrue(host.taps.isEmpty())
+        assertEquals(listOf(100f to 200f), host.cancelledTaps)
+    }
+
+    @Test
+    fun `taking the tab back before a key press sends no key`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        host.control = JSONObject().put("role", "textbox").put("tag", "input").put("name", "Search")
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        // Taken back while the focus script runs, before the key goes in.
+        host.onScript = { op -> if (op == "focus") AgentTabs.release(1) }
+        assertEquals("POLICY_DENIED", tools.call("browser_press", JSONObject().put("ref", ref).put("key", "Enter")).code())
+        assertTrue(host.keys.isEmpty())
+    }
+
+    @Test
+    fun `a scroll is the page's own scroll, never a touch`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+        val snap = tools.call("browser_snapshot").result()
+        val token = snap.getJSONObject("page").getJSONArray("elements").getJSONObject(0).getString("ref").substringBefore('_')
+        val out = tools.call("browser_scroll", JSONObject().put("ref", token + "_viewport").put("direction", "down").put("pages", 1))
+        assertFalse(out.output, out.isError)
+        assertEquals("moved", out.result().getString("result"))
+        assertTrue(host.scripts.any { it.startsWith("PAGE(\"scroll\"") && it.contains("\"pages\":1") })
+        assertTrue(host.taps.isEmpty())
+        assertTrue(asked.single().action is AgentAction.Scroll)
+    }
+
+    @Test
+    fun `a navigation runs only on the document and site the card named`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+        // The tab moves to another site while the card is up.
+        answer = { host.add(page(1, url = "other.example/", document = 4)); ApprovalOutcome.Approved }
+        assertEquals("STALE_ELEMENT_REFERENCE", tools.call("browser_navigate", JSONObject().put("url", "https://example.com/next")).code())
+        assertTrue(host.navigations.isEmpty())
+    }
+
+    @Test
+    fun `a dialog shown again after the approval isn't answered by it`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+        host.dialog = AgentDialog("confirm", "Delete?", null, "https://embedded.example/frame", serial = 1)
+        val ref = tools.call("browser_get_dialog").result().getJSONObject("dialog").getString("dialogRef")
+        // The page reloads under the card and asks the very same thing again.
+        answer = { host.dialog = host.dialog!!.copy(serial = 2); ApprovalOutcome.Approved }
+        assertEquals("STALE_ELEMENT_REFERENCE", tools.call("browser_handle_dialog", JSONObject().put("dialogRef", ref).put("accept", true)).code())
+        assertTrue(host.answers.isEmpty())
+        // The card names the frame that opened the dialog, the approval the tab's site.
+        val a = asked.single()
+        assertEquals("embedded.example", (a.action as AgentAction.Dialog).from)
+        assertEquals("example.com", a.site)
     }
 }

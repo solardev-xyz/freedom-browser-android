@@ -152,9 +152,10 @@ internal class BrowserToolset(
 
     private suspend fun navigate(url: String): ToolOutcome {
         val tab = heldTab()
-        approve(tab.id, tab.site, tab.document, AgentAction.Navigate(url, newTab = false), null)
+        val approval = approve(tab.id, tab.site, tab.document, AgentAction.Navigate(url, newTab = false), null)
         onMain {
-            ownedTab(tab.id, readable = false)
+            // Still this chat's tab, on the document and site the card named.
+            stillBound(approval, started = false)
             host().navigate(tab.id, url)
         }
         val now = awaitCommit(tab.id, before = tab.document) ?: ownedTab(tab.id, readable = false)
@@ -185,9 +186,23 @@ internal class BrowserToolset(
         return ok(JSONObject().put("stopped", true))
     }
 
-    private suspend fun runScript(tab: AgentTab, op: String, args: JSONObject, timeoutMs: Long = 5_000): JSONObject {
+    /**
+     * Runs the page script's [op]. With [guard] (an approved action's
+     * approval, and whether part of it already ran) the binding is
+     * checked on the main thread just before the script goes in.
+     */
+    private suspend fun runScript(
+        tab: AgentTab,
+        op: String,
+        args: JSONObject,
+        timeoutMs: Long = 5_000,
+        guard: Pair<AgentApproval, Boolean>? = null,
+    ): JSONObject {
         val script = pageScript() ?: throw ToolError(ToolError.INTERNAL, "The page script is missing.")
-        val raw = onMain { host().evaluate(tab.id, "$script(${JSONObject.quote(op)},$args)", timeoutMs) }
+        val raw = onMain {
+            guard?.let { (approval, started) -> stillBound(approval, started) }
+            host().evaluate(tab.id, "$script(${JSONObject.quote(op)},$args)", timeoutMs)
+        }
         return parseResult(raw) ?: throw ToolError(
             ToolError.CAPABILITY_UNAVAILABLE,
             "The page didn't answer. It may be blocked on a dialog (see browser_get_dialog) or still loading.",
@@ -298,6 +313,7 @@ internal class BrowserToolset(
         val ref = resolveRef(tab, args.ref)
         if (ref.viewport && kind != "scroll") throw ToolError(ToolError.INVALID_ARGUMENT, "Use the viewport reference only with browser_scroll.")
         val target = target(tab, ref, if (kind == "scroll") "scroll" else kind, args.key)
+        if (kind == "type") checkTypedLineBreaks(args.text!!, target)
         val action = when (kind) {
             "click" -> AgentAction.Click(target)
             "type" -> AgentAction.Type(target, args.text!!, args.replace)
@@ -319,104 +335,175 @@ internal class BrowserToolset(
         }
         val now = ownedTab(tab.id, readable = true)
         val fresh = target(now, ref, if (kind == "scroll") "scroll" else kind, args.key)
-        when (ApprovalBinding.check(approval, bindingOf(now), fresh)) {
-            null -> Unit
-            ApprovalBinding.Refusal.TabGone -> throw ToolError(ToolError.TAB_NOT_FOUND, "The tab closed before the action ran. Nothing was done.")
-            ApprovalBinding.Refusal.NotHeld -> throw ToolError(ToolError.POLICY_DENIED, "The user took the tab back. Nothing was done.")
-            ApprovalBinding.Refusal.Changed -> throw ToolError(
-                ToolError.STALE_ELEMENT_REFERENCE,
-                "The page changed after the user approved, so nothing was done. Take a new snapshot.",
-            )
-        }
+        ApprovalBinding.check(approval, bindingOf(now), fresh)?.let { throw refusalError(it, started = false) }
         val record = ref.record
+        val run = Run(now, record, ref, approval)
         return when (kind) {
-            "click" -> click(now, record, ref)
-            "type" -> type(now, record, ref, args.text!!, args.replace)
-            "select" -> select(now, record, ref, args.values!!)
-            "press" -> press(now, record, ref, args.key!!)
-            else -> scroll(now, record, ref, args.direction!!, args.pages)
+            "click" -> click(run)
+            "type" -> type(run, args.text!!, args.replace)
+            "select" -> select(run, args.values!!)
+            "press" -> press(run, args.key!!)
+            else -> scroll(run, args.direction!!, args.pages)
         }
     }
 
+    /** An approved action about to run: its tab as re-checked, the control's reference, the approval. */
+    private class Run(val tab: AgentTab, val record: SnapshotRefs.Record, val ref: SnapshotRefs.Ref, val approval: AgentApproval)
+
     private fun bindingOf(tab: AgentTab) = ApprovalBinding.TabNow(AgentTabs.holder(tab.id), tab.private, tab.site, tab.document)
 
-    private suspend fun point(tab: AgentTab, record: SnapshotRefs.Record, ref: SnapshotRefs.Ref): JSONObject {
-        val p = runScript(tab, "point", refArgs(record, ref.index, ref.fingerprint!!))
+    /**
+     * On the main thread, immediately before an input goes into the page:
+     * the chat still holds the tab, on the document and site the card
+     * named. Take back (or a navigation) between an action's steps stops
+     * the rest of it; [started] says whether part of it already ran.
+     */
+    private fun stillBound(approval: AgentApproval, started: Boolean) {
+        val now = host().tab(approval.tabId)
+        ApprovalBinding.check(approval, now?.let(::bindingOf))?.let { throw refusalError(it, started) }
+    }
+
+    private fun refusalError(refusal: ApprovalBinding.Refusal, started: Boolean): ToolError {
+        val done = if (started) "The action stopped part way; part of it may already have reached the page." else "Nothing was done."
+        return when (refusal) {
+            ApprovalBinding.Refusal.TabGone -> ToolError(ToolError.TAB_NOT_FOUND, "The tab closed before the action ran. $done")
+            ApprovalBinding.Refusal.NotHeld -> ToolError(ToolError.POLICY_DENIED, "The user took the tab back. $done")
+            ApprovalBinding.Refusal.Changed -> ToolError(
+                ToolError.STALE_ELEMENT_REFERENCE,
+                "The page changed after the user approved. $done Take a new snapshot.",
+            )
+        }
+    }
+
+    /**
+     * Line breaks a field would take differently from what the card
+     * shows: Chromium's input connection turns a lone line break into the
+     * Enter key (which can send a form or a message), and a one-line
+     * field drops them. Refused before asking: Enter is browser_press,
+     * whose card says when it sends a form.
+     */
+    private fun checkTypedLineBreaks(text: String, target: PageTarget) {
+        if (!ApprovalText.hasLineBreak(text)) return
+        if (ApprovalText.onlyLineBreaks(text)) {
+            throw ToolError(
+                ToolError.INVALID_ARGUMENT,
+                "A line break on its own is sent as the Enter key. To press Enter, use browser_press with key Enter.",
+            )
+        }
+        if (target.tag == "input") {
+            throw ToolError(
+                ToolError.INVALID_ARGUMENT,
+                "This is a one-line field: type the text without line breaks, and use browser_press with key Enter to submit.",
+            )
+        }
+    }
+
+    private suspend fun point(r: Run, started: Boolean): JSONObject {
+        val p = runScript(r.tab, "point", refArgs(r.record, r.ref.index, r.ref.fingerprint!!), guard = r.approval to started)
         if (p.has("error")) throw refError(p.optString("error"))
         return p
     }
 
-    private suspend fun click(tab: AgentTab, record: SnapshotRefs.Record, ref: SnapshotRefs.Ref): ToolOutcome {
-        val p = point(tab, record, ref)
-        if (!onMain { host().tap(tab.id, p.getDouble("x").toFloat(), p.getDouble("y").toFloat()) }) {
-            throw ToolError(ToolError.ELEMENT_NOT_INTERACTABLE, "The element isn't inside the visible page. Nothing was clicked.")
+    /** A tap, checked against the approval just before it lands and again before the finger lifts. */
+    private suspend fun tap(r: Run, p: JSONObject, started: Boolean): Boolean = onMain {
+        stillBound(r.approval, started)
+        val approval = r.approval
+        val ok = host().tap(r.tab.id, p.getDouble("x").toFloat(), p.getDouble("y").toFloat()) {
+            runCatching { stillBound(approval, true) }.isSuccess
         }
-        return ok(afterAction(tab, JSONObject().put("clicked", true)))
+        // Let go of (cancelled) because the tab was taken back: say so.
+        if (!ok) stillBound(approval, true)
+        ok
     }
 
-    private suspend fun type(tab: AgentTab, record: SnapshotRefs.Record, ref: SnapshotRefs.Ref, text: String, replace: Boolean): ToolOutcome {
-        suspend fun focus() {
-            val focused = runScript(tab, "focus", refArgs(record, ref.index, ref.fingerprint!!).put("action", "type").put("replace", replace))
+    private suspend fun click(r: Run): ToolOutcome {
+        val p = point(r, started = false)
+        if (!tap(r, p, started = true)) {
+            throw ToolError(ToolError.ELEMENT_NOT_INTERACTABLE, "The element isn't inside the visible page. Nothing was clicked.")
+        }
+        return ok(afterAction(r.tab, JSONObject().put("clicked", true)))
+    }
+
+    private suspend fun type(r: Run, text: String, replace: Boolean): ToolOutcome {
+        val tab = r.tab
+        suspend fun focus(started: Boolean) {
+            val focused = runScript(
+                tab, "focus",
+                refArgs(r.record, r.ref.index, r.ref.fingerprint!!).put("action", "type").put("replace", replace),
+                guard = r.approval to started,
+            )
             if (focused.has("error")) throw refError(focused.optString("error"))
+        }
+        suspend fun commit(): Boolean = onMain {
+            stillBound(r.approval, started = true)
+            host().commitText(tab.id, text)
         }
         // Focused by script, then typed through the WebView's input
         // connection. A tap would open the page's own touch handling (a
         // search box's overlay, say) and move the field away.
-        focus()
-        var typed = onMain { host().commitText(tab.id, text) }
+        focus(started = false)
+        var typed = commit()
         if (!typed) {
             // No input connection to a field focused by script: Chromium
             // opens one for a field focused by touch, as for the user's typing.
-            val p = point(tab, record, ref)
-            onMain { host().tap(tab.id, p.getDouble("x").toFloat(), p.getDouble("y").toFloat()) }
+            val p = point(r, started = true)
+            tap(r, p, started = true)
             delay(150)
-            focus()
-            typed = onMain { host().commitText(tab.id, text) }
+            focus(started = true)
+            typed = commit()
         }
         if (!typed) {
             throw ToolError(ToolError.ELEMENT_NOT_INTERACTABLE, "The field didn't take keyboard input. Nothing was typed.")
         }
         delay(100)
-        val value = runScript(tab, "value", refArgs(record, ref.index, ref.fingerprint!!))
+        val value = runScript(tab, "value", refArgs(r.record, r.ref.index, r.ref.fingerprint!!))
         val now = value.optString("value")
         val landed = if (replace) now == text else now.endsWith(text)
         return ok(afterAction(tab, JSONObject().put("typed", true).put("valueMatches", landed)))
     }
 
-    private suspend fun select(tab: AgentTab, record: SnapshotRefs.Record, ref: SnapshotRefs.Ref, values: List<String>): ToolOutcome {
-        val r = runScript(tab, "select", refArgs(record, ref.index, ref.fingerprint!!).put("values", JSONArray(values)))
-        if (r.has("error")) throw refError(r.optString("error"))
-        return ok(afterAction(tab, JSONObject().put("selected", JSONArray(values)).put("trusted", false)))
+    private suspend fun select(r: Run, values: List<String>): ToolOutcome {
+        val s = runScript(
+            r.tab, "select",
+            refArgs(r.record, r.ref.index, r.ref.fingerprint!!).put("values", JSONArray(values)),
+            guard = r.approval to false,
+        )
+        if (s.has("error")) throw refError(s.optString("error"))
+        return ok(afterAction(r.tab, JSONObject().put("selected", JSONArray(values)).put("trusted", false)))
     }
 
-    private suspend fun press(tab: AgentTab, record: SnapshotRefs.Record, ref: SnapshotRefs.Ref, key: String): ToolOutcome {
-        val focused = runScript(tab, "focus", refArgs(record, ref.index, ref.fingerprint!!).put("action", "press"))
+    private suspend fun press(r: Run, key: String): ToolOutcome {
+        val focused = runScript(
+            r.tab, "focus",
+            refArgs(r.record, r.ref.index, r.ref.fingerprint!!).put("action", "press"),
+            guard = r.approval to false,
+        )
         if (focused.has("error")) throw refError(focused.optString("error"))
-        if (!onMain { host().key(tab.id, BrowserArgs.keyCode(key)) }) {
+        val pressed = onMain {
+            stillBound(r.approval, started = true)
+            host().key(r.tab.id, BrowserArgs.keyCode(key))
+        }
+        if (!pressed) {
             throw ToolError(ToolError.ELEMENT_NOT_INTERACTABLE, "The key couldn't be pressed. Nothing was sent.")
         }
-        return ok(afterAction(tab, JSONObject().put("pressed", key)))
+        return ok(afterAction(r.tab, JSONObject().put("pressed", key)))
     }
 
-    private suspend fun scroll(tab: AgentTab, record: SnapshotRefs.Record, ref: SnapshotRefs.Ref, direction: String, pages: Double): ToolOutcome {
-        val args = if (ref.viewport) JSONObject().put("viewport", true) else refArgs(record, ref.index, ref.fingerprint!!)
+    /**
+     * Scrolls the region by script (`scrollBy`, instant), not by a touch
+     * drag: a drag is a swipe to the page's own touch handlers (a mail
+     * row's swipe to archive, a carousel), which a card saying Scroll
+     * doesn't cover. The page sees only the scroll itself.
+     */
+    private suspend fun scroll(r: Run, direction: String, pages: Double): ToolOutcome {
+        val args = if (r.ref.viewport) JSONObject().put("viewport", true) else refArgs(r.record, r.ref.index, r.ref.fingerprint!!)
         args.put("direction", direction)
-        val p = runScript(tab, "scrollPoint", args)
-        if (p.has("error")) throw refError(p.optString("error"))
-        val before = p.getJSONObject("scroll")
-        if (p.optBoolean("boundary")) return ok(JSONObject().put("result", "boundary").put("scroll", before))
-        val horizontal = direction == "left" || direction == "right"
-        val factor = p.optDouble("pixelsPerCss", 1.0)
-        val distance = (if (horizontal) before.optDouble("width") else before.optDouble("height")) * pages * factor
-        // The finger moves against the content: down scrolls by dragging up.
-        val sign = if (direction == "down" || direction == "right") -1 else 1
-        val x = p.getDouble("x").toFloat()
-        val y = p.getDouble("y").toFloat()
-        val dx = if (horizontal) (sign * distance).toFloat() else 0f
-        val dy = if (horizontal) 0f else (sign * distance).toFloat()
-        onMain { host().drag(tab.id, x, y, dx, dy) }
+        val s = runScript(r.tab, "scroll", JSONObject(args.toString()).put("pages", pages), guard = r.approval to false)
+        if (s.has("error")) throw refError(s.optString("error"))
+        val before = s.getJSONObject("scroll")
+        if (s.optBoolean("boundary")) return ok(JSONObject().put("result", "boundary").put("scroll", before))
         delay(200)
-        val after = runScript(tab, "scrollState", args).optJSONObject("scroll")
+        val after = runScript(r.tab, "scrollState", args).optJSONObject("scroll")
         val moved = after != null && (after.optInt("x") != before.optInt("x") || after.optInt("y") != before.optInt("y"))
         return ok(JSONObject().put("result", if (moved) "moved" else "no_movement").put("before", before).put("after", after ?: JSONObject.NULL))
     }
@@ -480,13 +567,20 @@ internal class BrowserToolset(
         if (onMain { host().dialog(tab.id) } != dialog) {
             throw ToolError(ToolError.STALE_ELEMENT_REFERENCE, "That dialog is no longer open.")
         }
-        approve(
+        // The card names the frame that opened the dialog (an embedded
+        // page's, say); the approval stays bound to the tab's own site.
+        val from = dialog.url?.takeIf { agentReadable(it) }?.let { AgentTab.siteOf(it) }?.ifEmpty { null } ?: tab.site
+        val approval = approve(
             tab.id, tab.site, tab.document,
-            AgentAction.Dialog(dialog.kind, ApprovalText.flatten(dialog.message, 500), h.accept, h.promptText),
+            AgentAction.Dialog(dialog.kind, ApprovalText.flatten(dialog.message, 500), h.accept, h.promptText, from),
             null,
         )
-        ownedTab(tab.id, readable = false)
-        if (!onMain { host().answerDialog(tab.id, dialog, h.accept, h.promptText) }) {
+        val answered = onMain {
+            stillBound(approval, started = false)
+            // The same request, not one that merely reads the same (a reload showing it again).
+            if (host().dialog(tab.id) != dialog) false else host().answerDialog(tab.id, dialog, h.accept, h.promptText)
+        }
+        if (!answered) {
             throw ToolError(ToolError.STALE_ELEMENT_REFERENCE, "The dialog closed before the answer could be given.")
         }
         synchronized(dialogs) { dialogs.remove(h.dialogRef) }
@@ -510,6 +604,7 @@ internal class BrowserToolset(
             ApprovalOutcome.Declined -> throw ToolError(
                 ToolError.USER_DECLINED,
                 "The user declined this action. Nothing was done.",
+                declined = true,
             )
             ApprovalOutcome.Withdrawn -> throw ToolError(
                 ToolError.APPROVAL_REQUIRED,
@@ -604,13 +699,18 @@ internal object TabPolicy {
 }
 
 /** A tool's refusal: a stable code and desktop's recovery guidance (`tool-error-recovery.js`). */
-internal class ToolError(val code: String, message: String) : Exception(message) {
+internal class ToolError(
+    val code: String,
+    message: String,
+    /** The user's own Don't allow, which ends the turn ([ToolOutcome.declined]); never a withdrawal. */
+    private val declined: Boolean = false,
+) : Exception(message) {
     fun outcome(operation: String): ToolOutcome {
         val recovery = recoveryFor(code)
         val text = "[$code] $message\nRecovery: " + JSONObject().put("action", recovery.first).put("instruction", recovery.second).apply {
             recovery.third?.let { put("tool", it) }
         }
-        return ToolOutcome(text, isError = true)
+        return ToolOutcome(text, isError = true, declined = declined)
     }
 
     companion object {

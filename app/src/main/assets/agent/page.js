@@ -503,34 +503,6 @@
     return toViewPoint(frameWindow, x, y);
   }
 
-  function scrollPoint(element, frameWindow, direction) {
-    var horizontal = direction === 'left' || direction === 'right';
-    var axis = horizontal ? 'horizontal' : 'vertical';
-    var isViewport = element === element.ownerDocument.scrollingElement;
-    var rect = isViewport ? { left: 0, top: 0, right: frameWindow.innerWidth, bottom: frameWindow.innerHeight } : element.getBoundingClientRect();
-    var left = Math.max(0, rect.left), top = Math.max(0, rect.top);
-    var right = Math.min(frameWindow.innerWidth, rect.right), bottom = Math.min(frameWindow.innerHeight, rect.bottom);
-    if (right - left < 2 || bottom - top < 2) return null;
-    var fs = [0.5, 0.3, 0.7];
-    for (var i = 0; i < fs.length; i++) {
-      for (var j = 0; j < fs.length; j++) {
-        var x = Math.floor(left + (right - left) * fs[j]);
-        var y = Math.floor(top + (bottom - top) * fs[i]);
-        var hit = deepHit(element.ownerDocument, x, y);
-        var nearest = null;
-        while (hit) {
-          if (hit === element.ownerDocument.scrollingElement || readScrollState(hit)[axis]) { nearest = hit; break; }
-          hit = parentOf(hit);
-        }
-        if (nearest === null && isViewport) nearest = element;
-        if (nearest !== element) continue;
-        var p = toViewPoint(frameWindow, x, y);
-        if (p) return p;
-      }
-    }
-    return null;
-  }
-
   function scrollTargetFor() {
     if (a.viewport) {
       var el = document.scrollingElement;
@@ -613,7 +585,9 @@
       return actual.length === values.length && actual.every(function (x) { return wanted[x]; })
         ? { ok: true, trusted: false } : { error: 'selection_not_applied' };
     }
-    case 'scrollPoint': {
+    case 'scroll': {
+      // By script, never a touch drag: a drag is a swipe to the page's own
+      // touch handlers (swipe to archive), which a Scroll card doesn't cover.
       var st = scrollTargetFor();
       if (st.error) return st;
       var state = readScrollState(st.element);
@@ -624,11 +598,10 @@
       var min = horizontal ? state.minX : 0;
       var max = horizontal ? state.maxX : state.maxY;
       if (forward ? coord >= max - 1 : coord <= min + 1) return { ok: true, scroll: state, boundary: true };
-      var sp = scrollPoint(st.element, st.frameWindow, a.direction);
-      if (!sp) return { error: 'not_interactable' };
-      var vv = window.visualViewport;
-      var factor = (vv ? vv.scale : 1) * (window.devicePixelRatio || 1);
-      return { ok: true, scroll: state, x: sp.x, y: sp.y, pixelsPerCss: factor };
+      var pages = Number(a.pages) > 0 ? Number(a.pages) : 1;
+      var distance = Math.round((horizontal ? state.width : state.height) * pages) * (forward ? 1 : -1);
+      st.element.scrollBy({ left: horizontal ? distance : 0, top: horizontal ? 0 : distance, behavior: 'instant' });
+      return { ok: true, scroll: state };
     }
     case 'scrollState': {
       var ss = scrollTargetFor();

@@ -8,8 +8,12 @@ import java.time.format.TextStyle
 import java.util.Locale
 import org.json.JSONObject
 
-/** What a tool returned: [output] goes back to the model as the call's result. */
-internal data class ToolOutcome(val output: String, val isError: Boolean = false)
+/**
+ * What a tool returned: [output] goes back to the model as the call's
+ * result. [declined]: the user said no on an approval card; the turn
+ * ends there ([AgentLoop]), so nothing else is asked of them in it.
+ */
+internal data class ToolOutcome(val output: String, val isError: Boolean = false, val declined: Boolean = false)
 
 /** A tool the agent can run. [run] gets the call's arguments as an object. */
 internal interface AgentTool {
