@@ -578,6 +578,53 @@ class SubscriptionProvidersTest {
     }
 
     @Test
+    fun `starting another sign-in right after one finished doesn't stop its model list`() = runBlocking {
+        codexServer()
+        routes["/meta/oidc/device/authorization/"] = {
+            json(
+                JSONObject().put("device_code", "dc").put("user_code", "WXYZ-9876").put("interval", 1)
+                    .put("verification_uri", "https://auth.meta.com/device"),
+            )
+        }
+        routes["/meta/oidc/device/token/"] = { json(JSONObject().put("error", "authorization_pending"), 400) }
+        val release = CountDownLatch(1)
+        val list = routes["/openai-codex/codex/models"]!!
+        routes["/openai-codex/codex/models"] = {
+            release.await(5, TimeUnit.SECONDS)
+            list()
+        }
+        assertTrue(providers.setEnabled(true))
+        assertEquals(LoginState.Done(SubscriptionAuth.CODEX), signIn(SubscriptionAuth.CODEX))
+        withTimeout(5_000) { while (requests("/openai-codex/codex/models").isEmpty()) delay(20) }
+        // Meta's sign-in, then cancelling it, each end the sign-in job under way.
+        assertTrue(providers.startLogin(SubscriptionAuth.META))
+        providers.cancelLogin()
+        release.countDown()
+        withTimeout(5_000) { while (providers.models.first()[SubscriptionAuth.CODEX] == null) delay(20) }
+        assertEquals(listOf(AgentModel("gpt-6.1-sol", "GPT-6.1 Sol")), providers.models.first()[SubscriptionAuth.CODEX])
+    }
+
+    @Test
+    fun `a sign-in this phone can't read any more asks to sign in again, not for a key`() = runBlocking {
+        codexServer()
+        assertTrue(providers.setEnabled(true))
+        assertEquals(LoginState.Done(SubscriptionAuth.CODEX), signIn(SubscriptionAuth.CODEX))
+        withTimeout(5_000) { while (providers.models.first()[SubscriptionAuth.CODEX] == null) delay(20) }
+        // The Keystore key is gone.
+        val other = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val g = RequestGate()
+        val lost = AgentProviders(AgentStore(file, modelFile, AesGcmCipher { other }), g, ProviderClient(g))
+        val before = server.requestCount
+        assertEquals(
+            ChatTarget.Unavailable(ChatError.SignInLost),
+            lost.chatTarget(ModelRef(SubscriptionAuth.CODEX, "gpt-6.1-sol")),
+        )
+        assertEquals(R.string.agent_error_sign_in_lost, errorText(ChatError.SignInLost))
+        assertEquals(RefreshResult.NoKey, lost.refreshModels(SubscriptionAuth.CODEX))
+        assertEquals(before, server.requestCount)
+    }
+
+    @Test
     fun `a codex test connection reads the streamed answer`() = runBlocking {
         codexServer()
         assertTrue(providers.setEnabled(true))

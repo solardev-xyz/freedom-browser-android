@@ -176,6 +176,7 @@
     <string name="agent_error_bad_url">The server\'s address isn\'t allowed. Check it in Settings → AI.</string>
     <string name="agent_error_unauthorized">The provider didn\'t accept the API key.</string>
     <string name="agent_error_account_refused">The provider refused this account. Your plan may not include it.</string>
+    <string name="agent_error_sign_in_lost">This phone can\'t read your sign-in any more. Sign in again under Settings → AI → Models &amp; providers.</string>
     <string name="agent_error_sign_in_again">Your sign-in has ended. Sign in again under Settings → AI → Models &amp; providers.</string>
     <string name="agent_error_model_not_found">The provider doesn\'t have this model.</string>
     <string name="agent_error_rate_limited">The provider is busy or this key has reached its limit. Try again later.</string>

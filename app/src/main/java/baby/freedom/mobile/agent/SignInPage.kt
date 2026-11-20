@@ -16,12 +16,12 @@ import android.os.Bundle
  *
  * A Custom Tab is a `VIEW` intent with the Custom Tabs session extra
  * (what androidx.browser's `CustomTabsIntent` builds), sent to a browser
- * that offers the Custom Tabs service: the default one if it does, else
- * the first that does. Freedom offers none, so it's never picked. With
- * no such browser on the phone, the page opens as a plain link in
- * another browser (the default one, if that isn't Freedom); with none
- * but Freedom, nothing is opened and the page asks the user to open
- * the address themselves.
+ * that offers the Custom Tabs service and opens https links: the default
+ * one if it does, else the first that does. Freedom offers none, so it's
+ * never picked. If there's no such browser, or it can't be started, the
+ * page opens as a plain link in another browser (the default one, if that
+ * isn't Freedom); with none but Freedom, nothing is opened and the page
+ * asks the user to open the address themselves.
  */
 internal object SignInPage {
     private const val EXTRA_SESSION = "android.support.customtabs.extra.SESSION"
@@ -29,44 +29,44 @@ internal object SignInPage {
 
     /** Opens [url], already checked by [SubscriptionAuth.verificationUrl]. False if nothing could. */
     fun open(context: Context, url: String): Boolean {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            .addCategory(Intent.CATEGORY_BROWSABLE)
-            .putExtras(Bundle().apply { putBinder(EXTRA_SESSION, null) })
-        val browser = customTabsBrowser(context, intent) ?: otherBrowser(context, intent) ?: return false
-        intent.setPackage(browser)
-        if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val pm = context.packageManager
+        val view = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
+        val browsers = pm.queryIntentActivities(view, PackageManager.MATCH_DEFAULT_ONLY)
+            .mapNotNull { it.activityInfo?.packageName }
+        val default = pm.resolveActivity(view, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
+        val withService = pm.queryIntentServices(Intent(SERVICE_ACTION), 0).mapNotNull { it.serviceInfo?.packageName }
+        val tab = Intent(view).putExtras(Bundle().apply { putBinder(EXTRA_SESSION, null) })
+        return attempts(context.packageName, browsers, default, withService)
+            .any { start(context, if (it.customTab) tab else view, it.browser) }
+    }
+
+    /** One way to open the page: in [browser], as a Custom Tab or a plain link. */
+    data class Attempt(val browser: String, val customTab: Boolean)
+
+    /**
+     * What [open] tries, in order, until one starts: a Custom Tab in a
+     * browser that opens the link ([browsers]) and offers the service
+     * ([withService]), the [default] one if it does; then the link as is in
+     * each other browser, the default one first. Never in [own] (Freedom).
+     */
+    fun attempts(own: String, browsers: List<String>, default: String?, withService: List<String>): List<Attempt> {
+        val others = browsers.filter { it != own }.distinct()
+        val first = default?.takeIf { it in others }
+        val customTabs = withService.filter { it in others }.let { s -> first?.takeIf { it in s } ?: s.firstOrNull() }
+        val plain = (listOfNotNull(first) + others).distinct().filter { it != customTabs }
+        return listOfNotNull(customTabs?.let { Attempt(it, customTab = true) }) + plain.map { Attempt(it, customTab = false) }
+    }
+
+    private fun start(context: Context, intent: Intent, browser: String): Boolean {
+        val i = Intent(intent).setPackage(browser)
+        if (context !is Activity) i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try {
-            context.startActivity(intent)
+            context.startActivity(i)
             true
         } catch (e: ActivityNotFoundException) {
             false
         } catch (e: SecurityException) {
             false
         }
-    }
-
-    /** A browser that isn't Freedom: the default one if it isn't, else the first. */
-    private fun otherBrowser(context: Context, view: Intent): String? {
-        val pm = context.packageManager
-        val own = context.packageName
-        val browsers = pm.queryIntentActivities(view, PackageManager.MATCH_DEFAULT_ONLY)
-            .mapNotNull { it.activityInfo?.packageName }
-            .filter { it != own }
-            .distinct()
-        if (browsers.isEmpty()) return null
-        val default = pm.resolveActivity(view, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
-        return default?.takeIf { it in browsers } ?: browsers.first()
-    }
-
-    private fun customTabsBrowser(context: Context, view: Intent): String? {
-        val pm = context.packageManager
-        val own = context.packageName
-        val withService = pm.queryIntentServices(Intent(SERVICE_ACTION), 0)
-            .mapNotNull { it.serviceInfo?.packageName }
-            .filter { it != own }
-            .distinct()
-        if (withService.isEmpty()) return null
-        val default = pm.resolveActivity(view, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
-        return default?.takeIf { it in withService } ?: withService.first()
     }
 }

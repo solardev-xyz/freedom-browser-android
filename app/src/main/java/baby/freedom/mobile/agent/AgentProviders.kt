@@ -295,7 +295,7 @@ internal class AgentProviders(
             is Called.Done -> called.value
             is Called.Failed -> return@withContext when (called.error) {
                 ChatError.SignInAgain -> RefreshResult.SignInAgain
-                ChatError.NoKey -> RefreshResult.NoKey
+                ChatError.NoKey, ChatError.SignInLost -> RefreshResult.NoKey
                 ChatError.Unreachable -> RefreshResult.Unreachable
                 ChatError.TimedOut -> RefreshResult.TimedOut
                 ChatError.RateLimited -> RefreshResult.RateLimited
@@ -400,7 +400,10 @@ internal class AgentProviders(
         val definition = ProviderCatalog.definition(connection.providerId)
             ?: return@withContext ChatTarget.Unavailable(ChatError.NoModel)
         val base = baseOf(connection, definition) ?: return@withContext ChatTarget.Unavailable(ChatError.BadUrl)
-        if (s.keyLost(connection)) return@withContext ChatTarget.Unavailable(ChatError.NoKey)
+        if (s.keyLost(connection)) {
+            val lost = if (definition.kind == ProviderKind.Subscription) ChatError.SignInLost else ChatError.NoKey
+            return@withContext ChatTarget.Unavailable(lost)
+        }
         when (val a = authOf(s, connection, definition)) {
             is Auth.Ready -> ChatTarget.Ready(connection, definition, base, a.key, ref.modelId, a.accountId)
             is Auth.Unavailable -> ChatTarget.Unavailable(a.error)
@@ -638,7 +641,7 @@ internal class AgentProviders(
         if (!s.enabled) return@withLock Credential.Unavailable(ChatError.AiOff)
         val connection = s.connection(connectionId) ?: return@withLock Credential.Unavailable(ChatError.KeyChanged)
         val saved = s.keys[connectionId]
-        val credential = inEffect(s, connectionId) ?: return@withLock Credential.Unavailable(ChatError.NoKey)
+        val credential = inEffect(s, connectionId) ?: return@withLock Credential.Unavailable(ChatError.SignInLost)
         // Renewed meanwhile by another caller: that one's token is the answer.
         val wasRefused = refused != null && refused == credential.access
         if (!wasRefused && !credential.due(wallClock())) return@withLock Credential.Ready(credential)
@@ -785,8 +788,21 @@ internal class AgentProviders(
             if (!saveSubscription(definition, credential, generation)) {
                 return publish(generation, if (isCurrent(generation)) LoginState.Failed(providerId, LoginFailure.SaveFailed) else null)
             }
-            // The account's own model list, where the provider has one.
-            if (definition.catalogPath != null) refreshModels(providerId)
+            // The account's own model list, where the provider has one: on
+            // its own job, so a sign-in started or cancelled next (which
+            // cancels [loginJob]) doesn't stop it. Signing out or in again
+            // does, through the revision it's fetched for.
+            if (definition.catalogPath != null) {
+                loginScope.launch {
+                    try {
+                        refreshModels(providerId)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        // Refresh models on the provider's page tries again.
+                    }
+                }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
