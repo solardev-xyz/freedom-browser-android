@@ -38,6 +38,12 @@ internal data class AgentConnection(
     val baseUrl: String? = null,
     val favorites: List<String> = emptyList(),
     val revision: Long,
+    /**
+     * Whether a key was saved for it. Kept outside the encrypted blob so a
+     * key the Keystore can no longer open still reads as lost for a LAN
+     * server, whose key is optional, rather than as a server without one.
+     */
+    val hasKey: Boolean = false,
 )
 
 /** The model chats will use unless told otherwise. */
@@ -58,6 +64,16 @@ internal data class AgentState(
     val nextRevision: Long = 1,
 ) {
     fun connection(id: String): AgentConnection? = connections.firstOrNull { it.id == id }
+
+    /**
+     * A key was saved for [c] (a hosted provider always has one) but can't
+     * be read now: its connection asks for it again, and makes no request
+     * without it rather than going out keyless.
+     */
+    fun keyLost(c: AgentConnection): Boolean {
+        if (c.id in keys) return false
+        return c.hasKey || ProviderCatalog.definition(c.providerId)?.kind == ProviderKind.ApiKey
+    }
 }
 
 /**
@@ -208,6 +224,7 @@ internal class AgentStore(
                     .put("name", c.name)
                     .put("revision", c.revision)
                     .put("favorites", JSONArray(c.favorites))
+                    .put("hasKey", c.hasKey)
                     .apply { c.baseUrl?.let { put("baseUrl", it) } },
             )
         }.toString()
@@ -227,6 +244,7 @@ internal class AgentStore(
                     baseUrl = o.optString("baseUrl").takeIf { it.isNotEmpty() },
                     favorites = if (favorites == null) emptyList() else (0 until favorites.length()).map { favorites.getString(it) },
                     revision = o.optLong("revision"),
+                    hasKey = o.optBoolean("hasKey"),
                 )
             }.distinctBy { it.id }
         }

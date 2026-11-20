@@ -255,7 +255,7 @@ internal fun AiProvidersPage(onBack: () -> Unit) {
 /** "Connected · 12 models", or that a saved key must be entered again. */
 private fun connectionStatus(state: AgentState, discovered: Map<String, List<AgentModel>>, c: AgentConnection): String {
     val definition = ProviderCatalog.definition(c.providerId)
-    if (definition?.kind == ProviderKind.ApiKey && c.id !in state.keys) return Strings.get(R.string.agent_status_key_lost)
+    if (state.keyLost(c)) return Strings.get(R.string.agent_status_key_lost)
     val count = discovered[c.id]?.size ?: definition?.bundled?.size ?: 0
     return if (count == 0) {
         Strings.get(R.string.agent_status_connected)
@@ -275,11 +275,13 @@ private fun urlHint(rejection: ProviderUrls.Rejection): String = Strings.get(
     },
 )
 
-private fun testLine(result: TestResult, model: String): String = when (result) {
+/** [keyed]: a key went with the request, so a missing model may be the key's own limit. */
+private fun testLine(result: TestResult, model: String, keyed: Boolean): String = when (result) {
     TestResult.Ok -> Strings.get(R.string.agent_test_ok, model)
     TestResult.NoKey -> Strings.get(R.string.agent_test_no_key)
     TestResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
-    TestResult.ModelNotFound -> Strings.get(R.string.agent_test_model_not_found, model)
+    TestResult.ModelNotFound ->
+        Strings.get(if (keyed) R.string.agent_test_model_not_found else R.string.agent_test_model_not_found_server, model)
     TestResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
     TestResult.ServerError -> Strings.get(R.string.agent_test_server_error)
     TestResult.Refused -> Strings.get(R.string.agent_test_refused)
@@ -356,7 +358,7 @@ private fun ProviderPage(
     val canSave = !busy && keyOk && if (isLan) urlCheck?.url != null else keyText.isNotEmpty()
     val models = connection?.let { providers.modelsOf(it, discovered) }.orEmpty()
     // A saved key stays only with the address it was saved for.
-    val urlMoved = isLan && connection != null && connection.id in state.keys &&
+    val urlMoved = isLan && connection != null && connection.hasKey &&
         urlCheck?.url?.let(ProviderUrls::display) != connection.baseUrl
 
     fun run(block: suspend () -> String?) {
@@ -452,9 +454,10 @@ private fun ProviderPage(
                                         when {
                                             !keyOk -> stringResource(R.string.agent_api_key_invalid)
                                             urlMoved && keyText.isEmpty() -> stringResource(R.string.agent_api_key_new_url)
+                                            connection != null && state.keyLost(connection) ->
+                                                stringResource(R.string.agent_status_key_lost)
                                             connection != null && connection.id in state.keys ->
                                                 stringResource(R.string.agent_api_key_saved)
-                                            connection != null && !isLan -> stringResource(R.string.agent_status_key_lost)
                                             else -> stringResource(R.string.agent_api_key_stored)
                                         },
                                     )
@@ -505,13 +508,16 @@ private fun ProviderPage(
                                 OutlinedButton(
                                     onClick = {
                                         val model = testWith ?: return@OutlinedButton
-                                        run { testLine(providers.testConnection(connection.id, model.id), model.name) }
+                                        run {
+                                            val keyed = connection.id in state.keys
+                                            testLine(providers.testConnection(connection.id, model.id), model.name, keyed)
+                                        }
                                     },
                                     enabled = !busy && testWith != null,
                                     modifier = Modifier.heightIn(min = 48.dp),
                                 ) { Text(stringResource(R.string.agent_test)) }
                                 val savedUrl = connection.baseUrl?.let { ProviderUrls.validate(it).url }
-                                if (isLan && hasKeyField && connection.id in state.keys && savedUrl != null) TextButton(
+                                if (isLan && hasKeyField && connection.hasKey && savedUrl != null) TextButton(
                                     onClick = {
                                         run {
                                             val id = providers.saveLan(definition.id, connection.id, connection.name, savedUrl, key = "")

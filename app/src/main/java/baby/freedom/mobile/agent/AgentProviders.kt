@@ -88,12 +88,13 @@ internal class AgentProviders(
             val old = s.connection(providerId)
             val revision = s.nextRevision
             gate.bump(providerId, revision)
-            val connection = old?.copy(revision = revision) ?: AgentConnection(
+            val connection = old?.copy(revision = revision, hasKey = true) ?: AgentConnection(
                 id = providerId,
                 providerId = providerId,
                 name = definition.name,
                 favorites = listOfNotNull(definition.defaultModelId),
                 revision = revision,
+                hasKey = true,
             )
             val ok = store.edit { cur ->
                 cur.copy(
@@ -136,18 +137,24 @@ internal class AgentProviders(
             val revision = s.nextRevision
             gate.bump(id, revision)
             val urlText = ProviderUrls.display(url)
+            // A different address is a different server (desktop: a new
+            // endpoint is a new connection): its saved key, favourites and
+            // default model were the old server's, and none of them follow
+            // it there. A new address without a key typed again goes without one.
+            val moved = old != null && old.baseUrl != urlText
+            val hasKey = when {
+                key == null -> !moved && old?.hasKey == true
+                else -> key.isNotEmpty()
+            }
             val connection = AgentConnection(
                 id = id,
                 providerId = providerId,
                 name = label,
                 baseUrl = urlText,
-                favorites = old?.favorites.orEmpty(),
+                favorites = if (moved) emptyList() else old?.favorites.orEmpty(),
                 revision = revision,
+                hasKey = hasKey,
             )
-            // A saved key only stays with the server it was saved for
-            // (desktop: a different endpoint is a new connection): a new
-            // address without a key typed again goes without one.
-            val moved = old != null && old.baseUrl != urlText
             val ok = store.edit { cur ->
                 val keys = when {
                     key == null && moved -> cur.keys - id
@@ -159,6 +166,7 @@ internal class AgentProviders(
                     connections = cur.connections.filter { it.id != id } + connection,
                     keys = keys,
                     nextRevision = revision + 1,
+                    defaultModel = cur.defaultModel?.takeIf { !moved || it.connectionId != id },
                 )
             }
             // Another server's models aren't this one's.
@@ -215,9 +223,13 @@ internal class AgentProviders(
         val base = baseOf(connection, definition) ?: return@withContext RefreshResult.BadUrl
         val url = ProviderClient.catalogUrl(definition, base) ?: return@withContext RefreshResult.Done
         val key = s.keys[connectionId]
-        if (definition.catalogKey && key == null) return@withContext RefreshResult.NoKey
         // OpenRouter's and NEAR AI's lists are public: their key isn't sent for them.
         val sendKey = definition.catalogKey || (definition.kind == ProviderKind.Lan && definition.id != ProviderCatalog.OLLAMA)
+        // A list that needs the key, or a server whose saved key can't be
+        // read, isn't asked for without it.
+        if ((definition.catalogKey && key == null) || (sendKey && s.keyLost(connection))) {
+            return@withContext RefreshResult.NoKey
+        }
         val (maxBytes, _) = ProviderCatalog.bounds(definition)
         val reply = client.fetch(
             connectionId, connection.revision, url,
@@ -256,7 +268,8 @@ internal class AgentProviders(
         val definition = ProviderCatalog.definition(connection.providerId) ?: return@withContext TestResult.Cancelled
         val base = baseOf(connection, definition) ?: return@withContext TestResult.BadUrl
         val key = s.keys[connectionId]
-        if (definition.kind == ProviderKind.ApiKey && key == null) return@withContext TestResult.NoKey
+        // A server whose saved key can't be read isn't tried without it.
+        if (s.keyLost(connection)) return@withContext TestResult.NoKey
         val (url, body) = ProviderClient.testRequest(definition, base, modelId)
         val reply = client.fetch(
             connectionId, connection.revision, url,

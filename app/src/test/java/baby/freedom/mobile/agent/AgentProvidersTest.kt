@@ -315,6 +315,64 @@ class AgentProvidersTest {
     }
 
     @Test
+    fun `a new server address drops the old server's favourites and default model`() = runBlocking {
+        routes["/api/tags"] = { json(tags("qwen3:8b", "gemma3:4b")) }
+        val id = connectOllama()
+        providers.refreshModels(id)
+        providers.setFavorite(id, "gemma3:4b", true)
+        providers.setDefault(id, "qwen3:8b")
+        // The same address saved again keeps them.
+        assertEquals(id, providers.saveLan(ProviderCatalog.OLLAMA, id, "", base, null))
+        assertEquals(listOf("gemma3:4b"), state.connection(id)!!.favorites)
+        assertEquals(ModelRef(id, "qwen3:8b"), state.defaultModel)
+        // Another address is another server: nothing of the old one's follows it.
+        val moved = HttpUrl.Builder().scheme("http").host("192.168.1.2").port(11434).build()
+        assertEquals(id, providers.saveLan(ProviderCatalog.OLLAMA, id, "", moved, null))
+        assertEquals(emptyList<String>(), state.connection(id)!!.favorites)
+        assertNull(state.defaultModel)
+    }
+
+    @Test
+    fun `a moved server keeps another connection's default model`() = runBlocking {
+        routes["/api/tags"] = { json(tags("a")) }
+        val id = connectOllama()
+        assertTrue(providers.saveApiKey("openai", "sk-1"))
+        providers.setDefault("openai", "gpt-x")
+        val moved = HttpUrl.Builder().scheme("http").host("192.168.1.2").port(11434).build()
+        providers.saveLan(ProviderCatalog.OLLAMA, id, "", moved, null)
+        assertEquals(ModelRef("openai", "gpt-x"), state.defaultModel)
+    }
+
+    @Test
+    fun `a compatible server whose key can't be read asks for it and sends nothing keyless`() = runBlocking {
+        routes["/v1/models"] = { json(JSONObject().put("data", JSONArray().put(JSONObject().put("id", "qwen")))) }
+        routes["/v1/chat/completions"] = { json(chatReply()) }
+        providers.setEnabled(true)
+        val url = base.newBuilder().addPathSegment("v1").build()
+        val keyed = providers.saveLan(ProviderCatalog.COMPATIBLE, null, "Keyed", url, key = "lan-secret")!!
+        val open = providers.saveLan(ProviderCatalog.COMPATIBLE, null, "Open", url, key = null)!!
+        assertTrue(state.connection(keyed)!!.hasKey)
+        assertFalse(state.connection(open)!!.hasKey)
+        val before = server.requestCount
+        // The Keystore key is gone.
+        val other = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val g = RequestGate()
+        val lost = AgentProviders(AgentStore(file, modelFile, AesGcmCipher { other }), g, ProviderClient(g))
+        val s = lost.state.first()
+        assertTrue(s.keysUnreadable)
+        assertTrue(s.keyLost(s.connection(keyed)!!))
+        assertFalse(s.keyLost(s.connection(open)!!))
+        assertEquals(RefreshResult.NoKey, lost.refreshModels(keyed))
+        assertEquals(TestResult.NoKey, lost.testConnection(keyed, "qwen"))
+        assertEquals(before, server.requestCount)
+        // A server saved without a key still works as one.
+        assertEquals(TestResult.Ok, lost.testConnection(open, "qwen"))
+        // Remove key: it's a server without a key again, not one with a lost key.
+        assertEquals(keyed, lost.saveLan(ProviderCatalog.COMPATIBLE, keyed, "Keyed", url, key = ""))
+        assertFalse(lost.state.first().keyLost(lost.state.first().connection(keyed)!!))
+    }
+
+    @Test
     fun `keys with spaces or line breaks are refused`() = runBlocking {
         providers.setEnabled(true)
         assertFalse(providers.saveApiKey("openai", "sk-a b"))
@@ -400,6 +458,7 @@ class AgentProvidersTest {
             val moved = other.url("/v1").newBuilder().host("127.0.0.1").build()
             assertEquals(id, providers.saveLan(ProviderCatalog.COMPATIBLE, id, "Box", moved, key = null))
             assertFalse(id in state.keys)
+            assertFalse(state.connection(id)!!.hasKey)
             assertEquals(RefreshResult.Done, providers.refreshModels(id))
             assertNull(other.takeRequest().getHeader("Authorization"))
         } finally {
@@ -410,5 +469,6 @@ class AgentProvidersTest {
         assertEquals("k2", state.keys[id])
         providers.saveLan(ProviderCatalog.COMPATIBLE, id, "Box", url, key = "")
         assertFalse(id in state.keys)
+        assertFalse(state.connection(id)!!.hasKey)
     }
 }

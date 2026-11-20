@@ -70,7 +70,7 @@
     <string name="agent_api_key_stored">Stored encrypted on this phone, never in a backup.</string>
     <string name="agent_api_key_invalid">A key has no spaces or line breaks.</string>
     <string name="agent_api_key_optional">API key (optional)</string>
-    <string name="agent_api_key_new_url">A new address needs its key typed again; the saved one stays with the old address.</string>
+    <string name="agent_api_key_new_url">A new address needs its key typed again; the saved one isn\'t sent to it.</string>
     <string name="agent_remove_key">Remove key</string>
     <string name="agent_key_removed">Key removed.</string>
     <string name="agent_show_key">Show key</string>
@@ -105,6 +105,7 @@
     <string name="agent_test_no_key">Save a key first.</string>
     <string name="agent_test_unauthorized">The provider didn\'t accept the key.</string>
     <string name="agent_test_model_not_found">The provider doesn\'t offer %1$s to this key.</string>
+    <string name="agent_test_model_not_found_server">The server doesn\'t offer %1$s.</string>
     <string name="agent_test_rate_limited">The provider is limiting requests. Try again later.</string>
     <string name="agent_test_server_error">The provider had an error. Try again later.</string>
     <string name="agent_test_refused">The provider refused the request.</string>
