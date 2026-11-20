@@ -53,11 +53,12 @@ internal fun publishAllowed(action: AgentAction.Publish, acknowledged: Collectio
 
 /**
  * The card for `swarm_publish` (#597), inside [AgentApprovalHost]'s
- * sheet: the fixed public-and-permanent notice, the text that goes out
- * (all of it up to [PUBLISH_PREVIEW_CHARS], and how much more there is),
- * what the pre-publish check found, each secret with its own "Publish
- * this anyway" box, and the stamp it would use. [settle] is the sheet's
- * guarded answer.
+ * sheet: the fixed public-and-permanent notice, what the pre-publish
+ * check found, each secret with its own "Publish this anyway" box, the
+ * stamp it would use, and the text that goes out (all of it up to
+ * [PUBLISH_PREVIEW_CHARS], and how much more there is). [settle] is the sheet's
+ * guarded answer. What was found and the stamp come first, so the reason
+ * the button is off shows without scrolling past a long text.
  */
 @Composable
 internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction.Publish, tap: ArmedTapGuard, settle: (ApprovalOutcome) -> Unit) {
@@ -77,7 +78,27 @@ internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction
         Spacer(Modifier.height(4.dp))
         Text(stringResource(R.string.agent_publish_permanent), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(12.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(8.dp))
+        Text(stringResource(R.string.agent_publish_findings_title), style = MaterialTheme.typography.titleSmall)
+        if (action.findings.isEmpty()) {
+            Text(stringResource(R.string.agent_publish_findings_none), style = MaterialTheme.typography.bodyMedium)
+        } else {
+            if (action.findings.any { it.blocking }) {
+                Text(stringResource(R.string.agent_publish_findings_blocking), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+            }
+            for (f in action.findings) FindingRow(f, f.id in acknowledged) { on -> if (on) acknowledged.add(f.id) else acknowledged.remove(f.id) }
+        }
 
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(8.dp))
+        Text(stringResource(R.string.agent_publish_postage_title), style = MaterialTheme.typography.titleSmall)
+        PostageRows(action.postage)
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(8.dp))
         val total = action.text.codePointCount(0, action.text.length)
         Text(
             stringResource(
@@ -106,25 +127,6 @@ internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-        Spacer(Modifier.height(8.dp))
-        Text(stringResource(R.string.agent_publish_findings_title), style = MaterialTheme.typography.titleSmall)
-        if (action.findings.isEmpty()) {
-            Text(stringResource(R.string.agent_publish_findings_none), style = MaterialTheme.typography.bodyMedium)
-        } else {
-            if (action.findings.any { it.blocking }) {
-                Text(stringResource(R.string.agent_publish_findings_blocking), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            }
-            for (f in action.findings) FindingRow(f, f.id in acknowledged) { on -> if (on) acknowledged.add(f.id) else acknowledged.remove(f.id) }
-        }
-
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-        Spacer(Modifier.height(8.dp))
-        Text(stringResource(R.string.agent_publish_postage_title), style = MaterialTheme.typography.titleSmall)
-        PostageRows(action.postage)
     }
     Spacer(Modifier.height(16.dp))
     ObscuredTapNotice(tap)
