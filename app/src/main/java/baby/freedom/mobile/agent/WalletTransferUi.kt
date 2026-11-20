@@ -100,8 +100,9 @@ internal fun AgentTransferHost() {
     }
     val ask by AgentTransfers.shown.collectAsState()
     val approval by AgentApprovals.shown.collectAsState()
+    val node by AgentNodeAsks.shown.collectAsState()
     val shown = ask ?: return
-    if (approval.let { it != null && it.id < shown.id }) return
+    if (!AgentSheets.shows(shown.id, approval?.id, node?.id)) return
     key(shown.id) { TransferSheet(shown) }
 }
 

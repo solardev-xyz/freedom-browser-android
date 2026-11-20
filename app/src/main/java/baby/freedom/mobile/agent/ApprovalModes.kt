@@ -1,6 +1,7 @@
 package baby.freedom.mobile.agent
 
 import kotlinx.coroutines.CancellationException
+import org.json.JSONObject
 
 /**
  * A chat's approval mode (#595), desktop's `agent-approval-modes.js`,
@@ -63,7 +64,8 @@ internal enum class ActionKind {
     /** A link that downloads. */
     Download,
 
-    // Not yet tools on Android; listed so they can't arrive as interactions.
+    // Never website interactions: a transfer (#596) and node actions (#598) ask on
+    // their own sheets; the rest aren't tools on Android yet.
     Transfer,
     Publish,
     NodeWrite,
@@ -168,12 +170,12 @@ internal object ApprovalPolicy {
                     "browser_type, browser_select, browser_press, and browser_scroll call, include a brief literal " +
                     "intent describing what you expect that exact interaction to accomplish. Dialog answers, " +
                     "uploads, downloads, wallet requests, Swarm and Radicle publishing, signing, messages and writes, " +
-                    "and other privileged capabilities keep their separate " +
+                    "node starts, stops, writes and diagnostics, and other privileged capabilities keep their separate " +
                     "Freedom approval boundaries. Never claim that the user personally approved an automatic decision."
             ApprovalMode.AllowWebsiteInteractions ->
                 "Freedom allows ordinary navigation and website interactions without asking each time. Dialog " +
                     "answers, uploads, downloads, wallet requests, Swarm and Radicle publishing, signing, messages and " +
-                    "writes, and other privileged capabilities keep their " +
+                    "writes, node starts, stops, writes and diagnostics, and other privileged capabilities keep their " +
                     "separate Freedom approval boundaries."
         }
         val screen = if (mode == ApprovalMode.EveryInteraction) "" else " A page interaction (click, type, select, " +
@@ -191,6 +193,17 @@ internal interface ChatApprovals {
 
     /** The intent classifier on the chat's running turn's model; uncertain when there's none. */
     suspend fun classifyInteraction(input: InteractionInput): InteractionClassification
+
+    /**
+     * Desktop's effect classifier on the chat's running turn's model
+     * (#598: node requests and lifecycle actions); unknown when there's
+     * none. [action] is the agent's, [trusted] what the app itself knows.
+     */
+    suspend fun classifyEffect(domain: String, action: JSONObject, trusted: JSONObject? = null): EffectClassification =
+        EffectClassifier.unknown(ClassifierReason.UNAVAILABLE)
+
+    /** The name of the provider the running turn's model is on, as the user named it; null when none runs. */
+    val provider: String? get() = null
 
     /** Phase 1's behaviour: every interaction asks, nothing is classified. */
     object AskEveryTime : ChatApprovals {

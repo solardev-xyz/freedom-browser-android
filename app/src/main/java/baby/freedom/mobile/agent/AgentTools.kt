@@ -26,9 +26,12 @@ internal interface AgentTool {
  * The tools a chat offers the model (#574): the harmless
  * [CurrentTimeTool], the browser tools ([BrowserToolset], #575),
  * whose interactions ask the user as the chat's approval mode says
- * (#595), the read-only [NodeStatusTool] (#577) and [WalletTransferTool]
+ * (#595), the read-only [NodeStatusTool] (#577), [WalletTransferTool]
  * (#596), whose every transfer goes to the user on its own review sheet
- * whatever the mode.
+ * whatever the mode, and the node tools (#598): requests, their
+ * receipts, start and stop, and diagnostics, each asking on its own
+ * sheet as [NodeRequestTool], [NodeLifecycleTool] and
+ * [NodeDiagnosticsTool] say.
  */
 internal class ToolRegistry(tools: List<AgentTool>) {
     private val byName = tools.associateBy { it.spec.name }
@@ -65,13 +68,23 @@ internal class ToolRegistry(tools: List<AgentTool>) {
 
         /**
          * A chat's tools: the clock, its own browser tools (#575), under
-         * the chat's [approvals] (#595), the read-only node status (#577)
-         * and wallet transfers (#596).
+         * the chat's [approvals] (#595), the read-only node status (#577),
+         * wallet transfers (#596) and the node tools (#598), whose receipts
+         * are kept in [operations].
          */
-        fun forChat(sessionId: String, approvals: ChatApprovals = ChatApprovals.AskEveryTime) = ToolRegistry(
-            listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) +
-                BrowserToolset(sessionId, approvals = approvals).tools + NodeStatusTool() + WalletTransferTool(sessionId),
-        )
+        fun forChat(
+            sessionId: String,
+            approvals: ChatApprovals = ChatApprovals.AskEveryTime,
+            operations: NodeOperations = NodeOperations(MemoryNodeOperationStore()),
+        ): ToolRegistry {
+            val nodes = NodeToolDeps.app(sessionId, approvals)
+            return ToolRegistry(
+                listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) +
+                    BrowserToolset(sessionId, approvals = approvals).tools + NodeStatusTool() + WalletTransferTool(sessionId) +
+                    NodeRequestTool(nodes, operations) + NodeOperationStatusTool(sessionId, operations) +
+                    NodeLifecycleTool(nodes) + NodeDiagnosticsTool(nodes),
+            )
+        }
     }
 }
 
