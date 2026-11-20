@@ -17,11 +17,13 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -51,6 +53,14 @@ internal sealed interface MdBlock {
     data object Rule : MdBlock
 }
 
+/**
+ * What's drawn as one unit: [text], the whole of [block]'s text or its
+ * [chunk]th piece ([last]: the block's last).
+ */
+internal data class MdPiece(val blockIndex: Int, val chunk: Int, val block: MdBlock, val text: String, val last: Boolean) {
+    val key: String get() = "$blockIndex/$chunk"
+}
+
 internal object Markdown {
     private val BULLET = Regex("^(\\s*)[-*+]\\s+(.*)$")
     private val NUMBERED = Regex("^(\\s*)(\\d{1,9})[.)]\\s+(.*)$")
@@ -59,8 +69,62 @@ internal object Markdown {
     /** The deepest list nesting drawn: past it, items line up with the deepest. */
     const val MAX_DEPTH = 3
 
-    fun parse(text: String): List<MdBlock> {
-        val out = ArrayList<MdBlock>()
+    fun parse(text: String): List<MdBlock> = Incremental().parse(text)
+
+    /**
+     * Parses a reply as it grows: a streaming reply is shown again every
+     * 80 ms, and parsing a long one from its start each time would cost
+     * more with every piece. Everything before a blank line outside a
+     * code fence parses the same whatever follows it, so the blocks up to
+     * the last such line are kept and only the rest is parsed again.
+     * Gives exactly what [parse] gives for the same text.
+     */
+    class Incremental {
+        private var text = ""
+        private var blocks: List<MdBlock> = emptyList()
+
+        // A line start parsing can pick up from: [resumeCount] blocks came
+        // before it, the last of them as it was then ([resumeLast]; a list
+        // item can still take continuation lines after it).
+        private var resumeAt = 0
+        private var resumeCount = 0
+        private var resumeLast: MdBlock? = null
+
+        private var lastRaw: String? = null
+
+        fun parse(raw: String): List<MdBlock> {
+            // The same string again (a finished turn, each time the page redraws): nothing to do.
+            if (raw === lastRaw) return blocks
+            lastRaw = raw
+            val t = raw.replace("\r\n", "\n")
+            if (t == text) return blocks
+            val out = ArrayList<MdBlock>()
+            var from = 0
+            if (resumeAt > 0 && t.length >= resumeAt && t.regionMatches(0, text, 0, resumeAt)) {
+                for (k in 0 until resumeCount - 1) out += blocks[k]
+                resumeLast?.let { out += it }
+                from = resumeAt
+            } else {
+                resumeAt = 0
+                resumeCount = 0
+                resumeLast = null
+            }
+            parseInto(t, from, out) { at, count, last ->
+                resumeAt = at
+                resumeCount = count
+                resumeLast = last
+            }
+            text = t
+            blocks = out
+            return out
+        }
+    }
+
+    /**
+     * Parses [text] from line start [start] on, adding to [out]; tells
+     * [checkpoint] each line start where parsing could pick up again.
+     */
+    private fun parseInto(text: String, start: Int, out: ArrayList<MdBlock>, checkpoint: (Int, Int, MdBlock?) -> Unit) {
         val paragraph = ArrayList<String>()
         val quote = ArrayList<String>()
         fun flush() {
@@ -69,24 +133,39 @@ internal object Markdown {
             paragraph.clear()
             quote.clear()
         }
-        val lines = text.replace("\r\n", "\n").split('\n')
-        var i = 0
-        while (i < lines.size) {
-            val line = lines[i]
+        // Lines as `split('\n')` gives them: [pos] a line's start, past the end once done.
+        var pos = start
+        var lineEnd = 0
+        fun line(): String {
+            val nl = text.indexOf('\n', pos)
+            lineEnd = if (nl < 0) text.length else nl
+            return text.substring(pos, lineEnd)
+        }
+        while (pos <= text.length) {
+            val line = line()
+            val terminated = lineEnd < text.length
             val fence = FENCE.find(line)
             if (fence != null) {
                 flush()
                 val marker = fence.groupValues[1]
                 val code = ArrayList<String>()
-                i++
+                pos = lineEnd + 1
                 // An unclosed fence (a reply still streaming) runs to the end.
-                while (i < lines.size && !lines[i].trimStart().startsWith(marker)) code += lines[i++]
+                while (pos <= text.length) {
+                    val l = line()
+                    pos = lineEnd + 1
+                    if (l.trimStart().startsWith(marker)) break
+                    code += l
+                }
                 out += MdBlock.Code(code.joinToString("\n"))
-                i++
                 continue
             }
             when {
-                line.isBlank() -> flush()
+                line.isBlank() -> {
+                    flush()
+                    // A whole blank line: nothing after it changes what came before.
+                    if (terminated) checkpoint(lineEnd + 1, out.size, out.lastOrNull())
+                }
                 isRule(line) -> {
                     flush()
                     out += MdBlock.Rule
@@ -120,9 +199,62 @@ internal object Markdown {
                     }
                 }
             }
-            i++
+            pos = lineEnd + 1
         }
         flush()
+    }
+
+    /**
+     * [blocks] as the pieces they're drawn in: one per block, a long
+     * block in [chunks]. A piece's [MdPiece.key] stays the same while the
+     * reply grows, so a list keyed by it keeps what's already drawn.
+     */
+    fun pieces(blocks: List<MdBlock>): List<MdPiece> {
+        val out = ArrayList<MdPiece>(blocks.size)
+        blocks.forEachIndexed { b, block ->
+            val text = when (block) {
+                is MdBlock.Paragraph -> block.text
+                is MdBlock.Heading -> block.text
+                is MdBlock.Item -> block.text
+                is MdBlock.Quote -> block.text
+                is MdBlock.Code -> block.text
+                MdBlock.Rule -> ""
+            }
+            val parts = chunks(text)
+            parts.forEachIndexed { c, part -> out += MdPiece(b, c, block, part, c == parts.size - 1) }
+        }
+        return out
+    }
+
+    /** A block's text drawn as one [Text] up to about this long; past it, in pieces. */
+    const val CHUNK = 2_000
+
+    /**
+     * [text] in pieces of at most [CHUNK] characters, cut at a line end
+     * where there is one (the line break is the cut), else at a space,
+     * else anywhere but inside a surrogate pair. Each piece is its own
+     * [Text], so a long block that grows lays out only its last piece
+     * again. A cut piece only ever depends on the text before its end,
+     * so pieces already there stay the same as the text grows.
+     */
+    fun chunks(text: String): List<String> {
+        if (text.length <= CHUNK) return listOf(text)
+        val out = ArrayList<String>()
+        var start = 0
+        while (text.length - start > CHUNK) {
+            val limit = start + CHUNK
+            var cut = text.lastIndexOf('\n', limit)
+            if (cut <= start) cut = text.lastIndexOf(' ', limit)
+            if (cut > start) {
+                out += text.substring(start, cut)
+                start = cut + 1
+            } else {
+                cut = if (text[limit - 1].isHighSurrogate()) limit - 1 else limit
+                out += text.substring(start, cut)
+                start = cut
+            }
+        }
+        out += text.substring(start)
         return out
     }
 
@@ -309,48 +441,82 @@ internal object Markdown {
     private const val ESCAPABLE = "\\`*_{}[]()#+-.!>|~"
 }
 
-/** [text] drawn as Markdown. */
+/** [Markdown.Palette] from the theme. */
 @Composable
-internal fun MarkdownText(text: String, modifier: Modifier = Modifier) {
-    val blocks = remember(text) { Markdown.parse(text) }
+internal fun markdownPalette(): Markdown.Palette {
     val colors = MaterialTheme.colorScheme
-    val palette = Markdown.Palette(
-        code = colors.surfaceContainerHighest,
-        link = colors.primary,
-        muted = colors.onSurfaceVariant,
-    )
-    val type = MaterialTheme.typography
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (block in blocks) when (block) {
-            is MdBlock.Paragraph -> Text(Markdown.inline(block.text, palette), style = type.bodyLarge)
-            is MdBlock.Heading -> Text(
-                Markdown.inline(block.text, palette),
-                style = if (block.level <= 2) type.titleMedium else type.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            is MdBlock.Item -> Row(Modifier.padding(start = (block.depth * 16).dp)) {
-                Text(block.marker, style = type.bodyLarge, modifier = Modifier.widthIn(min = 20.dp).padding(end = 4.dp))
-                Text(Markdown.inline(block.text, palette), style = type.bodyLarge, modifier = Modifier.weight(1f))
-            }
-            is MdBlock.Quote -> Row(Modifier.height(IntrinsicSize.Min)) {
-                Box(Modifier.width(3.dp).fillMaxHeight().background(colors.outlineVariant))
-                Text(
-                    Markdown.inline(block.text, palette),
-                    style = type.bodyLarge,
-                    color = colors.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 10.dp),
-                )
-            }
-            is MdBlock.Code -> Text(
-                block.text,
-                style = type.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(palette.code, RoundedCornerShape(8.dp))
-                    .padding(10.dp),
-            )
-            MdBlock.Rule -> HorizontalDivider()
-        }
+    return Markdown.Palette(code = colors.surfaceContainerHighest, link = colors.primary, muted = colors.onSurfaceVariant)
+}
+
+/**
+ * A reply's [pieces] ([Markdown.pieces]) drawn as Markdown, in one
+ * column. A reply still coming in is drawn again every 80 ms, so each
+ * piece keeps its styled text and layout while it's unchanged, and only
+ * the growing end is laid out again. A very long reply is drawn piece by
+ * piece in the chat's own lazy list instead ([MdPieceView], `chatRows`).
+ */
+@Composable
+internal fun MarkdownPieces(pieces: List<MdPiece>, modifier: Modifier = Modifier) {
+    val palette = markdownPalette()
+    Column(modifier) {
+        for (piece in pieces) key(piece.key) { MdPieceView(piece, palette) }
     }
+}
+
+/** Space above a block that follows another; none between pieces of one block. */
+private val BLOCK_GAP = 8.dp
+
+/** One piece of a reply: a block, or one of a long block's chunks. */
+@Composable
+internal fun MdPieceView(piece: MdPiece, palette: Markdown.Palette, modifier: Modifier = Modifier) {
+    val type = MaterialTheme.typography
+    val colors = MaterialTheme.colorScheme
+    val first = piece.chunk == 0
+    val m = modifier.padding(top = if (first && piece.blockIndex > 0) BLOCK_GAP else 0.dp)
+    when (val block = piece.block) {
+        is MdBlock.Paragraph -> MdInline(piece.text, palette, type.bodyLarge, m)
+        is MdBlock.Heading -> MdInline(
+            piece.text,
+            palette,
+            (if (block.level <= 2) type.titleMedium else type.titleSmall).copy(fontWeight = FontWeight.SemiBold),
+            m,
+        )
+        is MdBlock.Item -> Row(m.padding(start = (block.depth * 16).dp)) {
+            // The marker on the first piece; later pieces line up under its text.
+            Text(
+                if (first) block.marker else "",
+                style = type.bodyLarge,
+                modifier = Modifier.widthIn(min = 20.dp).padding(end = 4.dp),
+            )
+            MdInline(piece.text, palette, type.bodyLarge, Modifier.weight(1f))
+        }
+        is MdBlock.Quote -> Row(m.height(IntrinsicSize.Min)) {
+            Box(Modifier.width(3.dp).fillMaxHeight().background(colors.outlineVariant))
+            MdInline(piece.text, palette, type.bodyLarge.copy(color = colors.onSurfaceVariant), Modifier.padding(start = 10.dp))
+        }
+        is MdBlock.Code -> {
+            // A long block's pieces join into one box: rounded at its ends only.
+            val r = 8.dp
+            val shape = RoundedCornerShape(
+                topStart = if (first) r else 0.dp, topEnd = if (first) r else 0.dp,
+                bottomStart = if (piece.last) r else 0.dp, bottomEnd = if (piece.last) r else 0.dp,
+            )
+            Text(
+                piece.text,
+                style = type.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                modifier = m
+                    .fillMaxWidth()
+                    .background(palette.code, shape)
+                    .padding(start = 10.dp, end = 10.dp, top = if (first) 10.dp else 0.dp, bottom = if (piece.last) 10.dp else 0.dp),
+            )
+        }
+        MdBlock.Rule -> HorizontalDivider(m)
+    }
+}
+
+/** [text]'s inline Markdown, styled once while it's unchanged. */
+@Composable
+private fun MdInline(text: String, palette: Markdown.Palette, style: TextStyle, modifier: Modifier = Modifier) {
+    val styled = remember(text, palette) { Markdown.inline(text, palette) }
+    Text(styled, style = style, modifier = modifier)
 }

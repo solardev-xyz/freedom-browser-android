@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -66,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.EmptyState
 import baby.freedom.mobile.browser.FullScreenScaffold
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
@@ -96,6 +98,9 @@ internal fun modelChoices(state: AgentState, discovered: Map<String, List<AgentM
         }
         ids.map { ModelChoice(ModelRef(c.id, it), names[it] ?: it, c.name) }
     }
+
+/** How long a just-shown Stop ignores taps. */
+private const val STOP_ARM_MS = 500L
 
 private val ComposerSaver = Saver<MutableState<String>, String>(
     // A long draft isn't kept across a process restart: the saved state
@@ -128,7 +133,11 @@ internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings
     val discovered by providers.models.collectAsState(initial = emptyMap())
     var sessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var showList by rememberSaveable { mutableStateOf(false) }
+    // The page's own scope, for sends and deletes: it outlives the chat
+    // and list views, so leaving either mid-call still hears the answer.
     val scope = rememberCoroutineScope()
+    // A send in flight: a second tap before it's answered does nothing.
+    val sending = remember { mutableStateOf(false) }
 
     BackHandler(onBack = onDismiss)
     BackHandler(enabled = showList) { showList = false }
@@ -151,6 +160,7 @@ internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings
         if (showList) {
             ChatList(
                 chats = chats,
+                scope = scope,
                 onOpen = {
                     sessionId = it
                     showList = false
@@ -166,6 +176,7 @@ internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings
                 onStarted = { sessionId = it },
                 onOpenSettings = onOpenSettings,
                 scope = scope,
+                sending = sending,
             )
         }
     }
@@ -180,6 +191,7 @@ private fun ChatView(
     onStarted: (String) -> Unit,
     onOpenSettings: () -> Unit,
     scope: kotlinx.coroutines.CoroutineScope,
+    sending: MutableState<Boolean>,
 ) {
     val session by remember(sessionId) { sessionId?.let { chats.session(it) } ?: flowOf(null) }.collectAsState(initial = null)
     val turns by remember(sessionId) { sessionId?.let { chats.turns(it) } ?: flowOf(emptyList()) }.collectAsState(initial = emptyList())
@@ -209,6 +221,9 @@ private fun ChatView(
         return
     }
 
+    // Each turn's reply parsed as it grows, and the list's rows from it.
+    val parsers = remember(sessionId) { HashMap<String, Markdown.Incremental>() }
+    val rows = chatRows(turns, live, parsers)
     val listState = rememberLazyListState()
     // Follows the reply as it grows while the list is at its end; a user
     // who scrolls up to read stays where they are until they scroll back
@@ -221,10 +236,12 @@ private fun ChatView(
     }
     LaunchedEffect(turns.size) {
         follow = true
-        if (turns.isNotEmpty()) listState.scrollToItem(turns.size - 1, Int.MAX_VALUE / 2)
+        if (rows.isNotEmpty()) listState.scrollToItem(rows.size - 1, Int.MAX_VALUE / 2)
     }
-    LaunchedEffect(live?.text?.length) {
-        if (follow && turns.isNotEmpty()) listState.scrollToItem(turns.size - 1, Int.MAX_VALUE / 2)
+    // Also once the finished reply lands from the database after its live
+    // copy is gone: it can be longer than the last piece shown.
+    LaunchedEffect(live?.text?.length, rows.size, turns.lastOrNull()?.assistantText?.length) {
+        if (follow && rows.isNotEmpty()) listState.scrollToItem(rows.size - 1, Int.MAX_VALUE / 2)
     }
     Column(Modifier.fillMaxSize()) {
         if (turns.isEmpty()) {
@@ -236,14 +253,25 @@ private fun ChatView(
                 )
             }
         } else {
+            val palette = markdownPalette()
             LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
             ) {
-                items(turns, key = { it.id }) { turn ->
-                    TurnView(turn, live?.takeIf { it.turnId == turn.id })
+                itemsIndexed(rows, key = { _, row -> row.key }) { i, row ->
+                    // Turns 12 dp apart.
+                    val top = Modifier.padding(top = if (i > 0 && row.startsTurn) 12.dp else 0.dp)
+                    when (row) {
+                        is ChatRow.Whole -> TurnView(row.turn, row.live, row.pieces, top)
+                        is ChatRow.Head -> TurnHead(row.turn, top)
+                        is ChatRow.Piece -> SelectionContainer {
+                            // The reply's first piece sits 6 dp under its label.
+                            val first = row.piece.blockIndex == 0 && row.piece.chunk == 0
+                            MdPieceView(row.piece, palette, Modifier.fillMaxWidth().padding(top = if (first) 6.dp else 0.dp))
+                        }
+                        is ChatRow.Foot -> TurnFoot(row.turn, running = row.running, empty = false, Modifier.padding(top = 6.dp))
+                    }
                 }
             }
         }
@@ -270,9 +298,17 @@ private fun ChatView(
                     maxLines = 6,
                 )
                 val running = live != null
+                // Stop takes the place of Send the moment a turn starts: a
+                // double-tap's second tap must not land on it and stop the
+                // reply it just sent.
+                var stopArmed by remember(live?.turnId) { mutableStateOf(false) }
+                LaunchedEffect(live?.turnId) {
+                    delay(STOP_ARM_MS)
+                    stopArmed = true
+                }
                 if (running) {
                     FilledIconButton(
-                        onClick = { scope.launch { sessionId?.let { chats.stop(it) } } },
+                        onClick = { if (stopArmed) scope.launch { sessionId?.let { chats.stop(it) } } },
                         modifier = Modifier.padding(start = 8.dp),
                     ) {
                         Icon(Icons.Filled.Stop, contentDescription = stringResource(R.string.agent_stop))
@@ -280,19 +316,30 @@ private fun ChatView(
                 } else {
                     FilledIconButton(
                         onClick = {
+                            // Checked here, not only in [enabled]: a second tap
+                            // can land before the button redraws disabled.
+                            if (sending.value) return@FilledIconButton
                             val m = model ?: return@FilledIconButton
                             val text = draft
+                            if (text.isBlank()) return@FilledIconButton
+                            sending.value = true
                             scope.launch {
-                                val id = chats.send(sessionId, text, m)
-                                if (id == null) {
-                                    sendFailed = true
-                                } else {
-                                    draft = ""
-                                    onStarted(id)
+                                try {
+                                    val id = chats.send(sessionId, text, m)
+                                    if (id == null) {
+                                        sendFailed = true
+                                    } else {
+                                        // Only what was sent: anything typed meanwhile stays.
+                                        if (draft == text) draft = ""
+                                        onStarted(id)
+                                    }
+                                } finally {
+                                    sending.value = false
                                 }
                             }
                         },
-                        enabled = model != null && draft.isNotBlank() && draft.length <= AgentChats.MAX_MESSAGE_CHARS,
+                        enabled = !sending.value && model != null && draft.isNotBlank() &&
+                            draft.length <= AgentChats.MAX_MESSAGE_CHARS,
                         modifier = Modifier.padding(start = 8.dp),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.agent_send))
@@ -343,10 +390,81 @@ private fun ModelPicker(choices: List<ModelChoice>, model: ModelRef?, onPick: (M
     }
 }
 
+/** A reply longer than this is drawn piece by piece in the chat's lazy list, not as one item. */
+internal const val LAZY_REPLY_CHARS = 16_000
+
+/** A row of the chat's list. */
+internal sealed interface ChatRow {
+    val key: String
+
+    /** Whether it's a turn's first row. */
+    val startsTurn: Boolean
+
+    /** A whole turn in one row: its reply short enough to draw at once, and selectable as a whole. */
+    data class Whole(val turn: ChatTurn, val live: AgentChats.Live?, val pieces: List<MdPiece>) : ChatRow {
+        override val key get() = turn.id
+        override val startsTurn get() = true
+    }
+
+    /** A long reply's turn: the message and the reply's label, ... */
+    data class Head(val turn: ChatTurn) : ChatRow {
+        override val key get() = turn.id + "/head"
+        override val startsTurn get() = true
+    }
+
+    /** ... each piece of the reply, so only those on screen are drawn, ... */
+    data class Piece(val turnId: String, val piece: MdPiece) : ChatRow {
+        override val key get() = turnId + "/" + piece.key
+        override val startsTurn get() = false
+    }
+
+    /** ... and what's said under it. */
+    data class Foot(val turn: ChatTurn, val running: Boolean) : ChatRow {
+        override val key get() = turn.id + "/foot"
+        override val startsTurn get() = false
+    }
+}
+
+/**
+ * The chat's rows: a turn in one row, or, once its reply is longer than
+ * [LAZY_REPLY_CHARS], in a row per piece. Drawing a very long reply as
+ * one item lays out and draws all of it on every 80 ms update while it
+ * streams; as rows, only what's on screen is.
+ */
+internal fun chatRows(turns: List<ChatTurn>, live: AgentChats.Live?, parsers: MutableMap<String, Markdown.Incremental>): List<ChatRow> {
+    val rows = ArrayList<ChatRow>(turns.size)
+    for (turn in turns) {
+        val l = live?.takeIf { it.turnId == turn.id }
+        val text = l?.text ?: turn.assistantText
+        val pieces = if (text.isEmpty()) emptyList() else Markdown.pieces(parsers.getOrPut(turn.id) { Markdown.Incremental() }.parse(text))
+        if (text.length <= LAZY_REPLY_CHARS) {
+            rows += ChatRow.Whole(turn, l, pieces)
+        } else {
+            rows += ChatRow.Head(turn)
+            for (piece in pieces) rows += ChatRow.Piece(turn.id, piece)
+            rows += ChatRow.Foot(turn, running = l != null || turn.status == ChatStatus.RUNNING)
+        }
+    }
+    return rows
+}
+
 @Composable
-private fun TurnView(turn: ChatTurn, live: AgentChats.Live?) {
+private fun TurnView(turn: ChatTurn, live: AgentChats.Live?, pieces: List<MdPiece>, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        TurnHead(turn)
+        val running = live != null || turn.status == ChatStatus.RUNNING
+        if (pieces.isNotEmpty()) {
+            SelectionContainer { MarkdownPieces(pieces, Modifier.fillMaxWidth()) }
+        }
+        TurnFoot(turn, running, empty = pieces.isEmpty())
+    }
+}
+
+/** The user's message, and the reply's label under it. */
+@Composable
+private fun TurnHead(turn: ChatTurn, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         // The user's message, on the end side.
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
             Text(
@@ -373,26 +491,29 @@ private fun TurnView(turn: ChatTurn, live: AgentChats.Live?) {
             color = colors.onSurfaceVariant,
             modifier = Modifier.semantics { heading() },
         )
-        val running = live != null || turn.status == ChatStatus.RUNNING
-        val text = live?.text ?: turn.assistantText
-        if (text.isNotEmpty()) {
-            SelectionContainer { MarkdownText(text, Modifier.fillMaxWidth()) }
-        } else if (running) {
+    }
+}
+
+/** Under a reply: "Thinking…" while nothing came yet, else how it ended, if not as a whole answer. */
+@Composable
+private fun TurnFoot(turn: ChatTurn, running: Boolean, empty: Boolean, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    if (empty && running) {
+        Text(
+            stringResource(R.string.agent_thinking),
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.onSurfaceVariant,
+            modifier = modifier.semantics { liveRegion = LiveRegionMode.Polite },
+        )
+    }
+    if (!running) {
+        turnNote(turn)?.let { (note, isError) ->
             Text(
-                stringResource(R.string.agent_thinking),
-                style = MaterialTheme.typography.bodyMedium,
-                color = colors.onSurfaceVariant,
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                note,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isError) colors.error else colors.onSurfaceVariant,
+                modifier = modifier,
             )
-        }
-        if (!running) {
-            turnNote(turn)?.let { (note, isError) ->
-                Text(
-                    note,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isError) colors.error else colors.onSurfaceVariant,
-                )
-            }
         }
     }
 }
@@ -431,10 +552,14 @@ internal fun errorText(error: ChatError): Int = when (error) {
 }
 
 @Composable
-private fun ChatList(chats: AgentChats, onOpen: (String) -> Unit, onDeleted: (String?) -> Unit) {
+private fun ChatList(
+    chats: AgentChats,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onOpen: (String) -> Unit,
+    onDeleted: (String?) -> Unit,
+) {
     val sessions by chats.sessions.collectAsState(initial = null)
     val live by chats.live.collectAsState()
-    val scope = rememberCoroutineScope()
     var confirmAll by remember { mutableStateOf(false) }
     val list = sessions ?: return
     if (list.isEmpty()) {

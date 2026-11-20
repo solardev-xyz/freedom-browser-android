@@ -228,11 +228,15 @@ internal class AgentChats(
         job.cancelAndJoin()
     }
 
-    /** Deletes a chat, stopping its turn first. */
-    suspend fun delete(sessionId: String): Boolean {
+    /**
+     * Deletes a chat, stopping its turn first. Stop and delete run as one
+     * uncancellable unit: a caller cancelled while the turn winds down
+     * (the page left mid-delete) still gets the chat deleted.
+     */
+    suspend fun delete(sessionId: String): Boolean = withContext(NonCancellable) {
         stop(sessionId)
-        return try {
-            withContext(NonCancellable) { dao.deleteSession(sessionId) }
+        try {
+            dao.deleteSession(sessionId)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting a chat failed (${e.javaClass.simpleName})")
@@ -240,11 +244,11 @@ internal class AgentChats(
         }
     }
 
-    /** Deletes every chat, stopping what's running first. */
-    suspend fun deleteAll(): Boolean {
+    /** Deletes every chat, stopping what's running first; uncancellable, like [delete]. */
+    suspend fun deleteAll(): Boolean = withContext(NonCancellable) {
         lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
-        return try {
-            withContext(NonCancellable) { dao.deleteAll() }
+        try {
+            dao.deleteAll()
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")

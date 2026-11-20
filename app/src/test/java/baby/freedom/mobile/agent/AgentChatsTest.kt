@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.HttpUrl
@@ -365,6 +366,35 @@ class AgentChatsTest {
         assertEquals(0, gate.inFlight())
     }
 
+    /** Deletes a running chat from a scope that's cancelled while its turn's final write waits. */
+    private suspend fun deleteFromALeftPage(all: Boolean) {
+        val model = connectOllama()
+        route("/v1/chat/completions", { stalled() })
+        val id = chats.send(null, "hi", model)!!
+        awaitLive(id, "Part")
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        dao.finishGate = release
+        val page = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        page.launch { if (all) chats.deleteAll() else chats.delete(id) }
+        withTimeout(2_000) { dao.finishing.await() }
+        page.cancel()
+        release.complete(Unit)
+        withTimeout(2_000) { while (dao.session(id) != null || chats.live.value.isNotEmpty()) delay(10) }
+        assertNull(dao.session(id))
+        assertTrue(dao.turns(id).isEmpty())
+        assertEquals(0, gate.inFlight())
+    }
+
+    @Test
+    fun `a delete whose caller is cancelled while the turn winds down still deletes (R1-M2)`() = runBlocking {
+        deleteFromALeftPage(all = false)
+    }
+
+    @Test
+    fun `a delete-all whose caller is cancelled while a turn winds down still deletes (R1-M2)`() = runBlocking {
+        deleteFromALeftPage(all = true)
+    }
+
     @Test
     fun `a provider that's gone is said before anything is sent`() = runBlocking {
         connectOllama()
@@ -469,7 +499,15 @@ internal class MemoryChatDao : ChatDao {
         turns.value = turns.value.map { if (predicate(it)) change(it).also { n++ } else it }
         n
     }
+    /** Set: a turn's final write waits for it, after completing [finishing]. */
+    @Volatile var finishGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    val finishing = kotlinx.coroutines.CompletableDeferred<Unit>()
+
     override suspend fun finishTurn(id: String, text: String, status: String, durationMs: Long?, error: String?) {
+        finishGate?.let {
+            finishing.complete(Unit)
+            it.await()
+        }
         editTurn({ it.id == id }) { it.copy(assistantText = text, status = status, durationMs = durationMs, error = error) }
     }
     override suspend fun saveProgress(id: String, text: String) {
