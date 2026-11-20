@@ -89,6 +89,20 @@ class ApprovalPolicyTest {
     }
 
     @Test
+    fun `the composer shows the chat's mode, or the pick it was started with until its row loads`() {
+        val allow = ApprovalMode.AllowWebsiteInteractions.wire
+        // A new chat: what's picked.
+        assertEquals(ApprovalMode.AllowWebsiteInteractions, shownMode(null, loaded = false, null, allow, null))
+        // Just started with that pick, row not loaded yet: still the pick, not the default.
+        assertEquals(ApprovalMode.AllowWebsiteInteractions, shownMode(null, loaded = false, "c1", allow, "c1"))
+        // The row loaded: the chat's own, whatever was picked.
+        assertEquals(ApprovalMode.EveryInteraction, shownMode(ApprovalMode.EveryInteraction.wire, loaded = true, "c1", allow, "c1"))
+        // Another chat's pick never shows on this one.
+        assertEquals(ApprovalMode.DEFAULT, shownMode(null, loaded = false, "c2", allow, "c1"))
+        assertEquals(ApprovalMode.DEFAULT, shownMode(null, loaded = false, null, allow, "c1"))
+    }
+
+    @Test
     fun `a classifier that throws asks`() = runBlocking {
         val d = ApprovalPolicy.decide(ActionKind.PageInteraction, { ApprovalMode.SensitiveActions }, { throw IllegalStateException("boom") })
         assertEquals(PolicyDecision.Ask(ApprovalCheck.NoAnswer), d)

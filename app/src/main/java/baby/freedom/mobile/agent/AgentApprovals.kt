@@ -66,8 +66,8 @@ internal data class AgentApproval(
     /**
      * Why it's asked (#595): in "sensitive actions", the intent
      * classifier's summary (the chat's model judging page and agent
-     * text, so shown as its words), that it sends a form, or that the
-     * check gave no answer. In either relaxed mode, that the tab
+     * text, so shown as its words), that it sends a form, that it types
+     * into a password or one-time-code field, or that the check gave no answer. In either relaxed mode, that the tab
      * wasn't on screen ([ApprovalCheck.NeedsScreen]). Null otherwise.
      */
     val check: ApprovalCheck? = null,

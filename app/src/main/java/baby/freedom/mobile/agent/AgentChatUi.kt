@@ -242,9 +242,7 @@ private fun ChatView(
     // changes when the first send starts the chat; [pickedFor] names the chat the pick is for.
     var pickedMode by rememberSaveable { mutableStateOf(ApprovalMode.DEFAULT.wire) }
     var pickedFor by rememberSaveable { mutableStateOf<String?>(null) }
-    val mode = session?.let { ApprovalMode.of(it.approvalMode) }
-        ?: ApprovalMode.of(pickedMode).takeIf { pickedFor == sessionId }
-        ?: ApprovalMode.DEFAULT
+    val mode = shownMode(session?.approvalMode, loaded = session != null, sessionId, pickedMode, pickedFor)
     var modeFailed by remember(sessionId) { mutableStateOf(false) }
     // When the last send came back: its turn's Stop can show a frame later.
     val sentAt = remember { mutableLongStateOf(Long.MIN_VALUE / 2) }
@@ -727,6 +725,18 @@ private fun modeHint(mode: ApprovalMode): String = stringResource(
 )
 
 /**
+ * The approval mode the composer shows (#595): the chat's own once its
+ * row is [loaded], else the one last picked or sent if it was for this
+ * chat ([pickedFor] null: a chat not started yet), else the default.
+ */
+internal fun shownMode(stored: String?, loaded: Boolean, sessionId: String?, picked: String, pickedFor: String?): ApprovalMode =
+    when {
+        loaded -> ApprovalMode.of(stored)
+        pickedFor == sessionId -> ApprovalMode.of(picked)
+        else -> ApprovalMode.DEFAULT
+    }
+
+/**
  * The chat's approval mode (#595), next to its model: each mode with
  * what it does, and what asks whatever the mode.
  */
@@ -760,7 +770,9 @@ private fun ApprovalModePicker(mode: ApprovalMode, onPick: (ApprovalMode) -> Uni
                     },
                     onClick = {
                         open = false
-                        if (m != mode) onPick(m)
+                        // Even the mode shown: until an opened chat's row loads it shows
+                        // the default, and picking that must still be saved.
+                        onPick(m)
                     },
                     modifier = Modifier.semantics { selected = m == mode },
                 )

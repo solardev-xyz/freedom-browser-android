@@ -33,7 +33,10 @@ internal enum class ActionKind {
     /** browser_navigate, browser_create_tab. */
     Navigate,
 
-    /** A click, typing, a key, a selection or a scroll that doesn't, by the page's markup, send a form. */
+    /**
+     * A click, typing, a key, a selection or a scroll that doesn't, by the
+     * page's markup, send a form, nor type into a password or one-time-code field.
+     */
     PageInteraction,
 
     /** One that does: asks in "sensitive actions" without asking the model (desktop). */
