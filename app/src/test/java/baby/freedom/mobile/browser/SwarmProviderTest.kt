@@ -40,6 +40,9 @@ class SwarmProviderTest {
         val messaging = HashSet<String>()
         override suspend fun messaging(origin: String) = origin in messaging
         override suspend fun grantMessaging(origin: String) = messaging.add(origin).let { true }
+        val act = HashSet<Pair<String, String>>()
+        override suspend fun actAllowed(origin: String, publisher: String) = (origin to publisher) in act
+        override suspend fun allowAct(origin: String, publisher: String) = (origin in connected).also { if (it) act.add(origin to publisher) }
     }
 
     private class MemoryFeeds : SwarmProvider.Feeds {
@@ -141,6 +144,11 @@ class SwarmProviderTest {
         /** Run as each request reaches the node, before it's answered. */
         @Volatile var onRequest: (method: String, path: String) -> Unit = { _, _ -> }
 
+        /** ant's ACT download (#540): answers a GET carrying `Swarm-Act-Publisher`, given its path and headers. */
+        var act: (path: String, headers: Map<String, String>) -> SwarmProvider.Http.Answer = { _, _ ->
+            SwarmProvider.Http.Answer(404, emptyMap(), JSONObject().put("message", "act or history entry not found").toString().toByteArray())
+        }
+
         override fun request(method: String, path: String, headers: Map<String, String>, body: ByteArray?, timeoutMs: Int): SwarmProvider.Http.Answer {
             if (!up) throw java.io.IOException("connection refused")
             onRequest(method, path)
@@ -152,6 +160,7 @@ class SwarmProviderTest {
                 SwarmProvider.Http.Answer(status, h, o.toString().toByteArray())
             fun notFound() = json(JSONObject().put("message", "not found"), 404)
             return when {
+                method == "GET" && headers.containsKey("Swarm-Act-Publisher") -> act(path, headers)
                 method == "GET" && bare == "/node" -> json(JSONObject().put("beeMode", beeMode))
                 method == "GET" && bare == "/readiness" -> json(JSONObject())
                 method == "GET" && bare == "/addresses" -> json(
@@ -2490,6 +2499,175 @@ class SwarmProviderTest {
         assertEquals("not_connected", err(reply).reason)
         assertFalse("feed access stays taken away", feeds.granted(site))
         assertTrue(grants.auto.none { it.first == site })
+    }
+
+    // -------------------------------------------------------------------
+    // ACT shares (#540)
+    // -------------------------------------------------------------------
+
+    private val actKey = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    private val actAddress = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+    /** -G: another publisher. */
+    private val otherActKey = "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+    private fun actParams(publisher: String = actKey) = JSONObject()
+        .put("reference", "AB".repeat(32)).put("publisher", publisher).put("historyAddress", "CD".repeat(32))
+
+    private fun actRequests() = node.requests.filter { it.third.containsKey("Swarm-Act-Publisher") }
+
+    private fun serveAct(body: ByteArray = "hello".toByteArray(), contentType: String? = "text/plain") {
+        node.act = { _, _ -> SwarmProvider.Http.Answer(200, contentType?.let { mapOf("Content-Type" to it) }.orEmpty(), body) }
+    }
+
+    @Test
+    fun `openAct needs a connection, and a request that wouldn't run gets no sheet`() {
+        serveAct()
+        assertEquals("not_connected", err(call("swarm_openAct", actParams())).reason)
+        connect()
+        val bad = err(call("swarm_openAct", actParams(publisher = "06" + actKey.substring(2) + "00".repeat(32))))
+        assertEquals(-32602, bad.code)
+        assertEquals("invalid_publisher", bad.reason)
+        assertTrue(asked.isEmpty())
+        assertTrue(actRequests().isEmpty())
+        assertTrue(okJson(call("swarm_getCapabilities")).getJSONObject("extensions").getBoolean("actShares"))
+    }
+
+    @Test
+    fun `openAct asks naming the publisher, then the node opens the share with its own key`() {
+        connect()
+        serveAct()
+        // The page's own spelling: uncompressed, upper case, 0x.
+        val spelled = "0x04" + actKey.substring(2).uppercase() + "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+        val result = okJson(call("swarm_openAct", actParams(spelled).put("timestamp", 1_700_000_000).put("path", "docs/a b.txt")))
+        assertEquals(
+            listOf<SwarmAsk>(SwarmAsk.Act(site, SwarmAct.Publisher(actKey, actAddress), "ab".repeat(32), "docs/a b.txt")),
+            asked,
+        )
+        val (method, path, headers) = actRequests().single()
+        assertEquals("GET", method)
+        assertEquals("/bzz/${"ab".repeat(32)}/docs/a%20b.txt", path)
+        assertEquals(actKey, headers["Swarm-Act-Publisher"])
+        assertEquals("cd".repeat(32), headers["Swarm-Act-History-Address"])
+        assertEquals("1700000000", headers["Swarm-Act-Timestamp"])
+        assertEquals("identity", headers["Accept-Encoding"])
+        assertEquals("hello", String(Base64.getDecoder().decode(result.getString("data"))))
+        assertEquals("base64", result.getString("encoding"))
+        assertEquals("text/plain", result.getString("contentType"))
+        assertEquals(1, commits)
+        // The node's key, not the wallet's: no wallet activity, no rule from a plain Open.
+        assertEquals(0, publishers.activity)
+        assertTrue(grants.act.isEmpty())
+        // A blob, with no content type: /bytes, and contentType null (not left out).
+        serveAct(contentType = null)
+        val blob = okJson(call("swarm_openAct", actParams()))
+        assertEquals("/bytes/${"ab".repeat(32)}", actRequests().last().second)
+        assertTrue(blob.has("contentType") && blob.isNull("contentType"))
+        assertFalse(actRequests().last().third.containsKey("Swarm-Act-Timestamp"))
+    }
+
+    @Test
+    fun `a refused ACT sheet opens nothing`() {
+        connect()
+        serveAct()
+        answer = SwarmProvider.Answer.REJECTED
+        assertEquals(4001, err(call("swarm_openAct", actParams())).code)
+        assertTrue(actRequests().isEmpty())
+        assertEquals(0, commits)
+    }
+
+    @Test
+    fun `always allow covers that one publisher on that one site`() {
+        connect()
+        connect(other)
+        serveAct()
+        answer = SwarmProvider.Answer(true, always = true)
+        okJson(call("swarm_openAct", actParams()))
+        assertEquals(setOf(site to actKey), grants.act)
+        asked.clear()
+        answer = SwarmProvider.Answer(true)
+        okJson(call("swarm_openAct", actParams()))
+        assertTrue("the rule answers", asked.isEmpty())
+        assertEquals(2, commits)
+        okJson(call("swarm_openAct", actParams(publisher = otherActKey)))
+        assertTrue("another publisher still asks", asked.single() is SwarmAsk.Act)
+        asked.clear()
+        okJson(call("swarm_openAct", actParams(), origin = other))
+        assertTrue("another site still asks", asked.single() is SwarmAsk.Act)
+    }
+
+    @Test
+    fun `a site disconnected while its ACT sheet was up gets no rule and nothing opened`() {
+        connect()
+        serveAct()
+        answer = SwarmProvider.Answer(true, always = true)
+        onApproved = { grants.connected.remove(site) }
+        assertEquals("not_connected", err(call("swarm_openAct", actParams())).reason)
+        assertTrue(grants.act.isEmpty())
+        assertTrue(actRequests().isEmpty())
+    }
+
+    @Test
+    fun `a site's ACT sheets come one at a time, so always allow on the first answers the rest`() {
+        connect()
+        serveAct()
+        val first = kotlinx.coroutines.CompletableDeferred<SwarmProvider.Answer>()
+        val replies = runBlocking {
+            val ask: suspend (SwarmAsk) -> SwarmProvider.Answer = {
+                asked += it
+                first.await()
+            }
+            val a = async { provider.request(site, "swarm_openAct", actParams(), {}, page, ask) }
+            val b = async { provider.request(site, "swarm_openAct", actParams(), {}, page, ask) }
+            while (asked.isEmpty()) kotlinx.coroutines.yield()
+            repeat(5) { kotlinx.coroutines.yield() }
+            assertEquals("the second waits for the first's answer", 1, asked.size)
+            first.complete(SwarmProvider.Answer(true, always = true))
+            listOf(a.await(), b.await())
+        }
+        replies.forEach { okJson(it) }
+        assertEquals(1, asked.size)
+        assertEquals(2, actRequests().size)
+    }
+
+    @Test
+    fun `the node's ACT errors keep desktop's codes and reasons`() {
+        connect()
+        grants.act += site to actKey
+        fun answer(status: Int, message: String) {
+            node.act = { _, _ -> SwarmProvider.Http.Answer(status, emptyMap(), JSONObject().put("message", message).toString().toByteArray()) }
+        }
+        answer(404, "act or history entry not found")
+        err(call("swarm_openAct", actParams())).let { assertEquals(-32602, it.code); assertEquals("act_not_found", it.reason) }
+        answer(404, "not found")
+        err(call("swarm_openAct", actParams())).let { assertEquals(-32602, it.code); assertEquals("content_not_found", it.reason) }
+        answer(400, "invalid timestamp")
+        err(call("swarm_openAct", actParams())).let { assertEquals(-32602, it.code); assertEquals("invalid_params", it.reason) }
+        answer(500, "act download failed")
+        assertEquals(-32603, err(call("swarm_openAct", actParams())).code)
+        // A redirect isn't followed (the ACT headers would go with it): it's an error.
+        answer(307, "moved")
+        assertEquals(-32603, err(call("swarm_openAct", actParams())).code)
+        node.up = false
+        err(call("swarm_openAct", actParams())).let { assertEquals(4900, it.code); assertEquals("node-stopped", it.reason) }
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `an ACT read counts against the site's read budget`() {
+        connect()
+        grants.act += site to actKey
+        val limit = 5 * 1024 * 1024
+        serveAct(ByteArray(limit + 1))
+        err(call("swarm_openAct", actParams())).let {
+            assertEquals("data_too_large", it.reason)
+            assertEquals(limit, it.data!!.getInt("limit"))
+        }
+        assertEquals(limit, node.caps.last().second)
+        serveAct(ByteArray(3 * 1024 * 1024))
+        okJson(call("swarm_openAct", actParams()))
+        val over = err(call("swarm_openAct", actParams()))
+        assertEquals("rate_limited", over.reason)
+        assertFalse(over.toJson().toString().contains("\"data\":\"AAAA"))
     }
 
     @Test

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.DynamicFeed
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -115,6 +116,14 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
         )
     }
     is SwarmAsk.Message -> swarmMessagingCopy(ask)
+    // desktop #648's: "always allow" is for this publisher on this site only.
+    is SwarmAsk.Act -> SwarmPromptCopy(
+        Strings.get(R.string.swarm_act_title),
+        Strings.get(R.string.swarm_act_request),
+        Strings.get(R.string.swarm_act_warning),
+        Strings.get(R.string.swarm_act_approve),
+        Strings.get(R.string.swarm_act_always),
+    )
 }
 
 /**
@@ -183,6 +192,9 @@ internal fun swarmPathsPreview(paths: List<String>): String {
     val more = paths.size - 3
     return Strings.plural(R.plurals.swarm_paths_preview_more, more, shown, more)
 }
+
+/** An ACT share's manifest path as its sheet shows it: the root as `/`, the rest escaped like any page string. */
+internal fun swarmActPath(path: String): String = if (path.isEmpty()) "/" else swarmShownTopic(path)
 
 /** What a signing sheet's request row says: the method's own detail, or the feed it's on. */
 internal fun swarmSignRequest(ask: SwarmAsk.Sign): String =
@@ -295,6 +307,7 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         is SwarmAsk.Publish -> Icons.Filled.CloudUpload
                         is SwarmAsk.Sign -> if (ask.kind == SwarmProvider.AutoApprove.Signing) Icons.Filled.Draw else Icons.Filled.DynamicFeed
                         is SwarmAsk.Message -> Icons.Filled.Forum
+                        is SwarmAsk.Act -> Icons.Filled.LockOpen
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
@@ -358,6 +371,13 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         ask.topic?.let { DetailRow(stringResource(R.string.swarm_detail_topic), swarmShownTopic(it)) }
                         ask.address?.let { DetailRow(stringResource(R.string.swarm_detail_room_address), it) }
                         if (ask.send != null) DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size.toLong()))
+                    }
+                    // The canonical values the node is asked with, never the page's spelling (SwarmAct.validate).
+                    is SwarmAsk.Act -> {
+                        DetailRow(stringResource(R.string.swarm_detail_publisher), ask.publisher.publicKey, mono = true)
+                        DetailRow(stringResource(R.string.swarm_detail_publisher_address), ask.publisher.address, mono = true)
+                        DetailRow(stringResource(R.string.swarm_detail_reference), ask.reference, mono = true)
+                        ask.path?.let { DetailRow(stringResource(R.string.swarm_detail_path), swarmActPath(it), mono = true) }
                     }
                 }
                 if (needsWallet) {

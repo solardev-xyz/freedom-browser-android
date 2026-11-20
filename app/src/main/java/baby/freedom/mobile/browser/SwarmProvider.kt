@@ -57,6 +57,14 @@ import org.json.JSONObject
  *    one signature and zeroed after; a locked wallet always asks, since
  *    approving is what unlocks it.
  *
+ *  - ACT shares (#540, desktop #648; connection needed): `swarm_openAct`
+ *    opens content a publisher shared with the node through access
+ *    control. A sheet naming the publisher every time, unless the user
+ *    ticked "always allow" for that one publisher on that site: a rule
+ *    for one publisher opens nothing from another, since the node's key
+ *    is one identity for every site. The node decrypts with its own key
+ *    ([SwarmAct]); nothing of the wallet's is read.
+ *
  *  - messaging (#121; desktop's messaging extension): a sheet the first
  *    time, which grants the site the messaging tier —
  *    `swarm_getMessagingIdentity`, `swarm_subscribe` — and one per
@@ -105,6 +113,12 @@ class SwarmProvider(
 
         /** Grant connected [origin] the messaging tier; false if it couldn't be saved. */
         suspend fun grantMessaging(origin: String): Boolean
+
+        /** Whether connected [origin] may open ACT shares from [publisher] (compressed key) without asking (#540). */
+        suspend fun actAllowed(origin: String, publisher: String): Boolean
+
+        /** "Always allow" [publisher]'s ACT shares for connected [origin]; false if it couldn't be saved. */
+        suspend fun allowAct(origin: String, publisher: String): Boolean
     }
 
     /**
@@ -380,6 +394,7 @@ class SwarmProvider(
                     "swarm_sendGsoc" -> sendGsoc(origin, params, calls)
                     "swarm_subscribe" -> subscribe(origin, params, calls)
                     "swarm_unsubscribe" -> unsubscribe(origin, params)
+                    "swarm_openAct" -> openAct(origin, params, calls)
                     else -> Reply.Err(INTERNAL, "Internal error")
                 }
             }
@@ -414,7 +429,11 @@ class SwarmProvider(
             .put("publisherIdentityModes", JSONArray(listOf("app-scoped", "bee-wallet")))
             .put("features", JSONArray(listOf("messaging")))
             // pageSignedSingleOwnerChunks: swarm_publishSingleOwnerChunk (desktop #647).
-            .put("extensions", JSONObject().put("publisherSigning", true).put("pageSignedSingleOwnerChunks", true))
+            // actShares: swarm_openAct (desktop #648).
+            .put(
+                "extensions",
+                JSONObject().put("publisherSigning", true).put("pageSignedSingleOwnerChunks", true).put("actShares", true),
+            )
             .put(
                 "limits",
                 JSONObject()
@@ -1055,6 +1074,98 @@ class SwarmProvider(
         val index = answer.headers["swarm-feed-index"]?.let { parseFeedIndex(it) }
             ?: throw Invalid(Reply.Err(INTERNAL, "Feed lookup returned no index"))
         return index to answer.headers["swarm-feed-index-next"]?.let { parseFeedIndex(it) }
+    }
+
+    // ---------------------------------------------------------------
+    // ACT shares (#540)
+    // ---------------------------------------------------------------
+
+    /** Per origin: its ACT consents run one at a time ([openAct]). */
+    private val actLocks = ConcurrentHashMap<String, Mutex>()
+
+    /**
+     * desktop's `swarm_openAct` (#648): open content a publisher shared
+     * with this node through ACT, decrypted by the node with its own key.
+     * The request is checked first ([SwarmAct.validate]): a sheet is
+     * only shown for one that would run, in its canonical form. Consent
+     * is per (site, publisher): the sheet names the publisher, and its
+     * "always allow" covers that publisher only. A site's consents run
+     * one at a time, so an "always allow" ticked on the first answers the
+     * site's next ones from the same publisher instead of leaving their
+     * sheets queued behind it. The page's timer stops once it's allowed.
+     *
+     * Then like `swarm_readData`: one request against the site's read
+     * budget, a join slot ([acquireJoin]) held for the node read, and the
+     * bytes charged once read — the body is capped at the window's whole
+     * byte budget (`data_too_large` past it), and over what's left of the
+     * window the read is `rate_limited` and its bytes aren't returned
+     * (desktop reserves a declared length before reading; the answer the
+     * page gets is the same). A redirect is never followed (the ACT
+     * headers would go with it): it's an error.
+     */
+    private suspend fun openAct(origin: String, params: JSONObject, calls: Calls): Reply {
+        val (share, refusal) = SwarmAct.validate(params)
+        if (share == null) {
+            val r = refusal!!
+            return invalid(r.message, r.reason, r.option?.let { JSONObject().put("option", it) })
+        }
+        val publisher = share.publisher.publicKey
+        actLocks.computeIfAbsent(origin) { Mutex() }.withLock {
+            if (!grants.actAllowed(origin, publisher)) {
+                val answer = calls.ask(SwarmAsk.Act(origin, share.publisher, share.reference, share.path))
+                if (!answer.allowed) throw Invalid(rejected())
+                // A rule that couldn't be saved leaves the next call asking; this one goes on (as on desktop).
+                whileConnected(origin) {
+                    if (answer.always) grants.allowAct(origin, publisher)
+                }
+            }
+        }
+        calls.committed()
+        spendBudget(origin, requests = 1)
+        reachableOrFail()
+        val started = System.nanoTime()
+        fun left() = SwarmAct.READ_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000
+        var slot = false
+        withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) {
+            acquireJoin(origin)
+            slot = true
+        }
+        if (!slot) return Reply.Err(INTERNAL, "The share can't be opened: too many Swarm reads are in progress. Try again.")
+        val maxBytes = readMaxBytes(origin)
+        val answer = try {
+            withContext(io) {
+                node.request(
+                    "GET", SwarmAct.nodePath(share), SwarmAct.headers(share), null,
+                    left().coerceAtLeast(MIN_JOIN_MS).toInt(), maxBytes = maxBytes.toInt(),
+                )
+            }
+        } catch (e: Http.AnswerTooLarge) {
+            return invalid(
+                "Content exceeds the maximum read size of $maxBytes bytes", "data_too_large",
+                JSONObject().put("limit", maxBytes),
+            )
+        } catch (e: Http.AnswerCutShort) {
+            return cutShort("The share can't be opened: the node's answer broke off")
+        } finally {
+            releaseJoin(origin)
+        }
+        if (!answer.ok) {
+            val message = answer.message()
+            return when {
+                answer.status == 404 && SwarmAct.noGrant(message) ->
+                    invalid("No ACT grant for this node from that publisher, or no such history", "act_not_found")
+                answer.status == 404 -> invalid("Content not found: $message", "content_not_found")
+                answer.status == 400 -> invalid("The node refused the request: $message", "invalid_params")
+                else -> Reply.Err(INTERNAL, "The node could not open the share (HTTP ${answer.status}): $message")
+            }
+        }
+        chargeBudget(origin, bytes = answer.body.size.toLong())?.let { return it }
+        return Reply.Ok(
+            JSONObject()
+                .put("data", Base64.getEncoder().encodeToString(answer.body))
+                .put("encoding", "base64")
+                .put("contentType", answer.headers["content-type"] ?: JSONObject.NULL),
+        )
     }
 
     // ---------------------------------------------------------------
@@ -1944,6 +2055,7 @@ class SwarmProvider(
             "swarm_unsubscribe",
             "swarm_sendPss",
             "swarm_sendGsoc",
+            "swarm_openAct",
         )
 
         /** The messaging extension's (#121). */
@@ -2173,6 +2285,18 @@ sealed interface SwarmAsk {
         val identity: PublisherIdentity?,
         /** There's no wallet yet: approving sets one up first ([SwarmProviders]' askOnTab). */
         val needsWallet: Boolean = false,
+    ) : SwarmAsk
+
+    /**
+     * Open content [publisher] shared with this node through ACT (#540):
+     * the share's canonical [reference] and manifest [path] (null for a
+     * blob). Its "always allow" covers this one publisher on this site.
+     */
+    data class Act(
+        override val origin: String,
+        val publisher: SwarmAct.Publisher,
+        val reference: String,
+        val path: String?,
     ) : SwarmAsk
 
     /**

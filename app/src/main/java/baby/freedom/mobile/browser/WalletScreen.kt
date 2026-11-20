@@ -777,6 +777,8 @@ fun WalletScreen(
     var swarmDisconnectFailed by remember { mutableStateOf<String?>(null) }
     // The rows each Swarm app's permission manifest manages (#122), read again whenever the grants change.
     var swarmAskEachTimeFailed by remember { mutableStateOf<String?>(null) }
+    // The (origin, publisher) ACT rule (#540) whose Remove couldn't be saved.
+    var swarmActRemoveFailed by remember { mutableStateOf<Pair<String, String>?>(null) }
     var swarmManifestRows by remember { mutableStateOf<Map<String, List<ManifestCapability>>>(emptyMap()) }
     LaunchedEffect(swarmGrants) {
         swarmManifestRows = withContext(Dispatchers.IO) { SwarmProviders.manifestRows() }
@@ -1334,6 +1336,13 @@ fun WalletScreen(
                         }
                     },
                     askEachTimeFailed = swarmAskEachTimeFailed,
+                    onRemoveAct = { origin, key ->
+                        swarmActRemoveFailed = null
+                        scope.launch {
+                            if (!SwarmGrantStore.get(context).removeAct(origin, key)) swarmActRemoveFailed = origin to key
+                        }
+                    },
+                    actRemoveFailed = swarmActRemoveFailed,
                 )
             }
             // Shown whatever the vault's state once there's anything in it, like the connected sites.

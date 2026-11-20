@@ -342,6 +342,9 @@ class SwarmManifestsTest {
         override fun available(projection: ManifestProjection) =
             wallet || (projection != Identity && projection != FeedGrant)
         override suspend fun enabled(origin: String, projection: ManifestProjection) = (origin to projection) in on
+        /** Origins holding an ACT rule (#540): a grant no projection stands for. */
+        val actRules = HashSet<String>()
+        override suspend fun keepsConnection(origin: String) = origin in actRules
         override suspend fun set(origin: String, projection: ManifestProjection, on: Boolean) {
             if (crashAt == 0) {
                 crashAt = -1
@@ -563,6 +566,14 @@ class SwarmManifestsTest {
                 // The connection is now the user's: a later removal leaves it too.
                 assertTrue(Connection in runBlocking { env.manifests.record(site) }!!.detached)
             }
+        }
+        // An ACT rule (#540) is the user's too, and needs the connection.
+        Env().run {
+            decide(check(site, found(Publish)), SwarmManifests.Outcome.AllowAll)
+            projections.actRules += site
+            check(site, ManifestDiscovery.Absent, eager = false)
+            assertTrue("an ACT rule keeps the connection", has(site, Connection))
+            assertFalse(projections.sets.any { it.second == Connection && !it.third })
         }
         // Without the user's own grants the connection goes, as before.
         val env = Env()

@@ -23,6 +23,9 @@ import kotlinx.coroutines.flow.map
  *     "connect:<origin>"         → connected-at, epoch ms
  *     "messaging:<origin>"       → granted-at, epoch ms (the messaging tier, #121)
  *     "auto:<kind>:<origin>"     → "1" ("always allow": publish, feeds, signing, messaging)
+ *     "act:<key>:<origin>"       → granted-at, epoch ms ("always allow" opening ACT
+ *                                  shares from one publisher, #540; `<key>` is its
+ *                                  compressed key, 66 lower-case hex)
  *
  * `<origin>` is the provider's origin key (a normalized
  * `scheme://host[:port]`, the one site permissions use). A private tab
@@ -40,7 +43,12 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
         val connectedAt: Long,
         val autoApprove: Set<String>,
         val messaging: Boolean = false,
+        /** The publishers it may open ACT shares from without asking (#540), most recently allowed first. */
+        val act: List<ActRule> = emptyList(),
     )
+
+    /** "Always allow" opening what one publisher shares through ACT: [publicKey] is compressed, 66 lower-case hex. */
+    data class ActRule(val publicKey: String, val grantedAt: Long)
 
     /** Every connected site, most recently connected first. */
     val all: Flow<List<Grant>> = store.data
@@ -55,7 +63,8 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
                 if (!name.startsWith(CONNECT)) return@mapNotNull null
                 val origin = name.removePrefix(CONNECT)
                 val auto = KINDS.filter { map["$AUTO$it:$origin"] == ON }.toSet()
-                Grant(origin, (v as? String)?.toLongOrNull() ?: 0L, auto, map["$MESSAGING$origin"] != null)
+                val act = map.mapNotNull { (key, at) -> actRule(key, origin, at) }.sortedByDescending { it.grantedAt }
+                Grant(origin, (v as? String)?.toLongOrNull() ?: 0L, auto, map["$MESSAGING$origin"] != null, act)
             }.sortedByDescending { it.connectedAt }
         }
 
@@ -101,11 +110,32 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
         return written && connected
     }
 
-    /** Disconnect [origin], dropping its messaging tier and "always allow"s; `false` if the store couldn't be written. */
+    /**
+     * Let connected [origin] open ACT shares from the publisher whose
+     * compressed key is [publicKey] without asking (#540); `false` if it
+     * isn't connected or the write failed.
+     */
+    suspend fun allowAct(origin: String, publicKey: String, now: Long = System.currentTimeMillis()): Boolean {
+        require(ACT_KEY.matches(publicKey)) { "not a compressed public key" }
+        var connected = false
+        val written = write {
+            connected = it[connectKey(origin)] != null
+            if (connected) it[actKey(publicKey, origin)] = now.toString()
+        }
+        return written && connected
+    }
+
+    /** Take [origin]'s ACT rule for [publicKey] away; `false` if the write failed. */
+    suspend fun removeAct(origin: String, publicKey: String): Boolean = write { it.remove(actKey(publicKey, origin)) }
+
+    /** Disconnect [origin], dropping its messaging tier, "always allow"s and ACT rules; `false` if the store couldn't be written. */
     suspend fun revoke(origin: String): Boolean = write {
         it.remove(connectKey(origin))
         it.remove(messagingKey(origin))
         for (kind in KINDS) it.remove(autoKey(kind, origin))
+        for (key in it.asMap().keys.toList()) {
+            if (actRule(key.name, origin, "") != null) it.remove(key)
+        }
     }
 
     private suspend fun write(change: (MutablePreferences) -> Unit): Boolean = try {
@@ -119,6 +149,15 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
     private fun connectKey(origin: String) = stringPreferencesKey("$CONNECT$origin")
     private fun messagingKey(origin: String) = stringPreferencesKey("$MESSAGING$origin")
     private fun autoKey(kind: String, origin: String) = stringPreferencesKey("$AUTO$kind:$origin")
+    private fun actKey(publicKey: String, origin: String) = stringPreferencesKey("$ACT$publicKey:$origin")
+
+    /** [name]'s ACT rule if it's one of [origin]'s: the key is fixed-length, so the origin after it is exact. */
+    private fun actRule(name: String, origin: String, value: Any?): ActRule? {
+        if (!name.startsWith(ACT) || name.length != ACT.length + 67 + origin.length || !name.endsWith(origin)) return null
+        val key = name.substring(ACT.length, ACT.length + 66)
+        if (!ACT_KEY.matches(key) || name[ACT.length + 66] != ':') return null
+        return ActRule(key, (value as? String)?.toLongOrNull() ?: 0L)
+    }
 
     companion object {
         /** The "always allow" kinds, desktop's `autoApprove` keys. */
@@ -127,6 +166,8 @@ class SwarmGrantStore internal constructor(private val store: DataStore<Preferen
         private const val CONNECT = "connect:"
         private const val MESSAGING = "messaging:"
         private const val AUTO = "auto:"
+        private const val ACT = "act:"
+        private val ACT_KEY = Regex("^0[23][0-9a-f]{64}$")
         private const val ON = "1"
         private const val TAG = "SwarmGrantStore"
 

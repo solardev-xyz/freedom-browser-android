@@ -225,6 +225,9 @@ object SwarmProviders {
                     grantStore.setAutoApprove(origin, kind.wire, true)
                 override suspend fun messaging(origin: String) = grantStore.grantFor(origin)?.messaging == true
                 override suspend fun grantMessaging(origin: String) = grantStore.grantMessaging(origin)
+                override suspend fun actAllowed(origin: String, publisher: String) =
+                    grantStore.grantFor(origin)?.act?.any { it.publicKey == publisher } == true
+                override suspend fun allowAct(origin: String, publisher: String) = grantStore.allowAct(origin, publisher)
             },
             feeds = object : SwarmProvider.Feeds {
                 override fun granted(origin: String) = feedStore.granted(origin)
@@ -372,6 +375,9 @@ object SwarmProviders {
             ManifestProjection.MessagingGrant -> grantStore.grantFor(origin)?.messaging == true
             else -> grantStore.grantFor(origin)?.autoApprove?.contains(autoKind(projection)) == true
         }
+
+        // ACT rules (#540) are only ever the user's: a manifest can't grant one.
+        override suspend fun keepsConnection(origin: String) = grantStore.grantFor(origin)?.act?.isNotEmpty() == true
 
         override suspend fun set(origin: String, projection: ManifestProjection, on: Boolean) {
             when (projection) {
@@ -526,8 +532,9 @@ object SwarmProviders {
                 // document goes: nobody is left to answer, and its place and
                 // reserved bytes go back to the pages still open. (One already
                 // joining keeps its slot until bee answers; its bytes stand.)
+                // An ACT share (#540) likewise, its sheet or its node read.
                 // A document that went while this was parsed was swept already.
-                if (method == "swarm_readData") {
+                if (method == "swarm_readData" || method == "swarm_openAct") {
                     if (doc != STALE_DOCUMENT && (documents[tab.id] ?: 0) != doc) return@launch
                     reads.add(coroutineContext.job, tab.id, doc)
                 }
@@ -922,6 +929,7 @@ object SwarmProviders {
         "swarm_createFeed", "swarm_updateFeed", "swarm_writeFeedEntry",
         "swarm_writeSingleOwnerChunk", "swarm_getSigningIdentity",
         "swarm_getMessagingIdentity", "swarm_sendPss", "swarm_sendGsoc", "swarm_subscribe",
+        "swarm_openAct",
     )
 
     /** How long a sheet waits for the user: well short of the page's five-minute timer ([swarmProviderJs]). */
@@ -1431,7 +1439,7 @@ internal fun swarmProviderJs(channel: String): String {
   var LONG = { swarm_publishData: 1, swarm_publishFiles: 1, swarm_publishChunk: 1, swarm_publishSingleOwnerChunk: 1, swarm_createFeed: 1,
     swarm_updateFeed: 1, swarm_writeFeedEntry: 1, swarm_writeSingleOwnerChunk: 1, swarm_getSigningIdentity: 1,
     swarm_requestAccess: 1, swarm_sendPss: 1, swarm_sendGsoc: 1, swarm_getMessagingIdentity: 1,
-    swarm_subscribe: 1, swarm_readData: 1 };
+    swarm_subscribe: 1, swarm_readData: 1, swarm_openAct: 1 };
   port.addEventListener('message', function (ev) {
     var msg;
     try { msg = parse(ev.data); } catch (e) { return; }
@@ -1524,6 +1532,7 @@ internal fun swarmProviderJs(channel: String): String {
     unsubscribe: method('swarm_unsubscribe'),
     sendPss: method('swarm_sendPss'),
     sendGsoc: method('swarm_sendGsoc'),
+    openAct: method('swarm_openAct'),
     on: function (event, handler) {
       if (listeners[event] && typeof handler === 'function') listeners[event].push(handler);
       return swarm;
