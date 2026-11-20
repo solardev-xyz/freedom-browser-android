@@ -341,4 +341,47 @@
     <string name="agent_publish_no_buy">Nothing is bought: the agent can only use a stamp you already have.</string>
     <string name="agent_publish_button">Publish publicly</string>
     <string name="agent_publish_fix">Ask Agent to fix</string>
+    <string name="agent_publish_rule_private_key_block">Private key block</string>
+    <string name="agent_publish_rule_aws_access_key">AWS access key</string>
+    <string name="agent_publish_rule_openai_api_key">OpenAI-style API key</string>
+    <string name="agent_publish_rule_github_token">GitHub token</string>
+    <string name="agent_publish_rule_slack_token">Slack token</string>
+    <string name="agent_publish_rule_jwt">JSON Web Token</string>
+    <string name="agent_publish_rule_url_credentials">Password in a URL</string>
+    <string name="agent_publish_rule_credential_assignment">Password or key assignment</string>
+    <string name="agent_publish_rule_ethereum_private_key">Ethereum private key</string>
+    <string name="agent_publish_rule_bip39_seed_phrase">Wallet recovery phrase</string>
+    <string name="agent_publish_rule_keystore_json">Encrypted wallet keystore</string>
+    <string name="agent_publish_rule_rpc_url_key">RPC URL with an embedded key</string>
+    <string name="agent_publish_rule_stripe_secret_key">Stripe secret key</string>
+    <string name="agent_publish_rule_google_api_key">Google API key</string>
+    <string name="agent_publish_rule_slack_webhook">Slack webhook URL</string>
+    <string name="agent_publish_rule_discord_webhook">Discord webhook URL</string>
+    <string name="agent_publish_rule_twilio_api_key">Twilio API key</string>
+    <string name="agent_publish_rule_sendgrid_api_key">SendGrid API key</string>
+    <string name="agent_publish_rule_email_address">Email address</string>
+    <string name="agent_publish_rule_phone_number">Phone number</string>
+    <string name="agent_publish_rule_iban">Bank account number (IBAN)</string>
+    <string name="agent_publish_rule_postal_address">Street address</string>
+    <string name="agent_publish_rule_possible_credential">Possible password or key</string>
+    <string name="agent_publish_rule_scan_incomplete">Couldn\'t be fully checked</string>
+    <string name="agent_publish_rule_third_party_script">Script from another site</string>
+    <string name="agent_publish_rule_third_party_link">Stylesheet or file from another site</string>
+    <string name="agent_publish_rule_third_party_image">Image from another site</string>
+    <string name="agent_publish_rule_external_form">Form that sends what\'s typed to another site</string>
+    <string name="agent_publish_rule_third_party_fetch">Request to another site (fetch)</string>
+    <string name="agent_publish_hidden">Value hidden</string>
+    <string name="agent_publish_incomplete">The check stopped before the end of the text, so it\'s treated as a secret.</string>
+    <plurals name="agent_publish_words">
+        <item quantity="one">%1$s (%2$d word)</item>
+        <item quantity="other">%1$s (%2$d words)</item>
+    </plurals>
+    <plurals name="agent_publish_chars">
+        <item quantity="one">%1$s (%2$d character)</item>
+        <item quantity="other">%1$s (%2$d characters)</item>
+    </plurals>
+    <plurals name="agent_publish_earlier_unknown">
+        <item quantity="one">An earlier publication from this chat may already be on Swarm: Freedom couldn\'t learn how it ended.</item>
+        <item quantity="other">%1$d earlier publications from this chat may already be on Swarm: Freedom couldn\'t learn how they ended.</item>
+    </plurals>
 </resources>

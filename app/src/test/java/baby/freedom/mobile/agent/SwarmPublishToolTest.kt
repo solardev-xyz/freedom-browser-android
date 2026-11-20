@@ -44,8 +44,12 @@ class SwarmPublishToolTest {
 
         /** What the fake node does once started; null leaves it uploading. */
         var outcome: ((PublishReport) -> Unit)? = { r ->
-            r.dispatched()
-            r.finished(PublishOutcome.Completed("cd".repeat(32), 10, batch.id))
+            // As Publisher does: nothing goes out unless the dispatch was recorded.
+            if (r.dispatching()) {
+                r.finished(PublishOutcome.Completed("cd".repeat(32), 10, batch.id))
+            } else {
+                r.finished(PublishOutcome.NotSent("not recorded"))
+            }
         }
 
         override suspend fun postage(stampBytes: Long) = postage
@@ -234,7 +238,7 @@ class SwarmPublishToolTest {
     @Test
     fun `a lost answer after dispatch is outcome_unknown, one never sent is not applied, and neither is retried`() {
         backend.outcome = { r ->
-            r.dispatched()
+            r.dispatching()
             r.finished(PublishOutcome.Unknown("The Swarm node didn't finish the upload in time"))
         }
         val unknown = publish("hello").publication()
@@ -248,7 +252,7 @@ class SwarmPublishToolTest {
         assertEquals("not_applied", notSent.getString("applicationState"))
 
         backend.outcome = { r ->
-            r.dispatched()
+            r.dispatching()
             r.finished(PublishOutcome.Refused("refused"))
         }
         assertEquals("possibly_applied", publish("hello", session = "third").publication().getString("applicationState"))
@@ -265,7 +269,7 @@ class SwarmPublishToolTest {
         assertEquals(1, backend.started.size)
         assertEquals(first.getString("publicationId"), second.publication().getString("publicationId"))
 
-        backend.report!!.dispatched()
+        backend.report!!.dispatching()
         backend.report!!.finished(PublishOutcome.Completed("ef".repeat(32), 5, batch.id))
         val status = tools().call(SwarmPublishTools.STATUS, JSONObject().put("publicationId", first.getString("publicationId")))
         assertEquals("completed", status.publication().getString("state"))
@@ -359,5 +363,64 @@ class SwarmPublishToolTest {
         val shown = ApprovalText.typed(long, PUBLISH_PREVIEW_CHARS) as ApprovalText.Typed.Shown
         assertTrue(shown.text.endsWith("…"))
         assertEquals(PUBLISH_PREVIEW_CHARS + 1, shown.text.length)
+    }
+
+    @Test
+    fun `an upload whose dispatch can't be recorded is not sent`() {
+        backend.outcome = { r ->
+            store.failSaves = true
+            val recorded = r.dispatching()
+            store.failSaves = false
+            assertFalse(recorded)
+            r.finished(PublishOutcome.NotSent("not recorded"))
+        }
+        val receipt = publish("hello").publication()
+        assertEquals("failed", receipt.getString("state"))
+        assertEquals("not_applied", receipt.getString("applicationState"))
+    }
+
+    @Test
+    fun `a publisher that throws on start leaves no upload blocking the chat`() {
+        val throwing = object : PublishBackend by backend {
+            override fun start(source: PublishSource.Frozen, batch: PostageBatch, report: PublishReport): Boolean = error("boom")
+        }
+        val t = SwarmPublishTools("chat", { journal }, { throwing }, ask = { a -> asked += a; answer(a) }, interactiveWaitMs = 200)
+        val out = runBlocking { t.tools.first { it.spec.name == SwarmPublishTools.PUBLISH }.run(JSONObject().put("text", "hello")) }
+        assertEquals(ToolError.CAPABILITY_UNAVAILABLE, out.code())
+        assertTrue(journal.forSession("chat").all { it.terminal })
+        // The next publish is asked for, not answered with the stuck one.
+        publish("hello again")
+        assertEquals(2, asked.size)
+    }
+
+    @Test
+    fun `the card says when an earlier publication in the chat may already be out`() {
+        backend.outcome = { r ->
+            r.dispatching()
+            r.finished(PublishOutcome.Unknown("lost"))
+        }
+        publish("first")
+        publish("second")
+        assertEquals(0, (asked[0].action as AgentAction.Publish).earlierUnknown)
+        assertEquals(1, (asked[1].action as AgentAction.Publish).earlierUnknown)
+    }
+
+    @Test
+    fun `a content type that isn't printable ASCII is refused`() {
+        val out = tools().call(SwarmPublishTools.PUBLISH, JSONObject().put("text", "x").put("contentType", "text/plain; name=\u00e9"))
+        assertEquals(ToolError.INVALID_ARGUMENT, out.code())
+    }
+
+    @Test
+    fun `every rule the card can show has a label in the app's strings`() {
+        val strings = listOf(File("src/main/res/values/strings_agent.xml"), File("app/src/main/res/values/strings_agent.xml"))
+            .first { it.exists() }.readText()
+        for (rule in PUBLISH_RULE_IDS) {
+            assertTrue(rule, strings.contains("name=\"agent_publish_rule_${rule.replace('-', '_')}\""))
+        }
+        val hygiene = PublicationScan.hygieneFindings("a.html", "<img src=\"https://x.example/a\"><script src=\"https://x.example/b\"></script>" +
+            "<link rel=stylesheet href=\"https://x.example/c\"><form action=\"https://x.example/d\"></form><script>fetch(\"https://x.example/e\")</script>",
+            markup = true, script = true).map { it.rule }.toSet()
+        assertTrue(PUBLISH_RULE_IDS.containsAll(hygiene))
     }
 }

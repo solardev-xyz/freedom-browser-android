@@ -523,4 +523,95 @@ class PublishTest {
         assertEquals("Found 1 stamp this account owns; it's in the list below.", discoverOutcomeText(1))
         assertEquals("Found 3 stamps this account owns; they're in the list below.", discoverOutcomeText(3))
     }
+
+    @Test
+    fun `frozen text is staged byte for byte, and a staged file that differs is refused`() {
+        val text = "Frozen text ✓\n".toByteArray()
+        val source = PublishSource.Frozen(text, Publisher.TEXT_FILE_NAME, "text/html; charset=utf-8")
+        val file = java.io.File.createTempFile("staged", ".bin")
+        try {
+            stageFrozen(source, file)
+            assertTrue(text.contentEquals(file.readBytes()))
+            file.appendBytes(byteArrayOf(0x20))
+            val e = assertThrows(PublishException::class.java) { checkStaged(file, source.sha256) }
+            assertEquals("What was staged isn't what was approved, so nothing was sent", e.message)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `frozen text goes to the gateway as its exact bytes with its own content type`() {
+        val seen = CopyOnWriteArrayList<String>()
+        var body = ByteArray(0)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { ex ->
+            seen += "${ex.requestMethod} ${ex.requestURI}"
+            seen += "type=${ex.requestHeaders.getFirst("Content-Type")}"
+            body = ex.requestBody.readBytes()
+            val answer = """{"reference":"$ref"}""".toByteArray()
+            ex.sendResponseHeaders(201, answer.size.toLong())
+            ex.responseBody.use { it.write(answer) }
+        }
+        server.start()
+        val file = java.io.File.createTempFile("staged", ".bin")
+        try {
+            val source = PublishSource.Frozen("<h1>Hi ✓</h1>".toByteArray(), Publisher.TEXT_FILE_NAME, "text/html; charset=utf-8")
+            stageFrozen(source, file)
+            val got = uploadToGateway(
+                "http://127.0.0.1:${server.address.port}",
+                PublishRequest(PublishKind.Text, batchA, source.fileName, source.contentType, null),
+                { file.inputStream() },
+                file.length(),
+            )
+            assertEquals(ref, got)
+            assertEquals(listOf("POST /bzz?name=text.txt", "type=text/html; charset=utf-8"), seen.toList())
+            assertTrue(source.bytes().contentEquals(body))
+        } finally {
+            server.stop(0)
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `a node that can't be reached is not sent, an answer lost after sending is uncertain`() {
+        val closed = java.net.ServerSocket(0).use { it.localPort }
+        assertThrows(PublishNotSent::class.java) {
+            uploadToGateway(
+                "http://127.0.0.1:$closed",
+                PublishRequest(PublishKind.Text, batchA, Publisher.TEXT_FILE_NAME, "text/plain", null),
+                { ByteArrayInputStream("hi".toByteArray()) },
+                2,
+            )
+        }
+        // Takes the whole body, then hangs up without answering.
+        val socket = java.net.ServerSocket(0)
+        val accept = Thread {
+            runCatching {
+                socket.accept().use { c ->
+                    val input = c.getInputStream()
+                    val buf = ByteArray(4096)
+                    var seen = ""
+                    while (!seen.contains("\r\n\r\nhi")) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        seen += String(buf, 0, n)
+                    }
+                }
+            }
+        }.apply { start() }
+        try {
+            assertThrows(PublishUncertain::class.java) {
+                uploadToGateway(
+                    "http://127.0.0.1:${socket.localPort}",
+                    PublishRequest(PublishKind.Text, batchA, Publisher.TEXT_FILE_NAME, "text/plain", null),
+                    { ByteArrayInputStream("hi".toByteArray()) },
+                    2,
+                )
+            }
+        } finally {
+            socket.close()
+            accept.join(2_000)
+        }
+    }
 }

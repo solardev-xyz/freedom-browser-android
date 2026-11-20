@@ -77,6 +77,14 @@ internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction
         Text(stringResource(R.string.agent_publish_headline), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         Text(stringResource(R.string.agent_publish_permanent), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        if (action.earlierUnknown > 0) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                baby.freedom.mobile.l10n.pluralText(R.plurals.agent_publish_earlier_unknown, action.earlierUnknown, action.earlierUnknown),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         Spacer(Modifier.height(12.dp))
         HorizontalDivider()
         Spacer(Modifier.height(8.dp))
@@ -165,7 +173,7 @@ private fun FindingRow(f: PublicationScan.Finding, ticked: Boolean, onTick: (Boo
             PublicationScan.Kind.Metadata -> R.string.agent_publish_kind_metadata
         },
     )
-    val title = "$kind: ${f.label}"
+    val title = "$kind: ${ruleLabel(f.rule) ?: f.label}"
     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(
             f.line?.let { stringResource(R.string.agent_publish_finding_line, title, it) } ?: title,
@@ -173,7 +181,7 @@ private fun FindingRow(f: PublicationScan.Finding, ticked: Boolean, onTick: (Boo
             fontWeight = if (f.blocking) FontWeight.SemiBold else null,
             color = if (f.blocking) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
         )
-        Text(ApprovalText.flatten(f.excerpt, 200), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        Text(findingExcerpt(f), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
         if (f.blocking) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -190,6 +198,62 @@ private fun FindingRow(f: PublicationScan.Finding, ticked: Boolean, onTick: (Boo
         }
     }
 }
+
+/** A finding's redacted value as the card shows it, its count in the app's language. */
+@Composable
+private fun findingExcerpt(f: PublicationScan.Finding): String {
+    val shown = ApprovalText.flatten(f.shown, 200)
+    return when {
+        f.rule == "possible-credential" -> stringResource(R.string.agent_publish_hidden)
+        f.rule == "scan-incomplete" -> stringResource(R.string.agent_publish_incomplete)
+        f.words != null -> baby.freedom.mobile.l10n.pluralText(R.plurals.agent_publish_words, f.words, shown, f.words)
+        f.chars != null -> baby.freedom.mobile.l10n.pluralText(R.plurals.agent_publish_chars, f.chars, shown, f.chars)
+        else -> shown
+    }
+}
+
+/** The card's name for a rule, from the app's strings; null for one it doesn't know. */
+@Composable
+private fun ruleLabel(rule: String): String? {
+    val id = when (rule) {
+        "private-key-block" -> R.string.agent_publish_rule_private_key_block
+        "aws-access-key" -> R.string.agent_publish_rule_aws_access_key
+        "openai-api-key" -> R.string.agent_publish_rule_openai_api_key
+        "github-token" -> R.string.agent_publish_rule_github_token
+        "slack-token" -> R.string.agent_publish_rule_slack_token
+        "jwt" -> R.string.agent_publish_rule_jwt
+        "url-credentials" -> R.string.agent_publish_rule_url_credentials
+        "credential-assignment" -> R.string.agent_publish_rule_credential_assignment
+        "ethereum-private-key" -> R.string.agent_publish_rule_ethereum_private_key
+        "bip39-seed-phrase" -> R.string.agent_publish_rule_bip39_seed_phrase
+        "keystore-json" -> R.string.agent_publish_rule_keystore_json
+        "rpc-url-key" -> R.string.agent_publish_rule_rpc_url_key
+        "stripe-secret-key" -> R.string.agent_publish_rule_stripe_secret_key
+        "google-api-key" -> R.string.agent_publish_rule_google_api_key
+        "slack-webhook" -> R.string.agent_publish_rule_slack_webhook
+        "discord-webhook" -> R.string.agent_publish_rule_discord_webhook
+        "twilio-api-key" -> R.string.agent_publish_rule_twilio_api_key
+        "sendgrid-api-key" -> R.string.agent_publish_rule_sendgrid_api_key
+        "email-address" -> R.string.agent_publish_rule_email_address
+        "phone-number" -> R.string.agent_publish_rule_phone_number
+        "iban" -> R.string.agent_publish_rule_iban
+        "postal-address" -> R.string.agent_publish_rule_postal_address
+        "possible-credential" -> R.string.agent_publish_rule_possible_credential
+        "scan-incomplete" -> R.string.agent_publish_rule_scan_incomplete
+        "third-party-script" -> R.string.agent_publish_rule_third_party_script
+        "third-party-link" -> R.string.agent_publish_rule_third_party_link
+        "third-party-image" -> R.string.agent_publish_rule_third_party_image
+        "external-form" -> R.string.agent_publish_rule_external_form
+        "third-party-fetch" -> R.string.agent_publish_rule_third_party_fetch
+        else -> return null
+    }
+    return stringResource(id)
+}
+
+/** Every rule the scan can report, for the test that each has a string. */
+internal val PUBLISH_RULE_IDS: List<String> =
+    PublicationScan.RULES.map { it.id } + listOf("possible-credential", "scan-incomplete") +
+        listOf("third-party-script", "third-party-link", "third-party-image", "external-form", "third-party-fetch")
 
 @Composable
 private fun PostageRows(postage: PostagePreview) {

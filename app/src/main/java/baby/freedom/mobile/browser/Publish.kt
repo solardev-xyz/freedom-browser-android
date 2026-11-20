@@ -702,7 +702,7 @@ internal fun uploadToGateway(
             conn.outputStream.use { out -> body().use { it.copyTo(out, 64 * 1024) } }
         } catch (e: java.net.ConnectException) {
             // Nothing reached the node.
-            throw e
+            throw PublishNotSent(Strings.get(R.string.publish_error_send_failed))
         } catch (e: IOException) {
             throw PublishUncertain(Strings.get(R.string.publish_error_send_failed))
         }
@@ -711,7 +711,7 @@ internal fun uploadToGateway(
         } catch (e: java.net.SocketTimeoutException) {
             throw PublishUncertain(Strings.get(R.string.publish_error_timeout))
         } catch (e: IOException) {
-            throw PublishUncertain(Strings.get(R.string.publish_error_send_failed))
+            throw PublishUncertain(Strings.get(R.string.publish_error_node_unreachable))
         }
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val text = stream?.use { it.readBytesCapped(64 * 1024) }?.toString(Charsets.UTF_8)
@@ -793,11 +793,26 @@ internal sealed interface PublishOutcome {
     data class Unknown(val message: String) : PublishOutcome
 }
 
-/** What [Publisher.start] tells a caller as a publish goes: [dispatched] just before the upload, then [finished] once. */
+/**
+ * What [Publisher.start] tells a caller as a publish goes: [dispatching]
+ * just before the upload, which goes ahead only if it answers true (the
+ * caller recorded that it may now be out), then [finished] once.
+ */
 internal interface PublishReport {
-    fun dispatched()
+    fun dispatching(): Boolean
 
     fun finished(outcome: PublishOutcome)
+}
+
+/** Stages [source] in [to] and checks the staged bytes against its digest; throws [PublishException] if they differ. */
+internal fun stageFrozen(source: PublishSource.Frozen, to: File) {
+    source.writeTo(to)
+    checkStaged(to, source.sha256)
+}
+
+/** What's staged in [file] is what was approved ([sha256]), or nothing goes out. */
+internal fun checkStaged(file: File, sha256: ByteArray) {
+    if (!sha256Of(file).contentEquals(sha256)) throw PublishException(Strings.get(R.string.publish_error_changed))
 }
 
 /**
@@ -891,8 +906,7 @@ internal object Publisher {
             var outcome: PublishOutcome? = null
             try {
                 val (reference, bytes) = run(app, plan, batch, releaseSource::invoke, { waitingForNode(record.id, it) }) {
-                    dispatched = true
-                    report?.dispatched()
+                    (report?.dispatching() ?: true).also { if (it) dispatched = true }
                 }
                 history.completed(record.id, reference, batchId, bytes)
                 outcome = PublishOutcome.Completed(reference, bytes, batchId)
@@ -980,7 +994,7 @@ internal object Publisher {
         batch: PostageBatch,
         sourceRead: () -> Unit,
         waiting: (Boolean) -> Unit,
-        dispatching: () -> Unit,
+        dispatching: () -> Boolean,
     ): Pair<String, Long> {
         val batchId = batch.id
         val resolver = app.contentResolver
@@ -999,9 +1013,8 @@ internal object Publisher {
                     PublishRequest(PublishKind.Text, batchId, TEXT_FILE_NAME, "text/plain; charset=utf-8", null)
                 }
                 is PublishSource.Frozen -> {
-                    s.writeTo(staged)
                     // What's staged is what was approved, or nothing goes out.
-                    if (!sha256Of(staged).contentEquals(s.sha256)) throw PublishException(Strings.get(R.string.publish_error_changed))
+                    stageFrozen(s, staged)
                     published = staged.length()
                     sizes += published
                     PublishRequest(PublishKind.Text, batchId, s.fileName, s.contentType, null)
@@ -1045,8 +1058,9 @@ internal object Publisher {
             // would cut the upload off: wait it out (#222 R4-F1).
             StampClient.awaitGatewayQuiet(onWaiting = { waiting(true) })
             waiting(false)
+            // The caller couldn't record that it may now be out: nothing goes.
+            if (!dispatching()) throw PublishException(Strings.get(R.string.publish_error_not_recorded))
             dispatched = true
-            dispatching()
             val reference = uploadToGateway(SwarmNode.GATEWAY_URL, request, { staged.inputStream() }, staged.length())
             return reference to published
         } catch (e: SecurityException) {

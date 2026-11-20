@@ -44,6 +44,8 @@ internal sealed interface AgentAction {
         val contentType: String,
         val findings: List<PublicationScan.Finding>,
         val postage: PostagePreview,
+        /** Earlier publications in this chat whose outcome isn't known: they may already be out. */
+        val earlierUnknown: Int = 0,
     ) : AgentAction
 }
 

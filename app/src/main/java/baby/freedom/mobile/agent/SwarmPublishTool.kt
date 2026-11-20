@@ -172,8 +172,7 @@ internal class FilePublicationJournalStore(private val file: File) : Publication
         }
         if (!tmp.renameTo(file)) throw java.io.IOException("rename failed")
         // The rename itself survives a power loss only once the directory is synced too.
-        runCatching { FileOutputStream(file.parentFile!!).use { it.fd.sync() } }
-        true
+        baby.freedom.mobile.wallet.FileSendJournal.syncDirectory(file.parentFile)
     } catch (e: Exception) {
         Log.w("AgentPublications", "saving the journal failed (${e.javaClass.simpleName})")
         false
@@ -227,8 +226,9 @@ internal class AgentPublications(
         true
     }
 
-    fun update(id: String, change: (AgentPublication) -> AgentPublication) = synchronized(lock) {
-        val current = _records.value[id] ?: return@synchronized
+    /** Changes [id]'s record; false if it's gone or the change couldn't be written (it still shows in memory). */
+    fun update(id: String, change: (AgentPublication) -> AgentPublication): Boolean = synchronized(lock) {
+        val current = _records.value[id] ?: return@synchronized false
         val next = _records.value + (id to change(current).copy(updatedAt = clock()))
         _records.value = next
         store.save(next.values.toList())
@@ -372,7 +372,10 @@ internal class SwarmPublishTools(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            ToolError(ToolError.INTERNAL, "The Swarm publication failed unexpectedly. Nothing was uploaded.").outcome(spec.name)
+            ToolError(
+                ToolError.INTERNAL,
+                "The Swarm publication failed unexpectedly. Check swarm_publication_status before publishing again.",
+            ).outcome(spec.name)
         }
     }
 
@@ -395,7 +398,8 @@ internal class SwarmPublishTools(
         val contentType = when (val t = a.opt("contentType")) {
             null, JSONObject.NULL -> DEFAULT_CONTENT_TYPE
             is String -> t.trim().also {
-                if (it.isEmpty() || it.length > 255 || it.any { c -> c.code < 0x20 || c.code == 0x7f }) {
+                // Printable ASCII only: it goes to the node as a header.
+                if (it.isEmpty() || it.length > 255 || it.any { c -> c.code < 0x20 || c.code > 0x7e }) {
                     bad("contentType must be a bounded media type")
                 }
             }
@@ -449,6 +453,7 @@ internal class SwarmPublishTools(
             contentType = contentType,
             findings = findings,
             postage = postage,
+            earlierUnknown = journal.forSession(sessionId, AgentPublications.MAX_RECORDS).count { it.state == AgentPublication.OUTCOME_UNKNOWN },
         )
         val approval = AgentApproval(
             id = AgentApprovals.nextId(),
@@ -516,18 +521,27 @@ internal class SwarmPublishTools(
             )
         }
         val id = record.publicationId
-        val started = backend.start(frozen, batch, object : PublishReport {
-            override fun dispatched() = journal.update(id) { it.copy(dispatched = true) }
+        val report = object : PublishReport {
+            // Recorded before anything goes out, or nothing does: a restart must never read a sent upload as unsent.
+            override fun dispatching() = journal.update(id) { it.copy(dispatched = true) }
 
-            override fun finished(outcome: PublishOutcome) = journal.update(id) { r ->
-                when (outcome) {
-                    is PublishOutcome.Completed -> r.copy(state = AgentPublication.COMPLETED, reference = outcome.reference, message = null)
-                    is PublishOutcome.NotSent -> r.copy(state = AgentPublication.FAILED, dispatched = false, message = outcome.message)
-                    is PublishOutcome.Refused -> r.copy(state = AgentPublication.FAILED, message = outcome.message)
-                    is PublishOutcome.Unknown -> r.copy(state = AgentPublication.OUTCOME_UNKNOWN, message = outcome.message)
+            override fun finished(outcome: PublishOutcome) {
+                journal.update(id) { r ->
+                    when (outcome) {
+                        is PublishOutcome.Completed -> r.copy(state = AgentPublication.COMPLETED, reference = outcome.reference, message = null)
+                        is PublishOutcome.NotSent -> r.copy(state = AgentPublication.FAILED, dispatched = false, message = outcome.message)
+                        is PublishOutcome.Refused -> r.copy(state = AgentPublication.FAILED, message = outcome.message)
+                        is PublishOutcome.Unknown -> r.copy(state = AgentPublication.OUTCOME_UNKNOWN, message = outcome.message)
+                    }
                 }
             }
-        })
+        }
+        val started = try {
+            backend.start(frozen, batch, report)
+        } catch (e: Exception) {
+            journal.update(id) { it.copy(state = AgentPublication.FAILED, message = "Freedom couldn't start the upload. Nothing was sent.") }
+            throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Freedom couldn't start the upload. Nothing was uploaded.")
+        }
         if (!started) {
             journal.update(id) {
                 it.copy(state = AgentPublication.FAILED, message = "Another publish, or stamp work on the node, is running. Nothing was sent.")

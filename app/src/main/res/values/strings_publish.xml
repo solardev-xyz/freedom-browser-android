@@ -29,6 +29,7 @@
     <string name="publish_error_http_refused_code">The node refused the upload (HTTP %1$s)</string>
     <string name="publish_error_send_failed">Couldn\'t hand the upload to the Swarm node</string>
     <string name="publish_error_timeout">The Swarm node didn\'t finish the upload in time</string>
+    <string name="publish_error_not_recorded">Couldn\'t record the upload before sending it, so nothing was sent. The phone may be out of storage.</string>
     <string name="publish_error_changed">What was staged isn\'t what was approved, so nothing was sent</string>
     <string name="publish_error_no_text">There\'s no text to publish</string>
     <string name="publish_error_text_too_big">The text is bigger than %1$s</string>

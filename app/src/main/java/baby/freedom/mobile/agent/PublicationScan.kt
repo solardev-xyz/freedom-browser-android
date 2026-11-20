@@ -37,7 +37,11 @@ internal object PublicationScan {
 
     enum class Kind(val wire: String) { Secret("secret"), Personal("personal"), Metadata("metadata"), ThirdParty("third-party") }
 
-    /** One finding, as the card lists it. [line] is null for a whole-file finding. */
+    /**
+     * One finding, as the card lists it. [line] is null for a whole-file
+     * finding. [excerpt] is desktop's English excerpt; the card builds its
+     * own from [shown] (the redacted value) and [words] or [chars].
+     */
     data class Finding(
         val id: String = "",
         val path: String,
@@ -47,7 +51,13 @@ internal object PublicationScan {
         val line: Int?,
         val excerpt: String,
         val blocking: Boolean,
+        val shown: String = excerpt,
+        val words: Int? = null,
+        val chars: Int? = null,
     )
+
+    /** A redacted value: what may be [shown], and how many [words] or [chars] the whole had. */
+    data class Redacted(val shown: String, val words: Int? = null, val chars: Int? = null)
 
     /** More secrets than the card could list one by one: desktop's `PUBLICATION_TOO_MANY_FINDINGS`. */
     class TooManyFindings(val count: Int) : Exception("The pre-publish check found $count possible secrets")
@@ -494,25 +504,34 @@ internal object PublicationScan {
     private const val DOTS8 = "••••••••"
 
     /** What the user sees: enough to recognise the value, not enough to reuse it. */
-    fun redact(ruleId: String, value: String): String {
+    fun redactParts(ruleId: String, value: String): Redacted {
         when (ruleId) {
             "bip39-seed-phrase" -> {
                 val words = value.split(' ')
-                return "${words[0]} $DOTS4 (${words.size} words)"
+                return Redacted("${words[0]} $DOTS4", words = words.size)
             }
             "email-address" -> {
                 val at = value.indexOf('@')
-                return "${value[0]}•••${value.substring(at)}"
+                return Redacted("${value[0]}•••${value.substring(at)}")
             }
             "phone-number", "iban" -> {
                 val compact = value.removePrefix("tel:")
-                return "${compact.take(4)}$DOTS4${compact.takeLast(2)}"
+                return Redacted("${compact.take(4)}$DOTS4${compact.takeLast(2)}")
             }
-            "postal-address" -> return value.map { if (isAsciiDigit(it)) '•' else it }.joinToString("")
+            "postal-address" -> return Redacted(value.map { if (isAsciiDigit(it)) '•' else it }.joinToString(""))
         }
-        if (Regex("^[a-z]+://", RegexOption.IGNORE_CASE).containsMatchIn(value)) return value.substring(0, value.lastIndexOf('/') + 1) + DOTS8
+        if (Regex("^[a-z]+://", RegexOption.IGNORE_CASE).containsMatchIn(value)) return Redacted(value.substring(0, value.lastIndexOf('/') + 1) + DOTS8)
         val shown = minOf(6, value.length / 4)
-        return "${value.take(shown)}$DOTS8 (${value.length} characters)"
+        return Redacted("${value.take(shown)}$DOTS8", chars = value.length)
+    }
+
+    /** Desktop's excerpt, in its English. */
+    fun redact(ruleId: String, value: String): String = redactParts(ruleId, value).let { r ->
+        when {
+            r.words != null -> "${r.shown} (${r.words} words)"
+            r.chars != null -> "${r.shown} (${r.chars} characters)"
+            else -> r.shown
+        }
     }
 
     private fun incomplete(path: String) = Finding(
@@ -539,9 +558,11 @@ internal object PublicationScan {
                         if (warnings >= MAX_WARNINGS_PER_FILE) continue
                         warnings++
                     }
+                    val r = redactParts(rule.id, match.value)
                     findings += Finding(
                         path = path, kind = rule.kind, rule = rule.id, label = rule.label, line = lines.of(match.index),
                         excerpt = redact(rule.id, match.value), blocking = rule.kind == Kind.Secret,
+                        shown = r.shown, words = r.words, chars = r.chars,
                     )
                 }
             } catch (e: CancellationException) {
