@@ -256,18 +256,18 @@ class AgentFilesTest {
         assertFalse(AgentDownloads.lapse(i))
         // Another address is an ordinary held download.
         assertNull(AgentDownloads.claim(1, "https://evil.example/a.zip"))
-        assertFalse(AgentDownloads.takeLate(1))
+        assertNull(AgentDownloads.takeLate(1))
         assertTrue(AgentDownloads.takeHeld(1))
         // The approved link, late: waits for the user, not saved, and is
         // not cleared by the next step's start (which takes only held ones).
         assertNull(AgentDownloads.claim(1, "https://example.com/a.zip#x"))
         assertFalse(i.start.isCompleted)
         assertFalse(AgentDownloads.takeHeld(1))
-        assertTrue(AgentDownloads.takeLate(1))
-        assertFalse(AgentDownloads.takeLate(1))
+        assertEquals("https://example.com/a.zip", AgentDownloads.takeLate(1))
+        assertNull(AgentDownloads.takeLate(1))
         // Once only: the same link again is an ordinary held download.
         assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
-        assertFalse(AgentDownloads.takeLate(1))
+        assertNull(AgentDownloads.takeLate(1))
         assertTrue(AgentDownloads.takeHeld(1))
         // A new intent on the tab replaces the lapsed one.
         val k = intent()
@@ -277,15 +277,74 @@ class AgentFilesTest {
         assertTrue(AgentDownloads.arm(j))
         assertTrue(AgentDownloads.disarm(j))
         assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
-        assertFalse(AgentDownloads.takeLate(1))
-        // A late download not yet said keeps a new intent from arming: that file already waits.
+        assertNull(AgentDownloads.takeLate(1))
+        // A late download not yet said keeps a new intent for the same link
+        // from arming (that file already waits), but not one for another link.
         val m = intent()
         assertTrue(AgentDownloads.arm(m))
         assertTrue(AgentDownloads.lapse(m))
         assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
         assertFalse(AgentDownloads.arm(intent()))
-        assertTrue(AgentDownloads.takeLate(1))
+        val other = intent("https://example.com/b.zip")
+        assertTrue(AgentDownloads.arm(other))
+        AgentDownloads.disarm(other)
+        // Taken only for its own link.
+        assertFalse(AgentDownloads.takeLate(1, "https://example.com/b.zip"))
+        assertTrue(AgentDownloads.takeLate(1, "https://example.com/a.zip#frag"))
+        assertNull(AgentDownloads.takeLate(1))
         assertTrue(AgentDownloads.arm(intent()))
+    }
+
+    @Test
+    fun `a lapse is forgotten after its window, and when the tab goes back to the user`() {
+        var now = 1_000L
+        AgentDownloads.clock = { now }
+        val i = intent()
+        assertTrue(AgentDownloads.arm(i))
+        assertTrue(AgentDownloads.lapse(i))
+        now += AgentDownloads.LATE_WINDOW_MS + 1
+        // The page offers the same file again much later: an ordinary held download.
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertNull(AgentDownloads.takeLate(1))
+        assertTrue(AgentDownloads.takeHeld(1))
+        // Within the window it is still the late one.
+        val j = intent()
+        assertTrue(AgentDownloads.arm(j))
+        assertTrue(AgentDownloads.lapse(j))
+        now += AgentDownloads.LATE_WINDOW_MS
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertEquals("https://example.com/a.zip", AgentDownloads.takeLate(1))
+        // Released: a lapse, a late note and a held one all go with the tab.
+        val k = intent()
+        assertTrue(AgentDownloads.arm(k))
+        assertTrue(AgentDownloads.lapse(k))
+        AgentDownloads.released(1)
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertNull(AgentDownloads.takeLate(1))
+        assertTrue(AgentDownloads.takeHeld(1))
+        assertNull(AgentDownloads.claim(1, "https://example.com/c.zip"))
+        AgentDownloads.released(1)
+        assertFalse(AgentDownloads.takeHeld(1))
+    }
+
+    @Test
+    fun `the approved link's late download in a window it opened is noted as late on the tab it was asked on`() {
+        AgentDownloads.holderOf = { if (it == 1L || it == 2L) "chat" else null }
+        AgentDownloads.openerOf = { if (it == 2L) 1L else null }
+        val i = intent()
+        assertTrue(AgentDownloads.arm(i))
+        assertTrue(AgentDownloads.lapse(i))
+        assertNull(AgentDownloads.claim(2, "https://example.com/a.zip"))
+        assertFalse(i.start.isCompleted)
+        // Not a held flag the next step's start would clear unsaid, on either tab.
+        assertFalse(AgentDownloads.takeHeld(1))
+        assertFalse(AgentDownloads.takeHeld(2))
+        assertEquals("https://example.com/a.zip", AgentDownloads.takeLate(1))
+        assertNull(AgentDownloads.takeLate(2))
+        // Another address from the popup is an ordinary held download, on both.
+        assertNull(AgentDownloads.claim(2, "https://example.com/other.zip"))
+        assertTrue(AgentDownloads.takeHeld(1))
+        assertTrue(AgentDownloads.takeHeld(2))
     }
 
     @Test

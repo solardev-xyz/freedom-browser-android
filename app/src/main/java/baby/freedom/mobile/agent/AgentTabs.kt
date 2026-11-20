@@ -57,6 +57,7 @@ internal object AgentTabs {
         holders.remove(tabId)
         openers.remove(tabId)
         AgentApprovals.withdrawTab(tabId)
+        AgentDownloads.released(tabId)
     }
 
     /** [tabId] closed. */

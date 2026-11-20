@@ -1274,6 +1274,53 @@ class BrowserToolsTest {
     }
 
     @Test
+    fun `browser_download for another link goes ahead while an earlier link's late download waits, and says it`() = runBlocking {
+        downloadLink("https://example.com/files/b.pdf")
+        val earlier = DownloadIntent("chat", 1, "https://example.com/files/a.pdf", direct = true)
+        assertTrue(AgentDownloads.arm(earlier))
+        assertTrue(AgentDownloads.lapse(earlier))
+        files.rows[42] = files.entry(42, "b.pdf", "completed")
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/b.pdf")!!.started(42) }
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        // The first link's download comes after the snapshot that found the second link.
+        assertNull(AgentDownloads.claim(1, "https://example.com/files/a.pdf"))
+        val out = tools.call("browser_download", JSONObject().put("ref", ref))
+        assertFalse(out.output, out.isError)
+        assertEquals(1, asked.size)
+        assertEquals(1, files.records.of("chat").size)
+        // The earlier link's late download is said with this result, naming that link, once.
+        val note = out.result().getString("lateDownload")
+        assertTrue(note, note.contains("https://example.com/files/a.pdf"))
+        assertFalse(note.contains("b.pdf"))
+        assertFalse(tools.call("browser_snapshot").result().has("lateDownload"))
+    }
+
+    @Test
+    fun `an earlier link's late download is said with another link's refused download too`() = runBlocking {
+        downloadLink("https://example.com/files/b.pdf")
+        val earlier = DownloadIntent("chat", 1, "https://example.com/files/a.pdf", direct = true)
+        assertTrue(AgentDownloads.arm(earlier))
+        assertTrue(AgentDownloads.lapse(earlier))
+        answer = {
+            // The first link's download comes while the user reads the second link's card.
+            assertNull(AgentDownloads.claim(1, "https://example.com/files/a.pdf"))
+            ApprovalOutcome.Approved
+        }
+        var tapped = false
+        host.duringTap = {
+            tapped = true
+            AgentDownloads.claim(1, "https://example.com/files/b.pdf")!!.declined()
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        // The user's Allow for the second link still taps it.
+        assertTrue(tapped)
+        assertEquals("DOWNLOAD_CANCELLED_BY_USER", out.code())
+        assertTrue(out.output, out.output.contains("https://example.com/files/a.pdf"))
+    }
+
+    @Test
     fun `a download held before a step isn't reported with it`() = runBlocking {
         host.add(page(1))
         AgentTabs.hold(1, "chat", private = false)

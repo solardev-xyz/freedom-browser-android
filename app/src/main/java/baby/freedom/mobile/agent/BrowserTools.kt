@@ -283,7 +283,7 @@ internal class BrowserToolset(
 
     /** An approved download that came after browser_download gave up on it ([AgentDownloads.lapse]), said once. */
     private fun noteLate(tabId: Long, out: JSONObject): JSONObject {
-        if (AgentDownloads.takeLate(tabId)) out.put("lateDownload", LATE_DOWNLOAD_NOTE)
+        AgentDownloads.takeLate(tabId)?.let { out.put("lateDownload", lateDownloadNote(it)) }
         return out
     }
 
@@ -700,7 +700,9 @@ internal class BrowserToolset(
      * after the approved download started is said with its result
      * (`heldDownload`). The approved link's download coming only after the
      * start wait ran out waits for the user too, and is said with the next
-     * step on the tab (`lateDownload`), or instead of asking again here.
+     * step on the tab (`lateDownload`, naming that link), or instead of
+     * asking again here when this call names the same link; a call for
+     * another link goes ahead and says it with its own result.
      * The card shows that address in full; one it can't
      * show as it is isn't asked about. A download that starts on the
      * approval alone stops if the turn stops or it can't be recorded.
@@ -708,10 +710,17 @@ internal class BrowserToolset(
     private suspend fun download(rawRef: String): ToolOutcome {
         val port = files() ?: throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Downloads are unavailable right now.")
         val tab = heldTab(readable = true)
-        // The approved link's download came after an earlier call gave up on it: not asked again.
-        if (AgentDownloads.takeLate(tab.id)) {
-            throw ToolError(ToolError.APPROVAL_REQUIRED, "$LATE_DOWNLOAD_NOTE Nothing else was done.")
+        // An earlier call's link whose download came late is said with this
+        // call's result, whichever way it ends (unless this call is for that link).
+        val result = try {
+            downloadOn(port, tab, rawRef)
+        } catch (e: ToolError) {
+            throw AgentDownloads.takeLate(tab.id)?.let { e.withNote(lateDownloadNote(it)) } ?: e
         }
+        return ok(noteLate(tab.id, result))
+    }
+
+    private suspend fun downloadOn(port: AgentFilesPort, tab: AgentTab, rawRef: String): JSONObject {
         val ref = resolveRef(tab, rawRef)
         if (ref.viewport) throw ToolError(ToolError.INVALID_ARGUMENT, "Use the viewport reference only with browser_scroll.")
         val raw = describeRaw(tab, ref, "click")
@@ -738,15 +747,19 @@ internal class BrowserToolset(
                 "This link's address can't be shown to the user as it is. Ask the user to download it manually.",
             )
         }
+        // This link's download came after an earlier call gave up on it: not asked again.
+        if (AgentDownloads.takeLate(tab.id, href)) {
+            throw ToolError(ToolError.APPROVAL_REQUIRED, "${lateDownloadNote(href)} Nothing else was done.")
+        }
         val approval = approve(tab.id, tab.site, tab.document, AgentAction.Download(target), null, needsScreen = true)
         val run = onScreen(tab, ref, approval, "click", null)
         // Read as the intent is armed: a change made while the card was up counts.
         val direct = !port.askWhereToSave()
         val intent = DownloadIntent(sessionId, tab.id, href, direct)
         if (!AgentDownloads.arm(intent)) {
-            // The earlier call's download came while this card was up: not tapped again.
-            if (AgentDownloads.takeLate(tab.id)) {
-                throw ToolError(ToolError.APPROVAL_REQUIRED, "$LATE_DOWNLOAD_NOTE Nothing else was done.")
+            // The earlier call's download of this link came while this card was up: not tapped again.
+            if (AgentDownloads.takeLate(tab.id, href)) {
+                throw ToolError(ToolError.APPROVAL_REQUIRED, "${lateDownloadNote(href)} Nothing else was done.")
             }
             throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Another approved download is already pending on this page. Nothing was done.")
         }
@@ -874,7 +887,7 @@ internal class BrowserToolset(
         }
         val result = JSONObject().put("artifact", receipt.json())
         if (heldToo) result.put("heldDownload", HELD_DOWNLOAD_NOTE)
-        return ok(result)
+        return result
     }
 
     /** `browser_list_downloads` (#600): the receipts of this chat's downloads, newest first. */
@@ -1095,9 +1108,11 @@ internal class BrowserToolset(
         /** A link address the page script cut ([page.js] `describe`): too long to match a download against. */
         const val MAX_LINK_CHARS = 4_096
 
-        const val LATE_DOWNLOAD_NOTE = "The approved link's download started after browser_download had stopped " +
-            "waiting for it. It was not saved: it waits for the user in Freedom's download prompt. Do not call " +
-            "browser_download for it again; tell the user it is waiting for their answer."
+        /** [link]'s download (approved earlier) came after browser_download stopped waiting for it. */
+        fun lateDownloadNote(link: String) = "The download of $link, approved earlier, started after " +
+            "browser_download had stopped waiting for it. It was not saved: it waits for the user in Freedom's " +
+            "download prompt. Do not call browser_download for that link again; tell the user it is waiting for " +
+            "their answer."
 
         const val HELD_DOWNLOAD_NOTE = "The page started a download that no approval covered. It waits for the " +
             "user in Freedom's download prompt and was not saved. If the task needs that file, use " +
