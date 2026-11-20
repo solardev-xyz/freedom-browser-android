@@ -32,7 +32,8 @@ class RadiclePromptRequest internal constructor(val ask: RadicleAsk) {
     /**
      * The user's answer, or (with [alwaysAllow] null) the prompt being
      * taken down; [alwaysAllow] is where a [RadicleAsk.Write]'s switch was
-     * left when the user answered it.
+     * left when the user answered it — null too for a write in a tab
+     * Freedom Agent holds, whose prompt has no switch (#591).
      */
     fun respond(allowed: Boolean, alwaysAllow: Boolean? = null) {
         answer.complete(RadicleAnswer(allowed, alwaysAllow))
@@ -321,7 +322,8 @@ object RadicleProviders {
                 val p = provider ?: throw IllegalStateException("provider not ready")
                 val ps = params!!
                 params = null
-                p.request(origin, method, ps) { ask ->
+                // Read live, by this tab: the same site in a tab of the user's keeps its rule (#591).
+                p.request(origin, method, ps, agentHeld = { baby.freedom.mobile.agent.AgentTabs.isHeld(tab.id) }) { ask ->
                     askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime())
                 }
             } catch (e: CancellationException) {
