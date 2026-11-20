@@ -100,6 +100,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
+import baby.freedom.mobile.names.NameException
+import baby.freedom.mobile.names.NameRegistrar
 import baby.freedom.mobile.names.NameRegistrationScreen
 import baby.freedom.mobile.names.NamesEntrySection
 import baby.freedom.mobile.l10n.Strings
@@ -1725,6 +1727,12 @@ fun WalletScreen(
                             EthereumProviders.walletRemoved(context)
                             // Its site allowances and payment history (#140).
                             x402.clear()
+                            // The names its accounts were registering or renewing (#579).
+                            try {
+                                NameRegistrar.get(context).wipe()
+                            } catch (e: NameException) {
+                                android.util.Log.w("WalletScreen", "couldn't forget the name operations (${e.code})")
+                            }
                         },
                     )
                     // With the backup: the entry's lock is taken before the vault's, so a

@@ -476,4 +476,13 @@ class NameRegistrarTest {
         r.dismiss(op.id)
         assertEquals(emptyList<NameOperation>(), r.operations.value)
     }
+
+    @Test
+    fun `removing the wallet forgets every operation and its secret`() = runBlocking {
+        val r = registrar()
+        r.start(r.check("freedom.eth", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        r.wipe()
+        assertEquals(emptyList<NameOperation>(), r.operations.value)
+        assertEquals(emptyList<NameOperation>(), journal.saved)
+    }
 }

@@ -522,6 +522,21 @@ class NameRegistrar internal constructor(
         }
     }
 
+    /**
+     * Forgets every operation, the sealed secrets with them: Remove wallet
+     * does this, since each names the wallet's addresses and the names
+     * they were registering (as the wallet's history is wiped). An
+     * outcome still on its way is dropped with them, as the wallet's own
+     * send is.
+     */
+    suspend fun wipe() {
+        loaded.await()
+        writing.withLock {
+            if (!withContext(io) { journal.save(emptyList()) }) refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
+            _operations.value = emptyList()
+        }
+    }
+
     /** Applies [change] to the newest copy of [id]: a dispatch's outcome is never dropped. */
     private suspend fun record(id: String, change: (NameOperation) -> NameOperation) {
         writing.withLock {
