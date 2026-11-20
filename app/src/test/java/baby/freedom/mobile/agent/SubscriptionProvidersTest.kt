@@ -314,14 +314,127 @@ class SubscriptionProvidersTest {
         assertTrue(state.keys.isEmpty())
     }
 
+    private fun renewed(tag: String, refresh: String = "rt-2") = json(
+        JSONObject().put("access_token", jwt("acct-1", tag)).put("refresh_token", refresh).put("expires_in", 3600),
+    )
+
     @Test
-    fun `a 401 mid-chat means signing in again`() = runBlocking {
+    fun `a 401 renews the token once and tries again, and only a refused renewal means signing in again`() = runBlocking {
         codexServer()
         assertTrue(providers.setEnabled(true))
         signIn(SubscriptionAuth.CODEX)
-        routes["/openai-codex/codex/responses"] = { MockResponse().setResponseCode(401) }
         val target = providers.chatTarget(ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")) as ChatTarget.Ready
+        // The first token was refused before it ran out; the renewed one works.
+        routes["/openai-codex/codex/responses"] = {
+            if (seen.count { it.requestUrl!!.encodedPath == "/openai-codex/codex/responses" } == 1) {
+                MockResponse().setResponseCode(401)
+            } else {
+                reply("Hello")
+            }
+        }
+        routes["/openai/oauth/token"] = { renewed("second") }
+        val ok = providers.streamStep(target, request) {} as StepOutcome.Ok
+        assertEquals("Hello", ok.result.text)
+        val sent = requests("/openai-codex/codex/responses")
+        assertEquals(listOf("Bearer ${jwt("acct-1")}", "Bearer ${jwt("acct-1", "second")}"), sent.map { it.getHeader("Authorization") })
+        assertEquals("rt-2", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
+        // The renewed token refused too: sign in again.
+        routes["/openai-codex/codex/responses"] = { MockResponse().setResponseCode(401) }
+        routes["/openai/oauth/token"] = { renewed("third", "rt-3") }
         assertEquals(StepOutcome.Failed(ChatError.SignInAgain), providers.streamStep(target, request) {})
+        // The renewal refused: sign in again.
+        routes["/openai/oauth/token"] = { json(JSONObject().put("error", "invalid_grant"), 401) }
+        assertEquals(StepOutcome.Failed(ChatError.SignInAgain), providers.streamStep(target, request) {})
+        assertEquals(TestResult.SignInAgain, providers.testConnection(SubscriptionAuth.CODEX, "gpt-6-astra"))
+        // A 403 doesn't say the token's dead: no renewal for it.
+        val renewals = requests("/openai/oauth/token").size
+        routes["/openai-codex/codex/responses"] = { MockResponse().setResponseCode(403) }
+        assertEquals(StepOutcome.Failed(ChatError.Unauthorized), providers.streamStep(target, request) {})
+        assertEquals(renewals, requests("/openai/oauth/token").size)
+    }
+
+    @Test
+    fun `a token renewed while AI goes off is kept, so the sign-in still works once it's back on`() = runBlocking {
+        codexServer(expiresIn = 60)
+        assertTrue(providers.setEnabled(true))
+        signIn(SubscriptionAuth.CODEX)
+        val release = CountDownLatch(1)
+        routes["/openai/oauth/token"] = {
+            release.await(5, TimeUnit.SECONDS)
+            renewed("second")
+        }
+        val ref = ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")
+        val pending = async(Dispatchers.IO) { providers.chatTarget(ref) }
+        withTimeout(5_000) { while (requests("/openai/oauth/token").size < 2) delay(20) }
+        assertTrue(providers.setEnabled(false))
+        release.countDown()
+        assertEquals(ChatTarget.Unavailable(ChatError.AiOff), pending.await())
+        // ChatGPT used up rt-1 in that refresh: rt-2 is what's left to renew with.
+        assertEquals("rt-2", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
+        assertTrue(providers.setEnabled(true))
+        val target = providers.chatTarget(ref) as ChatTarget.Ready
+        assertEquals(jwt("acct-1", "second"), target.key)
+        assertEquals(2, requests("/openai/oauth/token").size)
+    }
+
+    @Test
+    fun `a caller stopped mid-renewal still leaves the new token saved`() = runBlocking {
+        codexServer(expiresIn = 3600)
+        assertTrue(providers.setEnabled(true))
+        signIn(SubscriptionAuth.CODEX)
+        withTimeout(5_000) { while (providers.models.first()[SubscriptionAuth.CODEX] == null) delay(20) }
+        now += 3_600_000L
+        val release = CountDownLatch(1)
+        routes["/openai/oauth/token"] = {
+            release.await(5, TimeUnit.SECONDS)
+            renewed("second")
+        }
+        // Stop pressed while the chat's step renews its token.
+        val step = async(Dispatchers.IO) { providers.chatTarget(ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")) }
+        withTimeout(5_000) { while (requests("/openai/oauth/token").size < 2) delay(20) }
+        step.cancel()
+        release.countDown()
+        withTimeout(5_000) {
+            while (SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh != "rt-2") delay(20)
+        }
+    }
+
+    @Test
+    fun `a renewal that works again clears signed out`() = runBlocking {
+        codexServer(expiresIn = 60)
+        assertTrue(providers.setEnabled(true))
+        signIn(SubscriptionAuth.CODEX)
+        val ref = ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")
+        routes["/openai/oauth/token"] = { json(JSONObject().put("error", "invalid_grant"), 400) }
+        assertEquals(ChatTarget.Unavailable(ChatError.SignInAgain), providers.chatTarget(ref))
+        assertTrue(SubscriptionAuth.CODEX in providers.signedOut.value)
+        routes["/openai/oauth/token"] = { renewed("second") }
+        assertTrue(providers.chatTarget(ref) is ChatTarget.Ready)
+        assertFalse(SubscriptionAuth.CODEX in providers.signedOut.value)
+    }
+
+    @Test
+    fun `leaving the page after signing in doesn't stop the model list it fetches`() = runBlocking {
+        codexServer()
+        val release = CountDownLatch(1)
+        val list = routes["/openai-codex/codex/models"]!!
+        routes["/openai-codex/codex/models"] = {
+            release.await(5, TimeUnit.SECONDS)
+            list()
+        }
+        assertTrue(providers.setEnabled(true))
+        assertEquals(LoginState.Done(SubscriptionAuth.CODEX), signIn(SubscriptionAuth.CODEX))
+        withTimeout(5_000) { while (requests("/openai-codex/codex/models").isEmpty()) delay(20) }
+        providers.dismissLogin(SubscriptionAuth.CODEX)
+        assertNull(providers.login.value)
+        release.countDown()
+        withTimeout(5_000) { while (providers.models.first()[SubscriptionAuth.CODEX] == null) delay(20) }
+        // Dismissing touches only a finished sign-in.
+        codexServer(pending = true)
+        assertTrue(providers.startLogin(SubscriptionAuth.CODEX))
+        withTimeout(5_000) { providers.login.first { it is LoginState.Waiting } }
+        providers.dismissLogin(SubscriptionAuth.CODEX)
+        assertTrue(providers.login.value is LoginState.Waiting)
     }
 
     @Test

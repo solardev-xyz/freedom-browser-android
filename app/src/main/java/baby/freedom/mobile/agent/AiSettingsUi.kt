@@ -277,7 +277,8 @@ private fun connectionStatus(
 ): String {
     val definition = ProviderCatalog.definition(c.providerId)
     val subscription = definition?.kind == ProviderKind.Subscription
-    if (subscription && (c.id in signedOut || state.keyLost(c))) return Strings.get(R.string.agent_status_sign_in_again)
+    if (subscription && state.keyLost(c)) return Strings.get(R.string.agent_status_sign_in_lost)
+    if (subscription && c.id in signedOut) return Strings.get(R.string.agent_status_sign_in_again)
     if (state.keyLost(c)) return Strings.get(R.string.agent_status_key_lost)
     val count = discovered[c.id]?.size ?: definition?.bundled?.size ?: 0
     if (subscription) {
@@ -306,9 +307,9 @@ private fun urlHint(rejection: ProviderUrls.Rejection): String = Strings.get(
 )
 
 /** [keyed]: a key went with the request, so a missing model may be the key's own limit. */
-private fun testLine(result: TestResult, model: String, keyed: Boolean): String = when (result) {
+private fun testLine(result: TestResult, model: String, keyed: Boolean, subscription: Boolean): String = when (result) {
     TestResult.Ok -> Strings.get(R.string.agent_test_ok, model)
-    TestResult.NoKey -> Strings.get(R.string.agent_test_no_key)
+    TestResult.NoKey -> Strings.get(if (subscription) R.string.agent_test_sign_in_first else R.string.agent_test_no_key)
     TestResult.SignInAgain -> Strings.get(R.string.agent_test_sign_in_again)
     TestResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
     TestResult.ModelNotFound ->
@@ -333,7 +334,9 @@ internal fun refreshNotFoundText(definition: ProviderDefinition): Int = when {
 
 private fun refreshLine(result: RefreshResult, definition: ProviderDefinition): String = when (result) {
     RefreshResult.Done -> Strings.get(R.string.agent_refresh_done)
-    RefreshResult.NoKey -> Strings.get(R.string.agent_test_no_key)
+    RefreshResult.NoKey -> Strings.get(
+        if (definition.kind == ProviderKind.Subscription) R.string.agent_test_sign_in_first else R.string.agent_test_no_key,
+    )
     RefreshResult.SignInAgain -> Strings.get(R.string.agent_test_sign_in_again)
     RefreshResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
     RefreshResult.NotFound -> Strings.get(refreshNotFoundText(definition))
@@ -400,6 +403,11 @@ private fun ProviderPage(
     var filter by rememberSaveable(target.providerId) { mutableStateOf("") }
     var confirmRemove by remember { mutableStateOf(false) }
     if (reveal) SecureWindow()
+    // A finished or failed sign-in isn't shown again on the next visit.
+    // Here, not in the list item, which scrolling off disposes.
+    if (isSubscription) DisposableEffect(definition.id) {
+        onDispose { providers.dismissLogin(definition.id) }
+    }
 
     val keyText = key.trim()
     val keyOk = keyText.isEmpty() || AgentProviders.isUsableKey(keyText)
@@ -568,7 +576,7 @@ private fun ProviderPage(
                                         val model = testWith ?: return@OutlinedButton
                                         run(PageAction.Testing) {
                                             val keyed = connection.id in state.keys
-                                            testLine(providers.testConnection(connection.id, model.id), model.name, keyed)
+                                            testLine(providers.testConnection(connection.id, model.id), model.name, keyed, isSubscription)
                                         }
                                     },
                                     enabled = !busy && testWith != null,
@@ -709,13 +717,6 @@ private fun SubscriptionSignIn(
     val login by providers.login.collectAsState()
     val mine = login?.takeIf { it.providerId == definition.id }
     var note by remember(definition.id) { mutableStateOf<String?>(null) }
-    // A finished or failed sign-in isn't shown again on the next visit.
-    DisposableEffect(definition.id) {
-        onDispose {
-            val last = providers.login.value
-            if (last is LoginState.Done || last is LoginState.Failed) providers.cancelLogin(definition.id)
-        }
-    }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         when (mine) {
             is LoginState.Waiting -> {

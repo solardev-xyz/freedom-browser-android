@@ -18,7 +18,10 @@ import android.os.Bundle
  * (what androidx.browser's `CustomTabsIntent` builds), sent to a browser
  * that offers the Custom Tabs service: the default one if it does, else
  * the first that does. Freedom offers none, so it's never picked. With
- * no such browser on the phone, the page opens as a plain link.
+ * no such browser on the phone, the page opens as a plain link in
+ * another browser (the default one, if that isn't Freedom); with none
+ * but Freedom, nothing is opened and the page asks the user to open
+ * the address themselves.
  */
 internal object SignInPage {
     private const val EXTRA_SESSION = "android.support.customtabs.extra.SESSION"
@@ -29,7 +32,8 @@ internal object SignInPage {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
             .addCategory(Intent.CATEGORY_BROWSABLE)
             .putExtras(Bundle().apply { putBinder(EXTRA_SESSION, null) })
-        customTabsBrowser(context, intent)?.let { intent.setPackage(it) }
+        val browser = customTabsBrowser(context, intent) ?: otherBrowser(context, intent) ?: return false
+        intent.setPackage(browser)
         if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try {
             context.startActivity(intent)
@@ -39,6 +43,19 @@ internal object SignInPage {
         } catch (e: SecurityException) {
             false
         }
+    }
+
+    /** A browser that isn't Freedom: the default one if it isn't, else the first. */
+    private fun otherBrowser(context: Context, view: Intent): String? {
+        val pm = context.packageManager
+        val own = context.packageName
+        val browsers = pm.queryIntentActivities(view, PackageManager.MATCH_DEFAULT_ONLY)
+            .mapNotNull { it.activityInfo?.packageName }
+            .filter { it != own }
+            .distinct()
+        if (browsers.isEmpty()) return null
+        val default = pm.resolveActivity(view, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
+        return default?.takeIf { it in browsers } ?: browsers.first()
     }
 
     private fun customTabsBrowser(context: Context, view: Intent): String? {

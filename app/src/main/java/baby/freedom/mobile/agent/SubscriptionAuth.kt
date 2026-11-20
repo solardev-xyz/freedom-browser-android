@@ -55,7 +55,7 @@ internal data class SubscriptionCredential(
         .apply { accountId?.let { put("accountId", it) } }
         .toString()
 
-    /** Due for a new [access]: past, or within [margin] of, [expiresAt], or a clock that went back past it. */
+    /** Due for a new [access]: past [expiresAt], or within [margin] of it. */
     fun due(now: Long, margin: Long = SubscriptionAuth.REFRESH_MARGIN_MS): Boolean = now >= expiresAt - margin
 
     // Never print a token.

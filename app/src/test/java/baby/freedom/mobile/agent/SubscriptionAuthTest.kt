@@ -374,9 +374,12 @@ class SubscriptionAuthTest {
 
         private fun b64(s: String) = Base64.getUrlEncoder().withoutPadding().encodeToString(s.toByteArray())
 
-        fun jwt(account: String): String =
+        /** A ChatGPT access token for [account]; [tag] tells two of them apart. */
+        fun jwt(account: String, tag: String = ""): String =
             b64("{\"alg\":\"none\"}") + "." +
-                b64(JSONObject().put("https://api.openai.com/auth", JSONObject().put("chatgpt_account_id", account)).toString()) +
-                ".sig"
+                b64(
+                    JSONObject().put("https://api.openai.com/auth", JSONObject().put("chatgpt_account_id", account))
+                        .put("tag", tag).toString(),
+                ) + ".sig"
     }
 }
