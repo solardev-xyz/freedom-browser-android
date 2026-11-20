@@ -22,8 +22,9 @@ internal enum class ProviderKind {
     Lan,
 
     /**
-     * A subscription the user signs in to by device code (#576, ChatGPT
-     * and Meta Muse): the stored "key" is a [SubscriptionCredential].
+     * A subscription the user signs in to: by device code (#576, ChatGPT
+     * and Meta Muse) or in the browser (#602, Sign in with ChatGPT). The
+     * stored "key" is a [SubscriptionCredential].
      */
     Subscription,
 }
@@ -168,8 +169,16 @@ internal object ProviderCatalog {
             R.string.agent_privacy_meta, R.string.agent_desc_meta,
             baseUrl = "https://api.meta.ai/v1", bundled = META_MODELS, defaultModelId = "muse-spark-1.3",
         ),
+        // Desktop's `openai-chatgpt`: OpenAI's own API, with the token Sign
+        // in with ChatGPT gives (#602), and Pi's bundled OpenAI list (desktop
+        // has no catalog URL for it).
         ProviderDefinition(
-            SubscriptionAuth.CODEX, "ChatGPT", ProviderKind.Subscription, ProviderGroup.Subscriptions,
+            ChatGptLogin.PROVIDER, "ChatGPT", ProviderKind.Subscription, ProviderGroup.Subscriptions,
+            WireFormat.OpenAiResponses, R.string.agent_privacy_chatgpt, R.string.agent_desc_chatgpt,
+            baseUrl = "https://api.openai.com/v1", bundled = OPENAI_MODELS, defaultModelId = "gpt-6.1-sol",
+        ),
+        ProviderDefinition(
+            SubscriptionAuth.CODEX, "ChatGPT (device code)", ProviderKind.Subscription, ProviderGroup.Subscriptions,
             WireFormat.CodexResponses, R.string.agent_privacy_codex, R.string.agent_desc_codex,
             baseUrl = "https://chatgpt.com/backend-api",
             // Codex's version namespace, as desktop asks with it (not Pi's version).
