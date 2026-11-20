@@ -251,8 +251,9 @@ class AgentFilesTest {
         AgentDownloads.holderOf = { if (it == 1L) "chat" else null }
         val i = intent()
         assertTrue(AgentDownloads.arm(i))
-        assertTrue(AgentDownloads.disarm(i))
-        AgentDownloads.lapse(i)
+        // Disarmed and kept in one step; a lapse after a claim (or a second one) says no.
+        assertTrue(AgentDownloads.lapse(i))
+        assertFalse(AgentDownloads.lapse(i))
         // Another address is an ordinary held download.
         assertNull(AgentDownloads.claim(1, "https://evil.example/a.zip"))
         assertFalse(AgentDownloads.takeLate(1))
@@ -269,12 +270,22 @@ class AgentFilesTest {
         assertFalse(AgentDownloads.takeLate(1))
         assertTrue(AgentDownloads.takeHeld(1))
         // A new intent on the tab replaces the lapsed one.
-        AgentDownloads.lapse(i)
+        val k = intent()
+        assertTrue(AgentDownloads.arm(k))
+        assertTrue(AgentDownloads.lapse(k))
         val j = intent()
         assertTrue(AgentDownloads.arm(j))
         assertTrue(AgentDownloads.disarm(j))
         assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
         assertFalse(AgentDownloads.takeLate(1))
+        // A late download not yet said keeps a new intent from arming: that file already waits.
+        val m = intent()
+        assertTrue(AgentDownloads.arm(m))
+        assertTrue(AgentDownloads.lapse(m))
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertFalse(AgentDownloads.arm(intent()))
+        assertTrue(AgentDownloads.takeLate(1))
+        assertTrue(AgentDownloads.arm(intent()))
     }
 
     @Test

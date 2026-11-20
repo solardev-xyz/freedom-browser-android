@@ -1223,8 +1223,7 @@ class BrowserToolsTest {
         downloadLink()
         val earlier = DownloadIntent("chat", 1, "https://example.com/files/report.pdf", direct = true)
         assertTrue(AgentDownloads.arm(earlier))
-        assertTrue(AgentDownloads.disarm(earlier))
-        AgentDownloads.lapse(earlier)
+        assertTrue(AgentDownloads.lapse(earlier))
         assertNull(AgentDownloads.claim(1, "https://example.com/files/report.pdf"))
         val tools = toolset()
         tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
@@ -1239,8 +1238,7 @@ class BrowserToolsTest {
         val ref = snapshotRef(tools)
         val earlier = DownloadIntent("chat", 1, "https://example.com/files/report.pdf", direct = true)
         assertTrue(AgentDownloads.arm(earlier))
-        assertTrue(AgentDownloads.disarm(earlier))
-        AgentDownloads.lapse(earlier)
+        assertTrue(AgentDownloads.lapse(earlier))
         assertNull(AgentDownloads.claim(1, "https://example.com/files/report.pdf"))
         val out = tools.call("browser_download", JSONObject().put("ref", ref))
         assertEquals("APPROVAL_REQUIRED", out.code())
@@ -1251,6 +1249,28 @@ class BrowserToolsTest {
         val again = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
         assertEquals("DOWNLOAD_CANCELLED_BY_USER", again.code())
         assertEquals(1, asked.size)
+    }
+
+    @Test
+    fun `the earlier approved download coming while the retry's card is up is said, and nothing is tapped`() = runBlocking {
+        downloadLink()
+        val earlier = DownloadIntent("chat", 1, "https://example.com/files/report.pdf", direct = true)
+        assertTrue(AgentDownloads.arm(earlier))
+        assertTrue(AgentDownloads.lapse(earlier))
+        var tapped = false
+        host.duringTap = { tapped = true }
+        answer = {
+            // The page starts the first call's download while the user reads this card.
+            assertNull(AgentDownloads.claim(1, "https://example.com/files/report.pdf"))
+            ApprovalOutcome.Approved
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("APPROVAL_REQUIRED", out.code())
+        assertTrue(out.output, out.output.contains("waits for the user in Freedom's download prompt"))
+        assertEquals(1, asked.size)
+        assertFalse(tapped)
+        assertTrue(files.records.of("chat").isEmpty())
     }
 
     @Test

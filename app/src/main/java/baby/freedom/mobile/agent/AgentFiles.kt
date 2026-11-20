@@ -162,10 +162,14 @@ internal object AgentDownloads {
     @Volatile
     internal var openerOf: (Long) -> Long? = { AgentTabs.opener(it) }
 
-    /** Arms [intent] on its tab; false if one is already armed there. */
+    /**
+     * Arms [intent] on its tab; false if one is already armed there, or
+     * if an earlier intent's download came late ([lapse]) and hasn't been
+     * said yet ([takeLate]): that file already waits for the user.
+     */
     @Synchronized
     fun arm(intent: DownloadIntent): Boolean {
-        if (intent.tabId in armed) return false
+        if (intent.tabId in armed || intent.tabId in late) return false
         armed[intent.tabId] = intent
         held.remove(intent.tabId)
         lapsed.remove(intent.tabId)
@@ -173,15 +177,18 @@ internal object AgentDownloads {
     }
 
     /**
-     * [intent]'s wait ran out with nothing claiming it (after [disarm]
-     * said so). If the approved link's download comes after all, it waits
-     * for the user like any other, but is noted apart ([takeLate]): kept
-     * past the next step's start, so the agent hears of it and doesn't ask
-     * again for a file already waiting in the offer prompt.
+     * [intent]'s wait ran out: [disarm], and if nothing had claimed it
+     * (true), it is kept in the same step so a download of the approved
+     * link that comes after all waits for the user like any other, but is
+     * noted apart ([takeLate]): kept past the next step's start, so the
+     * agent hears of it and doesn't ask again for a file already waiting
+     * in the offer prompt.
      */
     @Synchronized
-    fun lapse(intent: DownloadIntent) {
-        if (intent.tabId !in armed) lapsed[intent.tabId] = intent
+    fun lapse(intent: DownloadIntent): Boolean {
+        if (!disarm(intent)) return false
+        lapsed[intent.tabId] = intent
+        return true
     }
 
     /**

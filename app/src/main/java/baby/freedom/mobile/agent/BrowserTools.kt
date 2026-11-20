@@ -744,6 +744,10 @@ internal class BrowserToolset(
         val direct = !port.askWhereToSave()
         val intent = DownloadIntent(sessionId, tab.id, href, direct)
         if (!AgentDownloads.arm(intent)) {
+            // The earlier call's download came while this card was up: not tapped again.
+            if (AgentDownloads.takeLate(tab.id)) {
+                throw ToolError(ToolError.APPROVAL_REQUIRED, "$LATE_DOWNLOAD_NOTE Nothing else was done.")
+            }
             throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Another approved download is already pending on this page. Nothing was done.")
         }
         val start = try {
@@ -760,14 +764,13 @@ internal class BrowserToolset(
             } ?: run {
                 // Disarmed first: a download that met the intent as the wait ran
                 // out is answered below, not left to start unreported.
-                if (AgentDownloads.disarm(intent)) {
-                    // One that comes later still waits for the user, and is said with a later step.
-                    AgentDownloads.lapse(intent)
+                // One that comes later still waits for the user, and is said with a later step.
+                if (AgentDownloads.lapse(intent)) {
                     throw ToolError(
                         ToolError.WAIT_TIMEOUT,
                         "The page did not start a download within ${DOWNLOAD_START_WAIT_MS / 1_000} seconds of the approved " +
-                            "tap. If it starts it later, it is not saved without the user: it waits in Freedom's download " +
-                            "prompt, and a later browser step on this tab says so (lateDownload). Do not call " +
+                            "tap. If it starts this link's download later, it is not saved without the user: it waits in " +
+                            "Freedom's download prompt, and a later browser step on this tab says so (lateDownload). Do not call " +
                             "browser_download on this link again; take a new snapshot to see what the page did.",
                     )
                 }
