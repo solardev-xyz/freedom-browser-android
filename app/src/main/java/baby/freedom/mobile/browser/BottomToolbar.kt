@@ -14,6 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.AddToHomeScreen
 import androidx.compose.material.icons.filled.Share
@@ -1514,6 +1515,8 @@ internal fun BottomToolbar(
     onAddToHomeScreen: (() -> Unit)? = null,
     /** "New private tab" (#86); null where private tabs can't run, and the menu doesn't offer it. */
     onNewPrivateTab: (() -> Unit)? = null,
+    /** Freedom Agent's chat (#574); null while AI is off or the tab is private, and the menu doesn't offer it. */
+    onOpenAgent: (() -> Unit)? = null,
     onExpandCapsule: () -> Unit,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
@@ -1851,6 +1854,7 @@ internal fun BottomToolbar(
                     onHardReload = onHardReload,
                     onNewTab = onNewTab,
                     onNewPrivateTab = onNewPrivateTab,
+                    onOpenAgent = onOpenAgent,
                     onFindInPage = onFindInPage,
                     zoomLevel = zoomLevel,
                     onZoom = onZoom,
@@ -3085,6 +3089,7 @@ private fun OverflowMenuButton(
     onHardReload: () -> Unit,
     onNewTab: () -> Unit,
     onNewPrivateTab: (() -> Unit)?,
+    onOpenAgent: (() -> Unit)?,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
@@ -3152,6 +3157,7 @@ private fun OverflowMenuButton(
                     isHome = state.isHome,
                     hasNameTrust = nameTrust != null,
                     canOpenPrivateTab = onNewPrivateTab != null,
+                    canOpenAgent = onOpenAgent != null,
                     hasAdblock = adblockState != null,
                     canAddToHomeScreen = onAddToHomeScreen != null && pinSupported,
                 ),
@@ -3242,6 +3248,7 @@ private fun OverflowMenuButton(
                                         onHome = onHome,
                                         onNewTab = onNewTab,
                                         onNewPrivateTab = onNewPrivateTab,
+                                        onOpenAgent = onOpenAgent,
                                         onFindInPage = onFindInPage,
                                         zoomLevel = zoomLevel,
                                         onZoom = onZoom,
@@ -3454,6 +3461,7 @@ private fun MainMenuRowItem(
     onHome: () -> Unit,
     onNewTab: () -> Unit,
     onNewPrivateTab: (() -> Unit)?,
+    onOpenAgent: (() -> Unit)?,
     onFindInPage: () -> Unit,
     zoomLevel: Int?,
     onZoom: (ZoomAction) -> Unit,
@@ -3606,6 +3614,14 @@ private fun MainMenuRowItem(
             leadingIcon = { Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null) },
             onClick = { close(onOpenWallet) },
         )
+        // Freedom Agent's chat (#574), only while AI is on.
+        MainMenuRow.Agent -> onOpenAgent?.let { open ->
+            DropdownMenuItem(
+                text = { MenuItemLabel(stringResource(R.string.agent_menu)) },
+                leadingIcon = { Icon(Icons.Outlined.AutoAwesome, contentDescription = null) },
+                onClick = { close(open) },
+            )
+        }
         MainMenuRow.Settings -> DropdownMenuItem(
             text = { MenuItemLabel(stringResource(R.string.browser_menu_settings)) },
             leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },

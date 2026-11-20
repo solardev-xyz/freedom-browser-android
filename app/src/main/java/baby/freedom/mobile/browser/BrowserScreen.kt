@@ -619,6 +619,10 @@ fun BrowserScreen(
     // from the list is a private one (#321).
     var historyPrivate by rememberSaveable { mutableStateOf(false) }
     var showDownloads by rememberSaveable { mutableStateOf(false) }
+    // Freedom Agent's chat (#574): offered only while AI is on, never
+    // from a private tab, and closed when AI is turned off.
+    var showAgent by rememberSaveable { mutableStateOf(false) }
+    val aiOn by remember(context) { baby.freedom.mobile.agent.agentAiOn(context) }.collectAsState(initial = false)
     var addressFocused by remember { mutableStateOf(false) }
     // Ctrl+L (#270): the address field takes focus once it's composed.
     var addressFocusRequested by remember { mutableStateOf(false) }
@@ -706,7 +710,7 @@ fun BrowserScreen(
     val overlayShown = showSettings || showNodes || nodeDetail != null || showLogs != null || showWallet || walletRequest != null ||
         linkSend != null ||
         showTabSwitcher ||
-        showHistory || showBookmarks || showDownloads
+        showHistory || showBookmarks || showDownloads || (showAgent && aiOn)
     // The menu's Nodes & networks sub-line (#416): only while a node has
     // failed, read off the overview's own rows. Remembered, so the menu
     // gets the same (usually null) note however often the peers change.
@@ -2186,6 +2190,7 @@ fun BrowserScreen(
         showHistory = false
         showBookmarks = false
         showDownloads = false
+        showAgent = false
         submit(tabs.newTab(), url, SubmitSource.External)
         onDeepLinkHandled(link)
     }
@@ -2852,6 +2857,11 @@ fun BrowserScreen(
                     },
                     onNewTab = openNewTab,
                     onNewPrivateTab = newPrivateTab,
+                    onOpenAgent = if (aiOn && !state.private) {
+                        { showAgent = true }
+                    } else {
+                        null
+                    },
                     onFindInPage = { state.find.show() },
                     // Same rule as Find in page: nothing to zoom on the
                     // home surface — nor on a document that isn't a
@@ -3648,6 +3658,17 @@ fun BrowserScreen(
                 scope.launch {
                     downloads.open(context, entry)?.let { snackbarHostState.showSnackbar(it) }
                 }
+            },
+        )
+    }
+
+    if (showAgent) {
+        baby.freedom.mobile.agent.AgentChatPage(
+            aiOn = aiOn,
+            onDismiss = { showAgent = false },
+            onOpenSettings = {
+                showAgent = false
+                showSettings = true
             },
         )
     }
