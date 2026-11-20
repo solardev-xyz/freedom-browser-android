@@ -117,8 +117,14 @@ class AgentAttachmentsTest {
     }
 
     @Test
-    fun `caps - 10 files, 20 MB a file, 8 MB an image, 50 MB a message`() = runBlocking {
+    fun `caps - 10 files, 20 MB a file, 7_5 MB an image, 50 MB a message`() = runBlocking {
         val s = store()
+        // The biggest image, and the biggest rendered page, still fit the Claude API's 10 MB base64 cap.
+        val largest = java.util.Base64.getEncoder().encodeToString(ByteArray(AttachmentRules.MAX_IMAGE_BYTES.toInt())).length
+        assertTrue(largest <= 10_000_000)
+        assertTrue(java.util.Base64.getEncoder().encodeToString(ByteArray(PdfLimits.MAX_RENDER_BYTES)).length <= 10_000_000)
+        // A 7.8 MB photo (under desktop's 8 MiB) is refused here, not by the API on every resend.
+        assertEquals(StageRefusal.ImageTooLarge, refusal(s.stage("photo.png", null) { bytes(7_800_000, "PNG") }))
         assertEquals(StageRefusal.TooLarge, refusal(s.stage("big.pdf", null) { bytes(AttachmentRules.MAX_FILE_BYTES + 1) }))
         assertEquals(StageRefusal.ImageTooLarge, refusal(s.stage("big.png", null) { bytes(AttachmentRules.MAX_IMAGE_BYTES + 1, "PNG") }))
         assertTrue(stagedFiles().isEmpty())

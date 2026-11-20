@@ -284,7 +284,7 @@ internal class AgentLoop(
         /**
          * The images one request carries, in base64 characters (#601):
          * every step sends the turn so far again, and each image a tool
-         * read stays in it, so ten 8 MB photos would make a body no phone
+         * read stays in it, so ten 7.5 MB photos would make a body no phone
          * can build. The newest ones are kept; an older one is named in
          * its place, and the model can read it again.
          */

@@ -76,7 +76,8 @@ internal object PdfLimits {
     const val MAX_TEXT_PAGES = 4
     const val MAX_RENDER_DIMENSION = 2048
     const val MAX_RENDER_PIXELS = 4_000_000
-    const val MAX_RENDER_BYTES = 8 * 1024 * 1024
+    /** A page's PNG goes to the model as an image: [AttachmentRules.MAX_IMAGE_BYTES]. */
+    const val MAX_RENDER_BYTES = AttachmentRules.MAX_IMAGE_BYTES.toInt()
     const val TEXT_TIMEOUT_MS = 15_000L
 
     /**

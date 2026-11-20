@@ -712,8 +712,9 @@ class AgentChatsTest {
         return AgentAttachments(root) { f -> if (f.readBytes().take(3) == "PNG".toByteArray().toList()) "image/png" else null }
     }
 
-    private fun withAttachments(store: AgentAttachments) = AgentChats(
+    private fun withAttachments(store: AgentAttachments, forgetNodeOperations: suspend (String?) -> Unit = {}) = AgentChats(
         dao, providers, "You are Freedom Agent. {{identity}}", scope = scope, zone = { ZoneId.of("UTC") },
+        forgetNodeOperations = forgetNodeOperations,
         // As the app's chats have them, with a PDF processor never reached here.
         toolsFor = { id ->
             ToolRegistry(
@@ -870,6 +871,36 @@ class AgentChatsTest {
         // Committed: the next sweep judges it by the chat list, which names it.
         assertEquals(0, store.sweep { dao.sessionIds().toSet() })
         assertEquals(1, store.list(second).size)
+    }
+
+    @Test
+    fun `a send landing while Delete all chats is between the database and the folders keeps its files`() = runBlocking {
+        val model = connectOllama()
+        val store = attachmentStore()
+        // Delete all holds after the database delete, before the folders go.
+        val between = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resume = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val chats = withAttachments(store) { if (it == null) { between.complete(Unit); resume.await() } }
+        route("/v1/chat/completions", { sse(chatText("ok"), chatStop) })
+        val io = CoroutineScope(Dispatchers.IO)
+        val deleted = kotlinx.coroutines.CompletableDeferred<Boolean>().also { out ->
+            io.launch { out.complete(chats.deleteAll()) }
+        }
+        withTimeout(5_000) { between.await() }
+        val staged = store.stageText("b.txt", "b")
+        val send = kotlinx.coroutines.CompletableDeferred<String?>().also { out ->
+            io.launch { out.complete(chats.send(null, "two", model, attachmentIds = listOf(staged))) }
+        }
+        // The send waits for Delete all rather than saving a chat whose folder is about to go.
+        delay(300)
+        assertFalse(send.isCompleted)
+        resume.complete(Unit)
+        assertTrue(withTimeout(5_000) { deleted.await() })
+        val id = withTimeout(5_000) { send.await() }!!
+        awaitDone(id, chats)
+        // The chat that survives has its file.
+        assertEquals(listOf(id), dao.sessionIds())
+        assertEquals(listOf("b.txt"), store.list(id).map { it.name })
     }
 
     @Test

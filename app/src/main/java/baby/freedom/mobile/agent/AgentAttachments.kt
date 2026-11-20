@@ -144,7 +144,20 @@ internal object AttachmentRules {
     const val MAX_SELECTIONS = 10
     const val MAX_FILE_BYTES = 20L * 1024 * 1024
     const val MAX_TOTAL_BYTES = 50L * 1024 * 1024
-    const val MAX_IMAGE_BYTES = 8L * 1024 * 1024
+
+    /**
+     * The Claude API's cap on one image, in base64 characters ("10 MB
+     * (base64-encoded)", taken as 10,000,000): it refuses a bigger one
+     * with a 400, so a message's own image would fail every resend.
+     */
+    const val MAX_IMAGE_BASE64_CHARS = 10_000_000L
+
+    /**
+     * The most an image (a pick, or a rendered PDF page) may be, so its
+     * base64 fits [MAX_IMAGE_BASE64_CHARS]: 7.5 MB. Desktop's 8 MiB
+     * encodes to up to 11.2M characters, over it.
+     */
+    const val MAX_IMAGE_BYTES = MAX_IMAGE_BASE64_CHARS / 4 * 3
 
     /**
      * Bytes of text one read returns. Desktop's is 256 KiB; here it stays

@@ -404,12 +404,38 @@ internal class AgentChats(
         }
     }
 
-    /** Deletes every chat, stopping what's running first; uncancellable, like [delete]. */
+    /**
+     * Deletes every chat, stopping what's running first; uncancellable,
+     * like [delete]. The deleting runs under [lock], as [send] does: a
+     * send can't save a chat (its files already moved into its folder)
+     * between the database's delete and the folders', so a chat is
+     * either gone with its files or kept with them. A turn's own end
+     * takes [lock] too, so running turns are stopped with it let go.
+     */
     suspend fun deleteAll(): Boolean = withContext(NonCancellable) {
-        lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
+        lock.lock()
+        try {
+            while (jobs.isNotEmpty()) {
+                val running = jobs.entries.map { it.key to it.value }
+                lock.unlock()
+                try {
+                    running.forEach { it.second.cancelAndJoin() }
+                } finally {
+                    lock.lock()
+                }
+                // Each removes itself as it ends; this only makes sure the loop does.
+                running.forEach { (id, job) -> jobs.remove(id, job) }
+            }
+            deleteAllLocked()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    private suspend fun deleteAllLocked(): Boolean {
         for (id in registries.keys.toList()) forgetTools(id)
         modes.clear()
-        try {
+        return try {
             dao.deleteAll()
             forgetOperations(null)
             forgetPublications(null)

@@ -132,7 +132,7 @@ internal class AttachmentTools(
             AttachmentException.Reason.NotFound -> failure(NOT_FOUND, "Attachment resource was not found in this conversation").outcome
             AttachmentException.Reason.Unavailable -> failure(UNAVAILABLE, "The requested attachment is not readable").outcome
             AttachmentException.Reason.WrongKind -> failure(INVALID_ARGUMENT, "That attachment is not of the kind this read needs").outcome
-            AttachmentException.Reason.ImageTooLarge -> failure(UNAVAILABLE, "The image is larger than the 8 MB model limit").outcome
+            AttachmentException.Reason.ImageTooLarge -> failure(UNAVAILABLE, "The image is larger than the 7.5 MB model limit").outcome
         }
     }
 
