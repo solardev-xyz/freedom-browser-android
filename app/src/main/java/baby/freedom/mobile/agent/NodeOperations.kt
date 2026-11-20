@@ -100,6 +100,14 @@ internal data class NodeOperation(
 internal interface NodeOperationStore {
     suspend fun put(operation: NodeOperation)
     suspend fun get(operationId: String): NodeOperation?
+
+    /**
+     * Replaces a receipt with [change] of it, as one step: none when it's
+     * gone (its chat deleted meanwhile), so a late answer never writes
+     * back a receipt for a chat that no longer exists. Returns what was
+     * written, or null.
+     */
+    suspend fun update(operationId: String, change: (NodeOperation) -> NodeOperation): NodeOperation?
     suspend fun listRecent(ownerId: String, limit: Int): List<NodeOperation>
     suspend fun deleteOwner(ownerId: String)
     suspend fun deleteAll()
@@ -114,6 +122,10 @@ internal class MemoryNodeOperationStore : NodeOperationStore {
     }
 
     override suspend fun get(operationId: String) = synchronized(ops) { ops[operationId] }
+
+    override suspend fun update(operationId: String, change: (NodeOperation) -> NodeOperation) = synchronized(ops) {
+        ops[operationId]?.let(change)?.also { ops[operationId] = it }
+    }
 
     override suspend fun listRecent(ownerId: String, limit: Int) = synchronized(ops) {
         ops.values.filter { it.ownerId == ownerId }.sortedByDescending { it.updatedAt }.take(limit)
@@ -171,7 +183,15 @@ internal class FileNodeOperationStore(private val dir: File, private val now: ()
         map.also { ops = it }
     }
 
-    override suspend fun put(operation: NodeOperation) = mutex.withLock {
+    override suspend fun put(operation: NodeOperation) = mutex.withLock { putLocked(operation) }
+
+    override suspend fun update(operationId: String, change: (NodeOperation) -> NodeOperation): NodeOperation? = mutex.withLock {
+        val next = loaded()[operationId]?.let(change) ?: return@withLock null
+        putLocked(next)
+        next
+    }
+
+    private suspend fun putLocked(operation: NodeOperation) {
         val map = loaded()
         withContext(Dispatchers.IO) { write(operation) }
         map[operation.operationId] = operation

@@ -360,6 +360,76 @@
     <string name="agent_dictation_language_title">Language</string>
     <string name="agent_dictation_app_language">App language</string>
     <string name="agent_dictation_save_failed">Couldn\'t change this. Try again.</string>
+    <!-- Freedom Agent's Swarm publishing (#597): the approval card. -->
+    <string name="agent_publish_headline">Publish text on Swarm, publicly</string>
+    <string name="agent_publish_permanent">Anyone with the link can read it. It can\'t be taken back: nothing published on Swarm can be deleted.</string>
+    <string name="agent_publish_text_label">Text · %1$s · %2$s</string>
+    <string name="agent_publish_text_cut">Shows the first %1$s of %2$s characters. All of them are published.</string>
+    <string name="agent_publish_findings_title">What the check found</string>
+    <string name="agent_publish_findings_none">The check found no keys, passwords or personal data. It can\'t catch everything, so read the text.</string>
+    <string name="agent_publish_findings_blocking">Keys, passwords and recovery phrases block publishing. Tick each one to publish it anyway, or ask the agent to fix them.</string>
+    <string name="agent_publish_finding_line">%1$s · line %2$d</string>
+    <!-- A finding past the part of the text the card shows: the text around it. -->
+    <string name="agent_publish_finding_context">Past the preview: %1$s</string>
+    <string name="agent_publish_kind_secret">Secret</string>
+    <string name="agent_publish_kind_personal">Personal data</string>
+    <string name="agent_publish_kind_third_party">Loads from another site</string>
+    <string name="agent_publish_kind_metadata">Metadata</string>
+    <string name="agent_publish_anyway">Publish this anyway</string>
+    <string name="agent_publish_postage_title">Postage stamp</string>
+    <string name="agent_publish_postage_ready">Stamp %1$s. This takes about %2$s of the %3$s it has left.</string>
+    <string name="agent_publish_postage_ttl">It lasts %1$s more.</string>
+    <string name="agent_publish_postage_ttl_unknown">How long it lasts couldn\'t be read.</string>
+    <string name="agent_publish_postage_soon">The stamp runs out in under a week. After that, the text may no longer be reachable.</string>
+    <string name="agent_publish_postage_critical">The stamp runs out in under a day. After that, the text may no longer be reachable.</string>
+    <string name="agent_publish_postage_blocked">Nothing can be published until then.</string>
+    <string name="agent_publish_postage_unknown">Couldn\'t read the Swarm node\'s stamps, so nothing can be published now.</string>
+    <string name="agent_publish_no_buy">Nothing is bought: the agent can only use a stamp you already have.</string>
+    <string name="agent_publish_button">Publish publicly</string>
+    <string name="agent_publish_fix">Ask Agent to fix</string>
+    <string name="agent_publish_rule_private_key_block">Private key block</string>
+    <string name="agent_publish_rule_aws_access_key">AWS access key</string>
+    <string name="agent_publish_rule_openai_api_key">OpenAI-style API key</string>
+    <string name="agent_publish_rule_github_token">GitHub token</string>
+    <string name="agent_publish_rule_slack_token">Slack token</string>
+    <string name="agent_publish_rule_jwt">JSON Web Token</string>
+    <string name="agent_publish_rule_url_credentials">Password in a URL</string>
+    <string name="agent_publish_rule_credential_assignment">Password or key assignment</string>
+    <string name="agent_publish_rule_ethereum_private_key">Ethereum private key</string>
+    <string name="agent_publish_rule_bip39_seed_phrase">Wallet recovery phrase</string>
+    <string name="agent_publish_rule_keystore_json">Encrypted wallet keystore</string>
+    <string name="agent_publish_rule_rpc_url_key">RPC URL with an embedded key</string>
+    <string name="agent_publish_rule_stripe_secret_key">Stripe secret key</string>
+    <string name="agent_publish_rule_google_api_key">Google API key</string>
+    <string name="agent_publish_rule_slack_webhook">Slack webhook URL</string>
+    <string name="agent_publish_rule_discord_webhook">Discord webhook URL</string>
+    <string name="agent_publish_rule_twilio_api_key">Twilio API key</string>
+    <string name="agent_publish_rule_sendgrid_api_key">SendGrid API key</string>
+    <string name="agent_publish_rule_email_address">Email address</string>
+    <string name="agent_publish_rule_phone_number">Phone number</string>
+    <string name="agent_publish_rule_iban">Bank account number (IBAN)</string>
+    <string name="agent_publish_rule_postal_address">Street address</string>
+    <string name="agent_publish_rule_possible_credential">Possible password or key</string>
+    <string name="agent_publish_rule_scan_incomplete">Couldn\'t be fully checked</string>
+    <string name="agent_publish_rule_third_party_script">Script from another site</string>
+    <string name="agent_publish_rule_third_party_link">Stylesheet or file from another site</string>
+    <string name="agent_publish_rule_third_party_image">Image from another site</string>
+    <string name="agent_publish_rule_external_form">Form that sends what\'s typed to another site</string>
+    <string name="agent_publish_rule_third_party_fetch">Request to another site (fetch)</string>
+    <string name="agent_publish_hidden">Value hidden</string>
+    <string name="agent_publish_incomplete">The check stopped before the end of the text, so it\'s treated as a secret.</string>
+    <plurals name="agent_publish_words">
+        <item quantity="one">%1$s (%2$d word)</item>
+        <item quantity="other">%1$s (%2$d words)</item>
+    </plurals>
+    <plurals name="agent_publish_chars">
+        <item quantity="one">%1$s (%2$d character)</item>
+        <item quantity="other">%1$s (%2$d characters)</item>
+    </plurals>
+    <plurals name="agent_publish_earlier_unknown">
+        <item quantity="one">An earlier publication from this chat may already be on Swarm: it didn\'t finish, but some of it had already been sent.</item>
+        <item quantity="other">%1$d earlier publications from this chat may already be on Swarm: they didn\'t finish, but some of each had already been sent.</item>
+    </plurals>
     <!-- Freedom Agent's wallet_transfer sheet (#596). -->
     <string name="agent_transfer_title">Freedom Agent wants to send funds</string>
     <string name="agent_transfer_note">Freedom Agent proposed this transfer. Check the recipient and the amount: nothing is sent until you confirm.</string>
@@ -408,6 +478,7 @@
     <string name="agent_node_effect_destructive">Deletes or overwrites something</string>
     <string name="agent_node_effect_unknown">Not known</string>
     <string name="agent_node_diagnostics">Share recent logs of %1$s</string>
+    <string name="agent_node_diagnostics_light_clients">Share recent logs of the light clients (Gnosis and Ethereum, which write one log)</string>
     <string name="agent_node_diagnostics_to">Shared with</string>
     <string name="agent_node_diagnostics_provider_unknown">The chat\'s model provider</string>
     <string name="agent_node_diagnostics_amount">How much</string>

@@ -77,7 +77,8 @@ class NodeToolsTest {
         "/a{b}" to "/a%7Bb%7D",
         "/a<b>" to "/a%3Cb%3E",
         "/a'b" to "/a'b",
-        "/a|b" to "/a|b",
+        // Desktop keeps `|`; OkHttp would encode it, so it is encoded here (R1-F3).
+        "/a|b" to "/a%7Cb",
         "/a;b" to "/a;b",
         "/a@b" to "/a@b",
         "/a!\$&()*+,;=:@~" to "/a!\$&()*+,;=:@~",
@@ -116,6 +117,21 @@ class NodeToolsTest {
             }
             assertEquals("canonical(${JSONObject.quote(input)})", expected, got)
         }
+    }
+
+    @Test
+    fun `the path the sheet shows is the one OkHttp puts on the wire (R1-F3)`() {
+        val paths = listOf(
+            "/bzz/a|b", "/bzz/a b", "/a\"b", "/a<b>", "/a`b", "/a{b}", "/a^b", "/a[b]", "/a;b,c=d", "/a@b:c", "/a!$&'()*+",
+            "/😀/é", "/a%7cb", "/a%41", "/a?q=é", "/a?x=1&y=|", "/a?q=a b'c\"<>", "/a?q=%7c|+", "/a?x&&y=", "/a?=", "/a?a=b=c",
+        )
+        for (input in paths) {
+            val canonical = NodePaths.canonical(input)
+            val url = with(okhttp3.HttpUrl.Companion) { ("http://127.0.0.1:1633" + canonical).toHttpUrl() }
+            val wire = url.encodedPath + (url.encodedQuery?.let { "?$it" } ?: "")
+            assertEquals("canonical(${JSONObject.quote(input)})", canonical, wire)
+        }
+        assertEquals("/bzz/a%7Cb", NodePaths.canonical("/bzz/a|b"))
     }
 
     @Test
@@ -436,6 +452,70 @@ class NodeToolsTest {
     }
 
     @Test
+    fun `a write answered with a body over the bound is responded with its status, not uncertain (R1-F5)`() = runBlocking {
+        val ops = NodeOperations(MemoryNodeOperationStore())
+        val big = { _: String, _: NodeRequestArgs, _: (okhttp3.Call) -> Unit ->
+            throw NodeResponseTooLarge(NodeResponse(201, "Created", mapOf("content-type" to "application/json"), "", 0))
+        }
+        val op = json(NodeRequestTool(deps(), ops, big).run(request(method = "POST", path = "/pins/abc")))
+            .getJSONObject("result")
+        assertEquals("responded", op.getJSONObject("operation").getString("state"))
+        assertEquals("NODE_RESPONSE_TOO_LARGE", op.getJSONObject("operation").getJSONObject("error").getString("code"))
+        assertEquals(201, op.getJSONObject("response").getInt("status"))
+        // With no status line at all it stays uncertain.
+        val bare = { _: String, _: NodeRequestArgs, _: (okhttp3.Call) -> Unit -> throw NodeResponseTooLarge() }
+        val uncertain = json(NodeRequestTool(deps(), ops, bare).run(request(method = "POST", path = "/pins/abc")))
+            .getJSONObject("result").getJSONObject("operation")
+        assertEquals("delivery_uncertain", uncertain.getString("state"))
+    }
+
+    @Test
+    fun `a write whose chat was deleted while it ran leaves no receipt behind (R1-F2)`() = runBlocking {
+        val ops = NodeOperations(MemoryNodeOperationStore())
+        val sent = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val slow = { _: String, _: NodeRequestArgs, _: (okhttp3.Call) -> Unit ->
+            sent.countDown()
+            release.await(5, TimeUnit.SECONDS)
+            NodeResponse(201, "Created", emptyMap(), "{}", 2)
+        }
+        val out = NodeRequestTool(deps(), ops, slow, observeMs = 100).run(request(method = "POST", path = "/pins/abc"))
+        val id = json(out).getJSONObject("result").getJSONObject("operation").getString("operationId")
+        assertTrue(sent.await(5, TimeUnit.SECONDS))
+        ops.store.deleteOwner("chat-1")
+        release.countDown()
+        ops.active(id)?.await()
+        assertNull(ops.store.get(id))
+        assertTrue(ops.store.listRecent("chat-1", 20).isEmpty())
+    }
+
+    @Test
+    fun `the journal on disk changes a live receipt in place and never writes back a deleted chat's (R1-F2)`() = runBlocking {
+        val dir = Files.createTempDirectory("nodeops").toFile()
+        try {
+            val store = FileNodeOperationStore(dir) { 1_000L }
+            val live = NodeOperation(
+                NodeOperations.newId(), "chat-1", NodeOperation.IN_FLIGHT, "ant", "http", "reversible_admin", "POST", "/pins/x",
+                createdAt = 1L, updatedAt = 1L,
+            )
+            val gone = live.copy(operationId = NodeOperations.newId(), ownerId = "chat-2")
+            store.put(live)
+            store.put(gone)
+            store.deleteOwner("chat-2")
+            assertNull(store.update(gone.operationId) { it.copy(state = NodeOperation.RESPONDED) })
+            assertFalse(File(dir, gone.operationId + ".json").exists())
+            val done = store.update(live.operationId) { it.copy(state = NodeOperation.RESPONDED, updatedAt = 2L) }
+            assertEquals(NodeOperation.RESPONDED, done!!.state)
+            // The next process reads what the update wrote.
+            val next = FileNodeOperationStore(dir) { 3_000L }
+            assertEquals(NodeOperation.RESPONDED, next.get(live.operationId)!!.state)
+            assertNull(next.get(gone.operationId))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `the journal on disk marks a request a dead process left in flight as uncertain, and drops a deleted chat's`() = runBlocking {
         val dir = Files.createTempDirectory("nodeops").toFile()
         try {
@@ -521,7 +601,7 @@ class NodeToolsTest {
     @Test
     fun `answers are bounded, a HEAD isn't, and a redirect comes back as it is`() {
         okhttp3.mockwebserver.MockWebServer().use { server ->
-            server.enqueue(okhttp3.mockwebserver.MockResponse().setBody("x".repeat(NodeResponse.MAX_BYTES + 1)))
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(201).setBody("x".repeat(NodeResponse.MAX_BYTES + 1)))
             server.enqueue(okhttp3.mockwebserver.MockResponse().setHeader("Content-Length", "1000000").setHeader("ETag", "\"e\""))
             server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(307).setHeader("Location", "http://evil.example/").setHeader("Set-Cookie", "a=b"))
             val base = server.url("/").toString()
@@ -529,7 +609,9 @@ class NodeToolsTest {
                 NodeHttp.send(base, NodeRequestArgs("ant", "http", "GET", "/bytes/x"))
                 fail("read past the bound")
             } catch (e: NodeResponseTooLarge) {
-                // Expected.
+                // The status line and headers did come back (R1-F5).
+                assertEquals(201, e.answered!!.status)
+                assertEquals("", e.answered!!.body)
             }
             val head = NodeHttp.send(base, NodeRequestArgs("ant", "http", "HEAD", "/bzz/x"))
             assertEquals(200, head.status)
@@ -669,6 +751,11 @@ class NodeToolsTest {
         assertEquals(listOf("two", "three"), (0 until 2).map { logs.getJSONArray("entries").getJSONObject(it).getString("text") })
         assertTrue(logs.getBoolean("truncated"))
         assertEquals("ant", out.getJSONObject("status").getString("id"))
+        assertEquals(listOf("ant"), out.getJSONArray("logsCover").let { a -> (0 until a.length()).map(a::getString) })
+        // The light clients write one log: the result (and the sheet) say both chains' lines go (R1-F4).
+        val myotis = json(tool.run(JSONObject().put("service", "myotis-gnosis"))).getJSONObject("result")
+        assertEquals(listOf("myotis-gnosis", "myotis-ethereum"), myotis.getJSONArray("logsCover").let { a -> (0 until a.length()).map(a::getString) })
+        assertEquals(NodeDiagnosticsTool.logCovers("myotis-ethereum"), NodeDiagnosticsTool.logCovers("myotis-gnosis"))
         assertNotNull(out.getJSONObject("runtime").getString("platform"))
         val no = NodeDiagnosticsTool(deps(asks = Asks(ApprovalOutcome.Declined), controls = controls)).run(JSONObject().put("service", "tor"))
         assertTrue(no.declined)
@@ -699,8 +786,10 @@ class NodeToolsTest {
     }
 
     @Test
-    fun `the chat offers every node tool`() {
-        val names = ToolRegistry.forChat("s").specs.map { it.name }
+    fun `the chat offers every node tool beside publishing and transfers`() {
+        val names = ToolRegistry.forChat("s") { error("not needed to list the tools") }.specs.map { it.name }
         assertTrue(names.containsAll(listOf("node_status", "node_request", "node_operation_status", "node_lifecycle", "node_diagnostics")))
+        // #597's tools stay in every chat beside #598's.
+        assertTrue(names.containsAll(listOf("swarm_publish", "swarm_publication_status", "wallet_transfer")))
     }
 }

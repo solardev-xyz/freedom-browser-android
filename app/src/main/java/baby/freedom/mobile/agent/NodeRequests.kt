@@ -116,15 +116,21 @@ private fun invalid(message: String) = ToolError(ToolError.INVALID_ARGUMENT, mes
  * `_~-` are decoded and other escapes upper-cased, then serialized as
  * WHATWG's URL parser does (`new URL(…).pathname + search`): what the
  * route's and query's percent-encode sets name is encoded as UTF-8, an
- * empty `?` dropped. Anything a JavaScript string could hold that a
+ * empty `?` dropped. One difference: a `|` in the route is encoded too,
+ * as OkHttp would on the way out, so the path shown is the path sent. Anything a JavaScript string could hold that a
  * Kotlin one renders differently (a lone surrogate) is refused rather
  * than guessed at.
  */
 internal object NodePaths {
     private const val MAX = 2048
 
-    /** WHATWG's path percent-encode set, past the controls (refused before): space " # < > ? ` { } ^. */
-    private const val PATH_SET = " \"#<>?`{}^"
+    /**
+     * WHATWG's path percent-encode set, past the controls (refused
+     * before): space " # < > ? ` { } ^, and `|`, which WHATWG leaves but
+     * OkHttp encodes on the way out: encoded here too, so the path the
+     * sheet shows and the receipt keeps is the one the node gets.
+     */
+    private const val PATH_SET = " \"#<>?`{}^|"
 
     /** The special-query percent-encode set: space " # < > '. */
     private const val QUERY_SET = " \"#<>'"
@@ -246,8 +252,13 @@ internal data class NodeResponse(
     }
 }
 
-/** The response was over [NodeResponse.MAX_BYTES]. */
-internal class NodeResponseTooLarge : Exception("Node response exceeds the ${NodeResponse.MAX_BYTES}-byte limit")
+/**
+ * The response was over [NodeResponse.MAX_BYTES]. [answered]: its status
+ * line and headers, with no body ([NodeResponse.bytes] 0), when the node
+ * got as far as sending them.
+ */
+internal class NodeResponseTooLarge(val answered: NodeResponse? = null) :
+    Exception("Node response exceeds the ${NodeResponse.MAX_BYTES}-byte limit")
 
 /**
  * Sends one request to a node on this phone and reads its answer, on
@@ -296,8 +307,13 @@ internal object NodeHttp {
                 if (lower in NodeResponse.HEADERS) headers[lower] = response.headers.values(name).joinToString(", ")
             }
             if (args.method == "HEAD") return NodeResponse(response.code, response.message, headers, "", 0)
-            headers["content-length"]?.toLongOrNull()?.let { if (it > NodeResponse.MAX_BYTES) throw NodeResponseTooLarge() }
-            val text = response.body?.let { read(it.byteStream()) }.orEmpty()
+            val answered = NodeResponse(response.code, response.message, headers, "", 0)
+            headers["content-length"]?.toLongOrNull()?.let { if (it > NodeResponse.MAX_BYTES) throw NodeResponseTooLarge(answered) }
+            val text = try {
+                response.body?.let { read(it.byteStream()) }.orEmpty()
+            } catch (e: NodeResponseTooLarge) {
+                throw NodeResponseTooLarge(answered)
+            }
             return NodeResponse(response.code, response.message, headers, text, text.toByteArray(Charsets.UTF_8).size)
         }
     }

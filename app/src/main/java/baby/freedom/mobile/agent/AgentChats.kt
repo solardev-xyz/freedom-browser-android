@@ -46,9 +46,11 @@ internal class AgentChats(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: () -> ZoneId = ZoneId::systemDefault,
-    /** A chat's node operation receipts go with it (#598); null: every chat's. */
+    /** A deleted chat's node operation receipts go with it (#598); null: every chat's. */
     private val forgetNodeOperations: suspend (String?) -> Unit = {},
     private val limitsOf: (ProviderDefinition) -> ContextLimits = ContextLimits::of,
+    /** A deleted chat's publication receipts go with it (#597); null: every chat's. */
+    private val forgetPublications: (String?) -> Unit = {},
 ) {
     /** A turn in progress: its reply so far. */
     data class Live(val sessionId: String, val turnId: String, val text: String)
@@ -312,9 +314,11 @@ internal class AgentChats(
     suspend fun delete(sessionId: String): Boolean = withContext(NonCancellable) {
         stop(sessionId)
         forgetTools(sessionId)
-        forgetOperations(sessionId)
         try {
             dao.deleteSession(sessionId)
+            // Only once the chat is gone: a chat that stays keeps its receipts.
+            forgetOperations(sessionId)
+            forgetPublications(sessionId)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting a chat failed (${e.javaClass.simpleName})")
@@ -327,9 +331,10 @@ internal class AgentChats(
         lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
         for (id in registries.keys.toList()) forgetTools(id)
         modes.clear()
-        forgetOperations(null)
         try {
             dao.deleteAll()
+            forgetOperations(null)
+            forgetPublications(null)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")
@@ -402,10 +407,13 @@ internal class AgentChats(
                 lateinit var chats: AgentChats
                 chats = AgentChats(
                     AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt,
-                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId), NodeOperations.get(app)) },
+                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId), NodeOperations.get(app)) { app } },
                     forgetNodeOperations = { sessionId ->
                         val store = NodeOperations.get(app).store
                         if (sessionId == null) store.deleteAll() else store.deleteOwner(sessionId)
+                    },
+                    forgetPublications = { id ->
+                        if (id == null) AgentPublications.forgetAll(app) else AgentPublications.forgetSession(app, id)
                     },
                 )
                 chats

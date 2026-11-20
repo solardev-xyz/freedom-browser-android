@@ -221,7 +221,15 @@ private fun NodeAskBody(ask: NodeAsk) {
             if (args.write) Note(stringResource(R.string.agent_node_request_write_note))
         }
         is NodeAskKind.Diagnostics -> {
-            Headline(stringResource(R.string.agent_node_diagnostics, nodeServiceName(kind.service)))
+            // The light clients write one log: sharing either's shares both chains' lines.
+            val shared = NodeDiagnosticsTool.logCovers(kind.service).size > 1
+            Headline(
+                if (shared) {
+                    stringResource(R.string.agent_node_diagnostics_light_clients)
+                } else {
+                    stringResource(R.string.agent_node_diagnostics, nodeServiceName(kind.service))
+                },
+            )
             Field(
                 stringResource(R.string.agent_node_diagnostics_to),
                 kind.provider?.let { ApprovalText.flatten(it, 80) } ?: stringResource(R.string.agent_node_diagnostics_provider_unknown),
