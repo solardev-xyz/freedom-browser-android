@@ -31,6 +31,20 @@ internal sealed interface AgentAction {
         val promptText: String?,
         val from: String = "",
     ) : AgentAction
+
+    /**
+     * Publish [text] to Swarm, publicly (`swarm_publish`, #597): the
+     * frozen snapshot read back as text, its [bytes] and [contentType],
+     * what the pre-publish check found in it, and the stamp it would use.
+     * Bound to no tab.
+     */
+    data class Publish(
+        val text: String,
+        val bytes: Int,
+        val contentType: String,
+        val findings: List<PublicationScan.Finding>,
+        val postage: PostagePreview,
+    ) : AgentAction
 }
 
 /**
@@ -72,6 +86,12 @@ internal sealed interface ApprovalOutcome {
 
     /** Taken down without the user's answer: Stop, the tab taken back or closed, the chat deleted. */
     data object Withdrawn : ApprovalOutcome
+
+    /** A publish approved, with the secrets the user ticked to publish anyway (#597). */
+    data class Publish(val acknowledged: Set<String>) : ApprovalOutcome
+
+    /** "Ask Agent to fix": not a no, and nothing published; the agent is told what was found. */
+    data object AskToFix : ApprovalOutcome
 }
 
 /**
@@ -111,9 +131,12 @@ internal object AgentApprovals {
     }
 
     /** The user's answer to the approval [id]; nothing for one already settled or gone. */
-    fun answer(id: Long, approved: Boolean) {
+    fun answer(id: Long, approved: Boolean) = settle(id, if (approved) ApprovalOutcome.Approved else ApprovalOutcome.Declined)
+
+    /** The user's answer to a publish card ([AgentAction.Publish]): publish, ask the agent to fix, or no. */
+    fun settle(id: Long, outcome: ApprovalOutcome) {
         val entry = synchronized(lock) { pending.value.firstOrNull { it.approval.id == id } } ?: return
-        entry.result.complete(if (approved) ApprovalOutcome.Approved else ApprovalOutcome.Declined)
+        entry.result.complete(outcome)
         update { list -> list.filter { it !== entry } }
     }
 

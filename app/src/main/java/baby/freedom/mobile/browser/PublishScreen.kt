@@ -541,7 +541,7 @@ internal fun releaseGrant(context: Context, source: PublishSource) {
     val uri = when (source) {
         is PublishSource.OneFile -> source.uri
         is PublishSource.Folder -> source.treeUri
-        is PublishSource.Text -> return
+        is PublishSource.Text, is PublishSource.Frozen -> return
     }
     PublishGrants.release(context, uri)
 }

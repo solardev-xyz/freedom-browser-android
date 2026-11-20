@@ -47,6 +47,8 @@ internal class AgentChats(
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: () -> ZoneId = ZoneId::systemDefault,
     private val limitsOf: (ProviderDefinition) -> ContextLimits = ContextLimits::of,
+    /** A deleted chat's publication receipts go with it (#597); null: every chat's. */
+    private val forgetPublications: (String?) -> Unit = {},
 ) {
     /** A turn in progress: its reply so far. */
     data class Live(val sessionId: String, val turnId: String, val text: String)
@@ -265,6 +267,7 @@ internal class AgentChats(
     suspend fun deleteAll(): Boolean = withContext(NonCancellable) {
         lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
         for (id in registries.keys.toList()) forgetTools(id)
+        forgetPublications(null)
         try {
             dao.deleteAll()
             true
@@ -279,6 +282,7 @@ internal class AgentChats(
         registries.remove(sessionId)
         AgentApprovals.withdrawSession(sessionId)
         AgentTabs.releaseChat(sessionId)
+        forgetPublications(sessionId)
     }
 
     companion object {
@@ -327,7 +331,10 @@ internal class AgentChats(
                 val prompt = app.assets.open(PROMPT_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }
                 AgentChats(
                     AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt,
-                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId) },
+                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId) { app } },
+                    forgetPublications = { id ->
+                        if (id == null) AgentPublications.forgetAll(app) else AgentPublications.forgetSession(app, id)
+                    },
                 )
             }.also { instance = it }
         }

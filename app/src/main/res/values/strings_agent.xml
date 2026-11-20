@@ -316,4 +316,29 @@
     <string name="agent_dictation_language_title">Language</string>
     <string name="agent_dictation_app_language">App language</string>
     <string name="agent_dictation_save_failed">Couldn\'t change this. Try again.</string>
+    <!-- Freedom Agent's Swarm publishing (#597): the approval card. -->
+    <string name="agent_publish_headline">Publish text on Swarm, publicly</string>
+    <string name="agent_publish_permanent">Anyone with the link can read it. It can\'t be taken back: nothing published on Swarm can be deleted.</string>
+    <string name="agent_publish_text_label">Text · %1$s · %2$s</string>
+    <string name="agent_publish_text_cut">Shows the first %1$s of %2$s characters. All of them are published.</string>
+    <string name="agent_publish_findings_title">What the check found</string>
+    <string name="agent_publish_findings_none">The check found no keys, passwords or personal data. It can\'t catch everything, so read the text.</string>
+    <string name="agent_publish_findings_blocking">Keys, passwords and recovery phrases block publishing. Tick each one to publish it anyway, or ask the agent to fix them.</string>
+    <string name="agent_publish_finding_line">%1$s · line %2$d</string>
+    <string name="agent_publish_kind_secret">Secret</string>
+    <string name="agent_publish_kind_personal">Personal data</string>
+    <string name="agent_publish_kind_third_party">Loads from another site</string>
+    <string name="agent_publish_kind_metadata">Metadata</string>
+    <string name="agent_publish_anyway">Publish this anyway</string>
+    <string name="agent_publish_postage_title">Postage stamp</string>
+    <string name="agent_publish_postage_ready">Stamp %1$s. This takes about %2$s of the %3$s it has left.</string>
+    <string name="agent_publish_postage_ttl">It lasts %1$s more.</string>
+    <string name="agent_publish_postage_ttl_unknown">How long it lasts couldn\'t be read.</string>
+    <string name="agent_publish_postage_soon">The stamp runs out in under a week. After that, the text may no longer be reachable.</string>
+    <string name="agent_publish_postage_critical">The stamp runs out in under a day. After that, the text may no longer be reachable.</string>
+    <string name="agent_publish_postage_blocked">Nothing can be published until then.</string>
+    <string name="agent_publish_postage_unknown">Couldn\'t read the Swarm node\'s stamps, so nothing can be published now.</string>
+    <string name="agent_publish_no_buy">Nothing is bought: the agent can only use a stamp you already have.</string>
+    <string name="agent_publish_button">Publish publicly</string>
+    <string name="agent_publish_fix">Ask Agent to fix</string>
 </resources>

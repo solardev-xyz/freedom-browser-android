@@ -196,6 +196,9 @@ class NodeStatusToolTest {
 
     @Test
     fun `a chat offers node_status`() {
-        assertTrue(ToolRegistry.forChat("s").specs.any { it.name == "node_status" })
+        val names = ToolRegistry.forChat("s") { error("not needed to list the tools") }.specs.map { it.name }
+        assertTrue("node_status" in names)
+        // And Swarm publishing (#597), under desktop's names.
+        assertTrue("swarm_publish" in names && "swarm_publication_status" in names)
     }
 }

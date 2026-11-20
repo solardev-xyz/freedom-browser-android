@@ -408,7 +408,17 @@ internal const val MAX_PUBLISH_FILES = 5_000
 private const val MAX_FOLDER_DEPTH = 32
 
 /** Why a publish can't go ahead, in words for the page. */
-internal class PublishException(message: String) : Exception(message)
+internal open class PublishException(message: String) : Exception(message)
+
+/**
+ * The upload was handed to the node and then its answer was lost (the
+ * connection broke, the node went quiet, or it answered without a
+ * reference): some or all of it may be on the network. Never retried.
+ */
+internal class PublishUncertain(message: String) : PublishException(message)
+
+/** The node couldn't be reached: nothing of the upload went out. */
+internal class PublishNotSent(message: String) : PublishException(message)
 
 /** One file of a folder, found by [listFolder]: its path in the folder and its document in the picked tree. */
 internal data class FolderFile(val path: String, val documentId: String, val size: Long)
@@ -649,7 +659,7 @@ internal fun publishAnswer(code: Int, body: String?): Result<String> {
     val o = runCatching { JSONObject(body ?: "") }.getOrNull()
     if (code in 200..299) {
         val ref = o?.optString("reference")?.lowercase()
-        return if (ref != null && isSwarmReference(ref)) Result.success(ref) else Result.failure(PublishException(Strings.get(R.string.publish_error_no_reference)))
+        return if (ref != null && isSwarmReference(ref)) Result.success(ref) else Result.failure(PublishUncertain(Strings.get(R.string.publish_error_no_reference)))
     }
     val message = o?.optString("message")?.takeIf { it.isNotBlank() } ?: body?.take(200)?.takeIf { it.isNotBlank() }
     val text = when {
@@ -690,13 +700,18 @@ internal fun uploadToGateway(
         request.headers().forEach { (k, v) -> conn.setRequestProperty(k, v) }
         try {
             conn.outputStream.use { out -> body().use { it.copyTo(out, 64 * 1024) } }
+        } catch (e: java.net.ConnectException) {
+            // Nothing reached the node.
+            throw e
         } catch (e: IOException) {
-            throw PublishException(Strings.get(R.string.publish_error_send_failed))
+            throw PublishUncertain(Strings.get(R.string.publish_error_send_failed))
         }
         val code = try {
             conn.responseCode
         } catch (e: java.net.SocketTimeoutException) {
-            throw PublishException(Strings.get(R.string.publish_error_timeout))
+            throw PublishUncertain(Strings.get(R.string.publish_error_timeout))
+        } catch (e: IOException) {
+            throw PublishUncertain(Strings.get(R.string.publish_error_send_failed))
         }
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val text = stream?.use { it.readBytesCapped(64 * 1024) }?.toString(Charsets.UTF_8)
@@ -725,6 +740,64 @@ internal sealed interface PublishSource {
     data class OneFile(val uri: Uri) : PublishSource
     data class Folder(val treeUri: Uri) : PublishSource
     data class Text(val text: String) : PublishSource
+
+    /**
+     * Bytes frozen for an approval (Freedom Agent's `swarm_publish`, #597):
+     * copied in once, never handed out except as a copy, and checked
+     * against [sha256] once staged, so what goes out is byte for byte what
+     * was scanned and shown. [fileName] and [contentType] go to the node
+     * as they are.
+     */
+    class Frozen(bytes: ByteArray, val fileName: String, val contentType: String) : PublishSource {
+        private val data = bytes.copyOf()
+        val sha256: ByteArray = sha256Of(data)
+        val size: Int get() = data.size
+
+        /** A copy: the frozen bytes themselves never leave. */
+        fun bytes(): ByteArray = data.copyOf()
+
+        internal fun writeTo(file: File) = file.writeBytes(data)
+    }
+}
+
+internal fun sha256Of(bytes: ByteArray): ByteArray = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+
+internal fun sha256Of(file: File): ByteArray {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buf = ByteArray(64 * 1024)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            digest.update(buf, 0, n)
+        }
+    }
+    return digest.digest()
+}
+
+/**
+ * How a publish ended, for a caller that must tell "nothing went out"
+ * from "it may have" (Freedom Agent's journal, #597): the history keeps
+ * only a message.
+ */
+internal sealed interface PublishOutcome {
+    data class Completed(val reference: String, val bytes: Long, val batchId: String) : PublishOutcome
+
+    /** Ended before anything was handed to the node. */
+    data class NotSent(val message: String) : PublishOutcome
+
+    /** The node answered and refused it; chunks it took before that may still be out. */
+    data class Refused(val message: String) : PublishOutcome
+
+    /** Handed to the node, and its answer lost: it may be published. */
+    data class Unknown(val message: String) : PublishOutcome
+}
+
+/** What [Publisher.start] tells a caller as a publish goes: [dispatched] just before the upload, then [finished] once. */
+internal interface PublishReport {
+    fun dispatched()
+
+    fun finished(outcome: PublishOutcome)
 }
 
 /**
@@ -745,6 +818,12 @@ internal data class PublishPlan(
 internal fun planPublish(resolver: ContentResolver, source: PublishSource): PublishPlan = when (source) {
     is PublishSource.Text -> {
         val size = source.text.toByteArray(Charsets.UTF_8).size.toLong()
+        if (size == 0L) throw PublishException(Strings.get(R.string.publish_error_no_text))
+        if (size > MAX_PUBLISH_BYTES) throw PublishException(Strings.get(R.string.publish_error_text_too_big, formatStampBytes(MAX_PUBLISH_BYTES)))
+        PublishPlan(source, PublishKind.Text, Strings.get(R.string.publish_text_name), size, publishStampEstimate(listOf(size)))
+    }
+    is PublishSource.Frozen -> {
+        val size = source.size.toLong()
         if (size == 0L) throw PublishException(Strings.get(R.string.publish_error_no_text))
         if (size > MAX_PUBLISH_BYTES) throw PublishException(Strings.get(R.string.publish_error_text_too_big, formatStampBytes(MAX_PUBLISH_BYTES)))
         PublishPlan(source, PublishKind.Text, Strings.get(R.string.publish_text_name), size, publishStampEstimate(listOf(size)))
@@ -799,7 +878,7 @@ internal object Publisher {
      * publish is already running, or a stamp buy or search that may
      * restart the gateway. The history gets the record at once.
      */
-    fun start(context: Context, plan: PublishPlan, batch: PostageBatch): Boolean {
+    fun start(context: Context, plan: PublishPlan, batch: PostageBatch, report: PublishReport? = null): Boolean {
         val batchId = batch.id
         val app = context.applicationContext
         val history = PublishHistory.get(app)
@@ -808,15 +887,32 @@ internal object Publisher {
         // upload; the finally covers every path that ends before that.
         val releaseSource = RunOnce { releaseGrant(app, plan.source) }
         scope.launch {
+            var dispatched = false
+            var outcome: PublishOutcome? = null
             try {
-                val (reference, bytes) = run(app, plan, batch, releaseSource::invoke) { waitingForNode(record.id, it) }
+                val (reference, bytes) = run(app, plan, batch, releaseSource::invoke, { waitingForNode(record.id, it) }) {
+                    dispatched = true
+                    report?.dispatched()
+                }
                 history.completed(record.id, reference, batchId, bytes)
+                outcome = PublishOutcome.Completed(reference, bytes, batchId)
             } catch (e: PublishException) {
-                history.failed(record.id, e.message ?: Strings.get(R.string.publish_error_upload_failed))
+                val message = e.message ?: Strings.get(R.string.publish_error_upload_failed)
+                history.failed(record.id, message)
+                outcome = when {
+                    !dispatched || e is PublishNotSent -> PublishOutcome.NotSent(message)
+                    e is PublishUncertain -> PublishOutcome.Unknown(message)
+                    else -> PublishOutcome.Refused(message)
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "publish failed: ${t.javaClass.simpleName}")
-                history.failed(record.id, Strings.get(R.string.publish_error_upload_failed))
+                val message = Strings.get(R.string.publish_error_upload_failed)
+                history.failed(record.id, message)
+                outcome = if (dispatched) PublishOutcome.Unknown(message) else PublishOutcome.NotSent(message)
             } finally {
+                report?.let { r ->
+                    runCatching { r.finished(outcome ?: PublishOutcome.Unknown(Strings.get(R.string.publish_error_upload_failed))) }
+                }
                 releaseSource()
                 // Its record removed from the history meanwhile (Remove or
                 // Clear all): there's no outcome left to show.
@@ -884,12 +980,14 @@ internal object Publisher {
         batch: PostageBatch,
         sourceRead: () -> Unit,
         waiting: (Boolean) -> Unit,
+        dispatching: () -> Unit,
     ): Pair<String, Long> {
         val batchId = batch.id
         val resolver = app.contentResolver
         val dir = stagingDir(app)
         dir.mkdirs()
         val staged = File(dir, UUID.randomUUID().toString())
+        var dispatched = false
         try {
             var published = 0L
             val sizes = mutableListOf<Long>()
@@ -899,6 +997,14 @@ internal object Publisher {
                     published = staged.length()
                     sizes += published
                     PublishRequest(PublishKind.Text, batchId, TEXT_FILE_NAME, "text/plain; charset=utf-8", null)
+                }
+                is PublishSource.Frozen -> {
+                    s.writeTo(staged)
+                    // What's staged is what was approved, or nothing goes out.
+                    if (!sha256Of(staged).contentEquals(s.sha256)) throw PublishException(Strings.get(R.string.publish_error_changed))
+                    published = staged.length()
+                    sizes += published
+                    PublishRequest(PublishKind.Text, batchId, s.fileName, s.contentType, null)
                 }
                 is PublishSource.OneFile -> {
                     val input = resolver.openInputStream(s.uri) ?: throw PublishException(Strings.get(R.string.publish_error_file_unreadable))
@@ -939,6 +1045,8 @@ internal object Publisher {
             // would cut the upload off: wait it out (#222 R4-F1).
             StampClient.awaitGatewayQuiet(onWaiting = { waiting(true) })
             waiting(false)
+            dispatched = true
+            dispatching()
             val reference = uploadToGateway(SwarmNode.GATEWAY_URL, request, { staged.inputStream() }, staged.length())
             return reference to published
         } catch (e: SecurityException) {
@@ -946,9 +1054,13 @@ internal object Publisher {
         } catch (e: java.io.FileNotFoundException) {
             throw PublishException(Strings.get(R.string.publish_error_source_unreadable))
         } catch (e: IOException) {
-            throw PublishException(
-                Strings.get(if (e is java.net.ConnectException) R.string.publish_error_node_not_running else R.string.publish_error_node_unreachable),
-            )
+            val message = Strings.get(if (e is java.net.ConnectException) R.string.publish_error_node_not_running else R.string.publish_error_node_unreachable)
+            // A connection that broke after the upload began may have delivered it.
+            throw when {
+                e is java.net.ConnectException -> PublishNotSent(message)
+                dispatched -> PublishUncertain(message)
+                else -> PublishException(message)
+            }
         } finally {
             staged.delete()
         }
