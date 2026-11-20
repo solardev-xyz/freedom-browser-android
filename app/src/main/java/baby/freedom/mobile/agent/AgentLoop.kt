@@ -46,7 +46,13 @@ internal data class Summary(val text: String, val through: Int)
 
 internal sealed interface StepOutcome {
     data class Ok(val result: StepResult) : StepOutcome
-    data class Failed(val error: ChatError) : StepOutcome
+    /**
+     * [badRequest]: the server turned the request down as malformed
+     * (HTTP 400) before answering. A model that takes no tools (Ollama's
+     * gemma3, phi3 and the like) answers a request that offers some this
+     * way, so the loop asks again without them.
+     */
+    data class Failed(val error: ChatError, val badRequest: Boolean = false) : StepOutcome
 }
 
 /** Where a step goes: [onText] gets each piece of reply text as it streams in. */
@@ -87,7 +93,15 @@ internal class AgentLoop(
     /** The system prompt, with a time context fresh for each request. */
     private val systemPrompt: () -> String,
     private val maxSteps: Int = MAX_STEPS,
+    /** The model is already known to refuse a request that offers tools: none are offered. */
+    toolsUnsupported: Boolean = false,
+    /** Told once a request without tools went through where the same one with them was refused. */
+    private val onToolsUnsupported: () -> Unit = {},
 ) {
+    private var offerTools = !toolsUnsupported && tools.specs.isNotEmpty()
+
+    private val specs: List<ToolSpec> get() = if (offerTools) tools.specs else emptyList()
+
     /**
      * Runs one turn for [userText] after [history] (finished turns, by
      * position, which [summary] may already cover in part). [onText]
@@ -126,14 +140,29 @@ internal class AgentLoop(
             }
             val separator = if (text.isNotEmpty()) "\n\n" else ""
             var first = true
-            val outcome = model.step(StepRequest(modelId, system, items, tools.specs, limits.maxOutput)) { delta ->
-                if (delta.isEmpty()) return@step
-                if (first) {
-                    text.append(separator)
-                    first = false
+            val onDelta = { delta: String ->
+                if (delta.isNotEmpty()) {
+                    if (first) {
+                        text.append(separator)
+                        first = false
+                    }
+                    text.append(delta)
+                    onText(text)
                 }
-                text.append(delta)
-                onText(text)
+            }
+            var outcome = model.step(StepRequest(modelId, system, items, specs, limits.maxOutput), onDelta)
+            // A model that takes no tools refuses any request offering them
+            // (HTTP 400, "does not support tools"): ask once more without
+            // them, so it can still chat. Only before the turn has used a
+            // tool (a model that called one takes them) and before
+            // anything streamed; the server's words are never read, so a
+            // 400 for another reason just fails again and shows as before.
+            if (outcome is StepOutcome.Failed && outcome.badRequest && offerTools && first &&
+                turn.none { it is ChatItem.ToolResult }
+            ) {
+                offerTools = false
+                outcome = model.step(StepRequest(modelId, system, items, specs, limits.maxOutput), onDelta)
+                if (outcome is StepOutcome.Ok) onToolsUnsupported() else offerTools = true
             }
             val result = when (outcome) {
                 is StepOutcome.Failed -> return TurnOutcome(text.toString(), outcome.error)
@@ -164,7 +193,7 @@ internal class AgentLoop(
 
     private fun estimate(system: String, items: List<ChatItem>): Int =
         tokens(system.length) + items.sumOf { tokens(charsOf(it)) } +
-            tools.specs.sumOf { tokens(it.name.length + it.description.length + it.parameters.toString().length) }
+            specs.sumOf { tokens(it.name.length + it.description.length + it.parameters.toString().length) }
 
     /**
      * Summarises the oldest finished turns into [summary] (Pi's

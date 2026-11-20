@@ -179,4 +179,42 @@ class AgentLoopTest {
         assertTrue(block.contains("\"utcOffset\":\"UTC+05:30\""))
         assertNull(Regex("[^\\x00-\\x7F]").find(block))
     }
+
+    private val badRequest: (StepRequest) -> StepOutcome = { StepOutcome.Failed(ChatError.Refused, badRequest = true) }
+
+    @Test
+    fun `a model refusing a request with tools is asked again without them, and told`() {
+        var told = 0
+        val model = Script(badRequest, reply("Hi."), reply("Again."))
+        val l = AgentLoop(model, tools, ContextLimits(128_000, 1000), "m", { "system" }, onToolsUnsupported = { told++ })
+        assertEquals(TurnOutcome("Hi."), run(l))
+        assertEquals(listOf(listOf("current_time"), emptyList()), model.requests.map { r -> r.tools.map { it.name } })
+        assertEquals(1, told)
+        // The same loop's next step offers none either.
+        assertEquals(TurnOutcome("Again."), run(l))
+        assertTrue(model.requests[2].tools.isEmpty())
+    }
+
+    @Test
+    fun `a model known to take no tools is offered none from the start`() {
+        val model = Script(reply("Hi."))
+        val l = AgentLoop(model, tools, ContextLimits(128_000, 1000), "m", { "system" }, toolsUnsupported = true)
+        assertEquals(TurnOutcome("Hi."), run(l))
+        assertTrue(model.requests.single().tools.isEmpty())
+    }
+
+    @Test
+    fun `a 400 after a tool already ran, or one that isn't a bad request, isn't retried`() {
+        var told = 0
+        val afterTool = Script(reply("", ToolCall("c", "current_time", "{}")), badRequest)
+        assertEquals(ChatError.Refused, run(AgentLoop(afterTool, tools, ContextLimits(128_000, 1000), "m", { "system" }, onToolsUnsupported = { told++ })).error)
+        assertEquals(2, afterTool.requests.size)
+        val refused = Script({ StepOutcome.Failed(ChatError.Refused) })
+        assertEquals(ChatError.Refused, run(loop(refused)).error)
+        assertEquals(1, refused.requests.size)
+        val twice = Script(badRequest, badRequest, reply("ok"))
+        assertEquals(ChatError.Refused, run(loop(twice)).error)
+        assertEquals(2, twice.requests.size)
+        assertEquals(0, told)
+    }
 }

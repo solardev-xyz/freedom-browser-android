@@ -357,6 +357,7 @@ internal class AgentProviders(
                         in 500..599 -> ChatError.ServerError
                         else -> ChatError.Refused
                     },
+                    badRequest = end.code == 400,
                 )
                 StreamEnd.Unreachable -> StepOutcome.Failed(ChatError.Unreachable)
                 StreamEnd.TimedOut -> StepOutcome.Failed(ChatError.TimedOut)

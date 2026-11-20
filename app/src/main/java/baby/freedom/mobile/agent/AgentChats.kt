@@ -58,6 +58,14 @@ internal class AgentChats(
     private val lock = Mutex()
     private val jobs = HashMap<String, Job>()
 
+    /**
+     * Models (by connection, revision and id) seen to refuse a request
+     * that offers tools and take it without: later turns offer them none
+     * from the start, rather than paying a refused request each time.
+     * Only in memory, so a server that gains tool support is tried again.
+     */
+    private val noTools: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /** Set once turns a stopped app left running are marked interrupted: nothing starts before. */
     private val swept = CompletableDeferred<Unit>()
 
@@ -148,12 +156,15 @@ internal class AgentChats(
                         .map { HistoryTurn(it.position, it.userText, it.assistantText) }
                     val summary = session?.summary?.let { Summary(it, session.summaryThrough) }
                     val prompt = systemPromptFor(target)
+                    val toolsKey = "${target.connection.id}\u0000${target.connection.revision}\u0000${model.modelId}"
                     val loop = AgentLoop(
                         model = { request, onText -> providers.streamStep(target, request, onText) },
                         tools = tools,
                         limits = limitsOf(target.definition),
                         modelId = model.modelId,
                         systemPrompt = { prompt + "\n\n" + TimeContext.block(Instant.ofEpochMilli(clock()), zone()) },
+                        toolsUnsupported = toolsKey in noTools,
+                        onToolsUnsupported = { noTools += toolsKey },
                     )
                     loop.run(
                         history, summary, turn.userText,
