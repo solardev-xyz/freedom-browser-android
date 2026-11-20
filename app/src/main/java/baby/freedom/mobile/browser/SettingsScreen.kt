@@ -91,6 +91,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
+import baby.freedom.mobile.agent.AgentProviders
+import baby.freedom.mobile.agent.AgentState
+import baby.freedom.mobile.agent.AiProvidersPage
+import baby.freedom.mobile.agent.AiSection
+import baby.freedom.mobile.agent.aiPageSummary
+import baby.freedom.mobile.agent.aiSectionRows
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -321,6 +327,9 @@ internal fun SettingsScreen(
     val defaultBrowser = rememberDefaultBrowserState()
     val isDefaultBrowser = defaultBrowser.isDefault
     val passkeys = remember(context) { Passkeys.availability(context) }
+    // Settings → AI (#573), and its Models & providers page standing in for the list.
+    val agentState by remember(context) { AgentProviders.get(context).state }.collectAsState(initial = AgentState())
+    var aiProvidersOpen by rememberSaveable { mutableStateOf(false) }
 
     // Each card's rows, as the page shows them right now (see [SettingsRow]).
     val sectionRows: Map<SettingsSection, List<SettingsRow>> = mapOf(
@@ -341,6 +350,7 @@ internal fun SettingsScreen(
         SettingsSection.Nodes to
             nodeRows(externalSwarm, externalIpfs) + swarmCacheSizeRow(swarmCacheSize) + radicleSettingsRow(radicle),
         SettingsSection.Ipfs to ipfsRows(ipfsInfo),
+        SettingsSection.Ai to aiSectionRows(agentState),
         SettingsSection.About to aboutRows(appVersion, context.packageName, appUpdate, checkForUpdates),
     )
     // For the query: each card's matching rows; a query naming the card
@@ -429,7 +439,10 @@ internal fun SettingsScreen(
     if (licencesOpen && chainPage == null && site == null) {
         OpenSourceLicencesPage(onBack = { licencesOpen = false })
     }
-    if (deleteDataOpen && chainPage == null && site == null && !licencesOpen) {
+    if (aiProvidersOpen && chainPage == null && site == null && !licencesOpen) {
+        AiProvidersPage(onBack = { aiProvidersOpen = false })
+    }
+    if (deleteDataOpen && chainPage == null && site == null && !licencesOpen && !aiProvidersOpen) {
         DeleteBrowsingDataPage(
             repo = repo,
             onDelete = { choice ->
@@ -560,6 +573,7 @@ internal fun SettingsScreen(
             onOpenRelease = { onOpenUrl(it.url) },
             onOpenLicences = { licencesOpen = true },
         )
+        SettingsSection.Ai -> AiSection(visible = visible, onOpenProviders = { aiProvidersOpen = true })
         SettingsSection.Ipfs -> IpfsSection(
             visible = visible,
             settings = settings,
@@ -585,6 +599,7 @@ internal fun SettingsScreen(
         SettingsPage.Names -> namesPageSummary(ensRpcConfig.colibri, ensRpcConfig.sources.size)
         SettingsPage.Nodes ->
             nodesPageSummary(externalSwarm, externalIpfs, radicleSummary(radicle.info, radicle.enabled))
+        SettingsPage.Ai -> aiPageSummary(agentState)
         SettingsPage.About -> appVersion
     }
 
@@ -608,7 +623,7 @@ internal fun SettingsScreen(
     // same one opened again from the top level) starts at the top. Saveable,
     // so a recreated Activity keeps the position too.
     val pageState = rememberSaveable(openPage, saver = LazyListState.Saver) { LazyListState() }
-    if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen) FullScreenScaffold(
+    if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen && !aiProvidersOpen) FullScreenScaffold(
         title = openPage?.title ?: stringResource(R.string.settings_title),
         // On a sub-page the ← goes up to the top level, as Back does.
         onDismiss = { if (page != null) pageUp() else onDismiss() },
@@ -821,6 +836,7 @@ private fun sectionTitle(section: SettingsSection): String = when (section) {
     SettingsSection.Rpc -> SECTION_RPC
     SettingsSection.Nodes -> SECTION_NODES
     SettingsSection.Ipfs -> SECTION_IPFS
+    SettingsSection.Ai -> Strings.get(R.string.agent_section_ai)
     SettingsSection.About -> SECTION_ABOUT
 }
 

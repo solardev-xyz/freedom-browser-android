@@ -3,6 +3,7 @@ package baby.freedom.mobile.browser
 import androidx.annotation.StringRes
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Hub
@@ -47,13 +48,15 @@ internal enum class SettingsPage(
     Wallet(R.string.settings_page_wallet, Icons.Filled.AccountBalanceWallet),
     Names(R.string.names_section_ens, Icons.Filled.Translate),
     Nodes(R.string.settings_page_nodes, Icons.Filled.Hub),
+    /** Settings → AI (#573): off by default; its providers once on. */
+    Ai(R.string.agent_page_ai, Icons.Filled.AutoAwesome),
     About(R.string.settings_page_about, Icons.Filled.Info),
     ;
 
     val title: String get() = Strings.get(titleRes)
 }
 
-/** The top level's groups, in order: basics, privacy, web3, about. */
+/** The top level's groups, in order: basics, privacy, web3, AI, about. */
 internal enum class SettingsGroup(@StringRes val titleRes: Int, val pages: List<SettingsPage>) {
     General(
         R.string.settings_group_general,
@@ -61,6 +64,7 @@ internal enum class SettingsGroup(@StringRes val titleRes: Int, val pages: List<
     ),
     Privacy(R.string.settings_group_privacy, listOf(SettingsPage.Privacy, SettingsPage.Adblock)),
     Web3(R.string.settings_group_web3, listOf(SettingsPage.Wallet, SettingsPage.Names, SettingsPage.Nodes)),
+    Ai(R.string.agent_group_ai, listOf(SettingsPage.Ai)),
     About(R.string.settings_group_about, listOf(SettingsPage.About)),
 }
 
@@ -85,6 +89,7 @@ internal enum class SettingsSection {
     Rpc,
     Nodes,
     Ipfs,
+    Ai,
     About,
     // Last: under the About card once it's a line there.
     DefaultBrowser,
@@ -105,6 +110,7 @@ internal enum class SettingsSection {
         Wallet, Chains -> SettingsPage.Wallet
         Ens, Rpc -> SettingsPage.Names
         Nodes, Ipfs -> SettingsPage.Nodes
+        Ai -> SettingsPage.Ai
         About -> SettingsPage.About
     }
 }

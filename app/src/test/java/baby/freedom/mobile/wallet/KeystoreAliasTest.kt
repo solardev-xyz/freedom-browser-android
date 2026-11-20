@@ -28,4 +28,16 @@ class KeystoreAliasTest {
         assertNotEquals(KeystoreNodeKeys.ALIAS, KeystoreVaultStore.KEY_ALIAS)
         assertNotEquals(KeystoreNodeKeys.ALIAS, KeystoreKey.ALIAS)
     }
+
+    /** The AI providers' keys (#573) have their own alias too: Remove wallet must not take them, nor they the wallet's. */
+    @Test
+    fun `AI provider keys have their own alias`() {
+        val aliases = listOf(
+            baby.freedom.mobile.agent.AgentStore.KEY_ALIAS,
+            KeystoreKey.ALIAS,
+            KeystoreVaultStore.KEY_ALIAS,
+            KeystoreNodeKeys.ALIAS,
+        )
+        org.junit.Assert.assertEquals(aliases.size, aliases.toSet().size)
+    }
 }

@@ -24,6 +24,13 @@ class BackupRulesTest {
         "SwarmGrantStore.kt" to "freedom_swarm_grants",
         // A signing grant names the wallet's Radicle DID, which the same phrase derives again (#336).
         "RadicleGrantStore.kt" to "freedom_radicle_grants",
+        // The AI providers' encrypted API keys and connections, and their model lists (#573).
+        "../agent/AgentStore.kt" to "freedom_agent",
+    )
+
+    /** A second file of the same store, by the constant naming it. */
+    private val extraStores = mapOf(
+        "../agent/AgentStore.kt" to "freedom_agent_models",
     )
 
     /** Plain files beside them: the Swarm manifests' record of which Swarm grants they own. */
@@ -153,7 +160,10 @@ class BackupRulesTest {
         for ((source, name) in files) {
             assertTrue("$source names its file $name", File(sources, source).readText().contains("filesDir, \"$name\")"))
         }
-        val paths = stores.values.map { "datastore/$it.preferences_pb" } + files.values
+        for ((source, name) in extraStores) {
+            assertTrue("$source names its store $name", File(sources, source).readText().contains("\"$name\""))
+        }
+        val paths = (stores.values + extraStores.values).map { "datastore/$it.preferences_pb" } + files.values
         for ((file, section) in rules) {
             val excluded = excludes(file, section)
             for (p in paths) assertTrue("$file ${section ?: ""} excludes $p", p in excluded)

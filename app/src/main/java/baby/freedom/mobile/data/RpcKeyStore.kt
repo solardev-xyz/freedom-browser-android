@@ -71,10 +71,20 @@ internal class AesGcmCipher(private val key: () -> SecretKey) : SecretCipher {
  * in a backup or device transfer (Keystore keys aren't carried over).
  */
 internal object KeystoreKey {
-    private const val PROVIDER = "AndroidKeyStore"
     /** Distinct from the wallet vault's `KeystoreVaultStore.KEY_ALIAS`. */
     internal const val ALIAS = "freedom_rpc_api_keys"
 
+    private val key = KeystoreAesKey(ALIAS)
+
+    fun get(): SecretKey = key.get()
+}
+
+/**
+ * An AES-256-GCM key in the Android Keystore under [alias], generated on
+ * first use and never leaving it. Each store with secrets of its own
+ * (the RPC keys, the AI providers' keys) has its own alias.
+ */
+internal class KeystoreAesKey(private val alias: String) {
     @Volatile
     private var cached: SecretKey? = null
 
@@ -84,10 +94,10 @@ internal object KeystoreKey {
 
     private fun load(): SecretKey {
         val ks = KeyStore.getInstance(PROVIDER).apply { load(null) }
-        (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        (ks.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
         gen.init(
-            KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
@@ -95,6 +105,10 @@ internal object KeystoreKey {
                 .build(),
         )
         return gen.generateKey()
+    }
+
+    private companion object {
+        const val PROVIDER = "AndroidKeyStore"
     }
 }
 
