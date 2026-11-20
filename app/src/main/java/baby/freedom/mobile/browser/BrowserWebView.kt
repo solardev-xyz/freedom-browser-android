@@ -1289,10 +1289,16 @@ fun BrowserWebViewHost(
     }
 
     // Visibility: only the active tab draws. Toggle the SwipeRefreshLayout
-    // (the actual child of [frame]) rather than the WebView itself.
+    // (the actual child of [frame]) rather than the WebView itself. A tab
+    // Freedom Agent holds (#575) stays laid out at the page's size while
+    // hidden, so what the agent reads of it is the page as it will show.
     val activeId = tabs.active.id
     for ((id, layout) in refreshLayouts) {
-        val targetVisibility = if (id == activeId) View.VISIBLE else View.GONE
+        val targetVisibility = when {
+            id == activeId -> View.VISIBLE
+            baby.freedom.mobile.agent.AgentTabs.isHeld(id) -> View.INVISIBLE
+            else -> View.GONE
+        }
         if (layout.visibility != targetVisibility) layout.visibility = targetVisibility
     }
 

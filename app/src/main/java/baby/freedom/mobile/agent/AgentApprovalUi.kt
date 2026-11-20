@@ -135,13 +135,13 @@ private fun ApprovalBody(approval: AgentApproval) {
     }
     Spacer(Modifier.height(12.dp))
     when (action) {
-        is AgentAction.Navigate -> Field(stringResource(R.string.agent_approve_address), ApprovalText.flatten(action.url, 2_000), mono = true)
+        is AgentAction.Navigate -> Field(stringResource(R.string.agent_approve_address), ApprovalText.flatten(action.url, BrowserArgs.MAX_URL_CHARS), mono = true)
         is AgentAction.Click -> TargetRows(action.target)
         is AgentAction.Type -> {
             TargetRows(action.target)
             Field(
                 stringResource(R.string.agent_approve_text),
-                action.text.takeIf { it.isNotEmpty() }?.let { ApprovalText.flatten(it, 2_000) }
+                action.text.takeIf { it.isNotEmpty() }?.let { ApprovalText.flatten(it, BrowserArgs.MAX_TYPED_CHARS) }
                     ?: stringResource(R.string.agent_approve_text_empty),
                 mono = true,
             )
@@ -150,7 +150,7 @@ private fun ApprovalBody(approval: AgentApproval) {
             TargetRows(action.target)
             Field(
                 stringResource(R.string.agent_approve_options),
-                action.values.takeIf { it.isNotEmpty() }?.joinToString("\n") { ApprovalText.flatten(it, 300) }
+                action.values.takeIf { it.isNotEmpty() }?.joinToString("\n") { ApprovalText.flatten(it, 2_000) }
                     ?: stringResource(R.string.agent_approve_options_none),
                 mono = true,
             )

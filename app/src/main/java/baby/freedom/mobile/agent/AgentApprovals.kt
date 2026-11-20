@@ -102,7 +102,7 @@ internal object AgentApprovals {
 
     /** The user's answer to the approval [id]; nothing for one already settled or gone. */
     fun answer(id: Long, approved: Boolean) {
-        val entry = pending.value.firstOrNull { it.approval.id == id } ?: return
+        val entry = synchronized(lock) { pending.value.firstOrNull { it.approval.id == id } } ?: return
         entry.result.complete(if (approved) ApprovalOutcome.Approved else ApprovalOutcome.Declined)
         update { list -> list.filter { it !== entry } }
     }
@@ -115,13 +115,16 @@ internal object AgentApprovals {
     fun withdrawAll() = withdraw { true }
 
     private fun withdraw(which: (AgentApproval) -> Boolean) {
-        val gone = pending.value.filter { which(it.approval) }
+        val gone = synchronized(lock) { pending.value.filter { which(it.approval) } }
         if (gone.isEmpty()) return
         for (entry in gone) entry.result.complete(ApprovalOutcome.Withdrawn)
         update { list -> list.filter { it !in gone } }
     }
 
-    private fun update(change: (List<Pending>) -> List<Pending>) {
+    /** One lock for the list and the card it shows, so two chats can't leave a card for a gone approval. */
+    private val lock = Any()
+
+    private fun update(change: (List<Pending>) -> List<Pending>) = synchronized(lock) {
         pending.update(change)
         _shown.value = pending.value.firstOrNull()?.approval
     }
@@ -182,9 +185,18 @@ internal object ApprovalBinding {
         now == null -> Refusal.TabGone
         now.private || now.heldBy != approval.sessionId -> Refusal.NotHeld
         now.document != approval.document || now.site != approval.site -> Refusal.Changed
-        targetNow != null && targetNow != targetOf(approval.action) -> Refusal.Changed
+        targetNow != null && !sameControl(targetNow, targetOf(approval.action)) -> Refusal.Changed
         else -> null
     }
+
+    /**
+     * The control the card named, as it is now: its tag, name, where it
+     * goes and what it does. Not its ARIA role, which a page sets from
+     * script once it's shown (a search box becoming a combobox) — and a
+     * held tab's page is first shown by the approved action itself.
+     */
+    private fun sameControl(now: PageTarget, shown: PageTarget?): Boolean =
+        shown != null && now.copy(role = shown.role) == shown
 
     fun targetOf(action: AgentAction): PageTarget? = when (action) {
         is AgentAction.Click -> action.target

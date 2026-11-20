@@ -123,6 +123,10 @@ class AgentApprovalsTest {
         assertEquals(ApprovalBinding.Refusal.Changed, ApprovalBinding.check(a, now.copy(site = "evil.example"), button))
         assertEquals(ApprovalBinding.Refusal.Changed, ApprovalBinding.check(a, now, button.copy(name = "Pay now")))
         assertEquals(ApprovalBinding.Refusal.Changed, ApprovalBinding.check(a, now, button.copy(target = "https://evil.example/")))
+        assertEquals(ApprovalBinding.Refusal.Changed, ApprovalBinding.check(a, now, button.copy(tag = "a")))
+        assertEquals(ApprovalBinding.Refusal.Changed, ApprovalBinding.check(a, now, button.copy(effect = "form_submission")))
+        // A page setting the ARIA role from script once shown is the same control.
+        assertNull(ApprovalBinding.check(a, now, button.copy(role = "combobox")))
     }
 
     // ---- the card's text ----

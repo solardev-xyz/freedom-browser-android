@@ -325,10 +325,14 @@ private class BrowserTabsHost(
 /** Schemes whose pages the agent may read and act in (desktop's navigation set, as the WebView commits them). */
 internal fun agentReadable(url: String): Boolean {
     if (url.isBlank() || ErrorPage.isErrorPage(url)) return false
+    if (NON_WEB.containsMatchIn(url)) return false
     val scheme = url.substringBefore("://", "").lowercase()
     // A bare `name.eth/…` is how the address bar shows a dweb page.
     return scheme.isEmpty() || scheme in setOf("http", "https", "bzz", "ipfs", "ipns", "ens", "rad")
 }
+
+/** Pages that aren't a website's, whichever way they're written: `about:blank`, `data:`, a file… */
+private val NON_WEB = Regex("^\\s*(about|data|javascript|blob|file|content|chrome|intent|view-source|filesystem):", RegexOption.IGNORE_CASE)
 
 /** Runs [block] on the main thread. */
 internal suspend fun <T> onMain(block: suspend () -> T): T = withContext(Dispatchers.Main.immediate) { block() }

@@ -213,26 +213,52 @@
     return { truncated: truncated };
   }
 
+  /*
+   * What a reference must still be when it's used: the control's tag
+   * and name, its id, name and type attributes, where a link goes,
+   * and the start of the text of the row, list item or card around it, so that one of several same-named controls ("Delete" in
+   * each row) isn't taken for another once the list shifts ([find]).
+   */
   var fingerprintOf = function (element, info) {
-    return { role: info.role.slice(0, 128), tag: element.tagName.toLowerCase().slice(0, 128), name: info.name.slice(0, 200) };
-  };
-  var sameFingerprint = function (fp, want) {
-    return fp.role === want.role && fp.tag === want.tag && fp.name === want.name;
+    // Rows and cards only: a form's or section's text changes as the user
+    // types (a search box's suggestions), a row's around its button doesn't.
+    var around = element.parentElement && element.parentElement.closest('li,tr,article,[role="row"],[role="listitem"],[role="article"]');
+    // Not the ARIA role: pages set it from script once they're shown
+    // (a search box becomes a combobox), and a held tab is hidden until
+    // the approved action brings it on screen.
+    return JSON.stringify([
+      element.tagName.toLowerCase().slice(0, 128),
+      info.name.slice(0, 300),
+      String(element.getAttribute('id') || '').slice(0, 200),
+      String(element.getAttribute('name') || '').slice(0, 200),
+      String(element.getAttribute('type') || '').slice(0, 64),
+      element.tagName === 'A' ? String(element.href || '').slice(0, 1000) : '',
+      // textContent, not innerText: the same whether or not the tab is on screen.
+      around ? normalize(around.textContent).slice(0, 120) : ''
+    ]);
   };
 
-  /* The element at [index] in the walk for [query], if still the same control. */
+  /*
+   * The control a reference names: the one at [index] in the walk for
+   * [query] if it's still the same control, else the only control on the
+   * page that is (one shown or hidden since moved it along). Two or more
+   * that match, and none at its place: refused, never a guess.
+   */
   function find(index, query, want) {
     var count = -1;
-    var found = null;
+    var atIndex = null;
+    var matches = [];
     walk(normalize(query).toLowerCase(), function (element, frameWindow, frameId, info) {
       count += 1;
-      if (count < index) return false;
-      found = { element: element, frameWindow: frameWindow, info: info };
-      return true;
+      if (fingerprintOf(element, info) !== want) return false;
+      var hit = { element: element, frameWindow: frameWindow, info: info };
+      if (count === index) { atIndex = hit; return true; }
+      matches.push(hit);
+      return false;
     });
-    if (!found) return { error: 'changed' };
-    if (!sameFingerprint(fingerprintOf(found.element, found.info), want)) return { error: 'changed' };
-    return found;
+    if (atIndex) return atIndex;
+    if (matches.length === 1) return matches[0];
+    return { error: 'changed' };
   }
 
   var composedActive = function (doc) {
@@ -298,6 +324,7 @@
       return text.slice(0, end);
     };
     var elements = [];
+    var fingerprints = [];
     var frames = [];
     var dialogs = [];
     var pageText = [];
@@ -357,9 +384,11 @@
       if (bytes + size > a.maxElementChars) { budgetReached = true; return false; }
       bytes += size;
       elements.push(entry);
+      fingerprints.push(fingerprintOf(element, info));
       return false;
     }, function (frame) {
-      if (frames.length < 16) frames.push(frame);
+      if (frame.url) frame.url = frame.url.slice(0, 500);
+      if (frames.length < 8) frames.push(frame); else fieldsTruncated = true;
     }, function (doc, frameId) {
       if (frameId === 'frame_main' && doc.scrollingElement) {
         viewport = readScrollState(doc.scrollingElement);
@@ -426,7 +455,7 @@
       if (textMatch && textMatch.end < fullText.length) out.nextMatchOffset = textMatch.end;
     }
     // What the caller keeps to resolve a reference later; not for the model.
-    out.fingerprints = elements.map(function (e) { return { role: e.role, tag: e.tag, name: e.name }; });
+    out.fingerprints = fingerprints;
     return out;
   }
 

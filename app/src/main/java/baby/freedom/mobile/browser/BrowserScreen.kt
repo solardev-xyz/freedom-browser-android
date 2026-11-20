@@ -2570,13 +2570,18 @@ fun BrowserScreen(
                 }
             },
         ) {
-            BrowserWebViewHost(
-                tabs = tabs,
-                modifier = Modifier.fillMaxSize(),
-                covered = overlayShown,
-                // Closing the last private tab clears the nodes' logs (#276).
-                onPrivateSessionEnded = clearNodeLogs,
-            )
+            // A tab Freedom Agent holds (#575) has a strip above its page
+            // that says so and gives it back; it takes its own room.
+            Column(Modifier.fillMaxSize()) {
+                baby.freedom.mobile.agent.AgentTabStrip(state)
+                BrowserWebViewHost(
+                    tabs = tabs,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    covered = overlayShown,
+                    // Closing the last private tab clears the nodes' logs (#276).
+                    onPrivateSessionEnded = clearNodeLogs,
+                )
+            }
             // Home overlay. Rendered whenever the tab hasn't loaded
             // a real page (fresh tab, or user navigated home). The
             // WebView keeps `about:blank` under us — see
@@ -2630,8 +2635,6 @@ fun BrowserScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            // A tab Freedom Agent holds (#575): says so, and gives it back.
-            baby.freedom.mobile.agent.AgentTabStrip(state, Modifier.align(Alignment.TopCenter))
         }
 
         // The strip of reserved mode (#66) and of a reveal (#65):

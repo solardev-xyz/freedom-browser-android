@@ -42,14 +42,28 @@ class BrowserToolsTest {
         }
 
         override fun tabs() = tabs.values.toList()
-        override fun tab(id: Long) = tabs[id]
+        var pendingCommit: Pair<Long, String>? = null
+
+        override fun tab(id: Long): AgentTab? {
+            val p = pendingCommit
+            if (p != null && p.first == id && reads++ > 0) {
+                tabs[id] = AgentTab(id, p.second, "", loading = false, private = false, internal = false, document = 1, active = false)
+                pendingCommit = null
+            }
+            return tabs[id]
+        }
+
+        private var reads = 0
         override fun openTab(url: String): Long {
             val id = nextId++
-            tabs[id] = AgentTab(id, url, "", loading = true, private = false, internal = false, document = 1, active = false)
+            // Committed by the time the tool reads it again.
+            tabs[id] = AgentTab(id, "", "", loading = false, private = false, internal = true, document = 0, active = false)
+            pendingCommit = id to url
             return id
         }
         override fun navigate(id: Long, url: String) {
             navigations += id to url
+            tabs[id]?.let { tabs[id] = it.copy(url = url, internal = false, document = it.document + 1) }
         }
         override fun close(id: Long) {
             tabs.remove(id)
@@ -63,7 +77,7 @@ class BrowserToolsTest {
                 "snapshot" -> JSONObject()
                     .put("url", tabs[id]!!.url)
                     .put("elements", JSONArray().put(JSONObject(control.toString()).put("ref", tokenOf(script) + "_0")))
-                    .put("fingerprints", JSONArray().put(control))
+                    .put("fingerprints", JSONArray().put(control.toString()))
                     .toString()
                 "describe" -> JSONObject().put("ok", true).put("target", control).toString()
                 "point" -> JSONObject().put("ok", true).put("x", 100).put("y", 200).toString()
@@ -87,8 +101,15 @@ class BrowserToolsTest {
         override suspend fun drag(id: Long, x: Float, y: Float, dx: Float, dy: Float) = true
         override fun key(id: Long, keyCode: Int) = true
         override suspend fun commitText(id: Long, text: String) = true
-        override fun dialog(id: Long): AgentDialog? = null
-        override fun answerDialog(id: Long, dialog: AgentDialog, accept: Boolean, promptText: String?) = false
+        var dialog: AgentDialog? = null
+        val answers = ArrayList<Pair<Boolean, String?>>()
+        override fun dialog(id: Long): AgentDialog? = dialog
+        override fun answerDialog(id: Long, dialog: AgentDialog, accept: Boolean, promptText: String?): Boolean {
+            if (this.dialog != dialog) return false
+            answers += accept to promptText
+            this.dialog = null
+            return true
+        }
     }
 
     private val host = FakeHost()
@@ -353,5 +374,71 @@ class BrowserToolsTest {
         val tools = BrowserToolset("chat", browser = { null }, ask = { ApprovalOutcome.Approved }, pageScript = { "PAGE" })
         assertEquals("CAPABILITY_UNAVAILABLE", tools.call("browser_list_tabs").code())
         assertEquals("CAPABILITY_UNAVAILABLE", tools.call("browser_create_tab", JSONObject().put("url", "https://example.com/")).code())
+    }
+
+    @Test
+    fun `a page's dialog is answered only as approved, and only while it's the same one`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+        assertTrue(tools.call("browser_get_dialog").result().isNull("dialog"))
+        host.dialog = AgentDialog("prompt", "Your name?\u202E", "x", "https://example.com/")
+        val got = tools.call("browser_get_dialog").result()
+        assertTrue(got.getString("untrusted").contains("untrusted"))
+        val ref = got.getJSONObject("dialog").getString("dialogRef")
+        // Declined: the dialog is left as it is.
+        answer = { ApprovalOutcome.Declined }
+        assertEquals("USER_DECLINED", tools.call("browser_handle_dialog", JSONObject().put("dialogRef", ref).put("accept", true).put("promptText", "Ann")).code())
+        assertTrue(host.answers.isEmpty())
+        answer = { ApprovalOutcome.Approved }
+        assertFalse(tools.call("browser_handle_dialog", JSONObject().put("dialogRef", ref).put("accept", true).put("promptText", "Ann")).isError)
+        val shown = asked.last().action as AgentAction.Dialog
+        assertEquals("Your name?\uFFFD", shown.message)
+        assertEquals("Ann", shown.promptText)
+        assertEquals(listOf(true to "Ann"), host.answers)
+        // A ref for a dialog that has since been replaced by another is stale.
+        host.dialog = AgentDialog("confirm", "Delete?", null, "https://example.com/")
+        val second = tools.call("browser_get_dialog").result().getJSONObject("dialog").getString("dialogRef")
+        host.dialog = AgentDialog("confirm", "Delete everything?", null, "https://example.com/")
+        assertEquals("STALE_ELEMENT_REFERENCE", tools.call("browser_handle_dialog", JSONObject().put("dialogRef", second).put("accept", true)).code())
+        assertEquals(1, host.answers.size)
+    }
+
+    @Test
+    fun `a tab still between pages says to wait rather than to stop`() = runBlocking {
+        host.add(page(1, url = "", internal = true).copy(loading = true))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+        val out = tools.call("browser_snapshot")
+        assertEquals("TAB_BUSY", out.code())
+        assertTrue(out.output.contains("browser_wait"))
+    }
+
+    @Test
+    fun `typed text and addresses are capped at what the card shows`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+        val long = "https://example.com/" + "a".repeat(BrowserArgs.MAX_URL_CHARS)
+        assertEquals("INVALID_ARGUMENT", tools.call("browser_navigate", JSONObject().put("url", long)).code())
+        val ref = snapshotRef(tools)
+        assertEquals(
+            "INVALID_ARGUMENT",
+            tools.call("browser_type", JSONObject().put("ref", ref).put("text", "x".repeat(BrowserArgs.MAX_TYPED_CHARS + 1))).code(),
+        )
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `only website pages are readable`() {
+        for (url in listOf("example.com/", "https://example.com/a", "http://10.0.2.2:8701/", "name.eth/", "bzz://abc/")) {
+            assertTrue(url, agentReadable(url))
+        }
+        for (url in listOf("", "about:blank", "ABOUT:srcdoc", "data:text/html,<b>x</b>", "javascript:alert(1)", "file:///sdcard/a", "content://x/y", "chrome://version")) {
+            assertFalse(url, agentReadable(url))
+        }
     }
 }
