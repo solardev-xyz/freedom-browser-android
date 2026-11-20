@@ -755,6 +755,7 @@ fun BrowserScreen(
             tor = torShownInfo(tor),
             torEnabled = tor.enabled,
             torProxy = tor.proxy != null,
+            torSupported = tor.supported,
             myotis = myotisInfo,
             myotisRunning = myotisRunning.orEmpty(),
         ),

@@ -43,6 +43,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /** The `window.ethereum` provider's rules (#110), with the wallet, the stores and the chain behind fakes. */
@@ -51,6 +52,10 @@ class EthereumProviderTest {
         /** The tab the requests come from, for agent custody (#577). */
         const val TAB = 7L
     }
+
+    /** [call] reads agent custody, a process-wide record: no test leaves its tab held for another. */
+    @Before
+    fun releaseTabs() = AgentTabs.clear()
 
     private val site = "https://app.example"
     private val cow = Keccak256.digest("cow".toByteArray())

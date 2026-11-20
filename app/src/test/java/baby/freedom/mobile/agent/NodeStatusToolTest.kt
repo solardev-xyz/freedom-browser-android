@@ -5,6 +5,7 @@ import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.MyotisChainStatus
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
+import baby.freedom.swarm.MyotisRecovery
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -119,6 +120,22 @@ class NodeStatusToolTest {
         assertEquals("external", n["tor"]!!.getString("mode"))
         assertEquals("disabled", n["myotis-ethereum"]!!.getString("state"))
         assertEquals("error", n["myotis-gnosis"]!!.getString("state"))
+    }
+
+    @Test
+    fun `a checkpoint recovery that needs the user is an error, one under way is syncing, and a phone without Tor says so`() {
+        fun gnosis(recovery: MyotisRecovery?) = nodes(
+            NodeSnapshot(
+                myotis = MyotisInfo(MyotisStatus.Running, listOf(synced.copy(chainId = 100L, recovery = recovery))),
+                myotisRunning = setOf(MyotisNetwork.Gnosis),
+                torSupported = false,
+            ),
+        )
+        assertEquals("error", gnosis(MyotisRecovery(MyotisRecovery.Phase.Blocked))["myotis-gnosis"]!!.getString("state"))
+        assertEquals("syncing", gnosis(MyotisRecovery(MyotisRecovery.Phase.Checking))["myotis-gnosis"]!!.getString("state"))
+        val tor = gnosis(null)["tor"]!!
+        assertEquals("unavailable", tor.getString("state"))
+        assertFalse(tor.getBoolean("ready"))
     }
 
     @Test

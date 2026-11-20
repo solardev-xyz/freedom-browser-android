@@ -4,6 +4,7 @@ import baby.freedom.swarm.IpfsInfo
 import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.MyotisInfo
 import baby.freedom.swarm.MyotisNetwork
+import baby.freedom.swarm.MyotisRecovery
 import baby.freedom.swarm.MyotisStatus
 import baby.freedom.swarm.NodeInfo
 import baby.freedom.swarm.NodeStatus
@@ -40,6 +41,8 @@ internal data class NodeSnapshot(
     val torEnabled: Boolean = false,
     /** Tor through Orbot rather than the built-in Arti. */
     val torProxy: Boolean = false,
+    /** False when Freedom's own Tor can't run on this phone ([baby.freedom.mobile.browser.TorControls.supported]). */
+    val torSupported: Boolean = true,
     val myotis: MyotisInfo = MyotisInfo(),
     /** The light client's chains switched on. */
     val myotisRunning: Set<MyotisNetwork> = emptySet(),
@@ -79,7 +82,11 @@ internal object NodeStatusReport {
             if (s.externalSwarm) external(ANT) else manager(ANT, s.runNode, swarmState(s.swarm.status)),
             if (s.externalIpfs) external(IPFS) else manager(IPFS, s.runNode, ipfsState(s.ipfs.status)),
             manager(RADICLE, s.radicleEnabled, radicleState(s.radicle.status)),
-            manager(if (s.torProxy) ORBOT else TOR, s.torEnabled, torState(s.tor.status), mode = if (s.torProxy) "external" else "embedded"),
+            if (!s.torSupported && !s.torProxy) {
+                unavailable(TOR)
+            } else {
+                manager(if (s.torProxy) ORBOT else TOR, s.torEnabled, torState(s.tor.status), mode = if (s.torProxy) "external" else "embedded")
+            },
         ) + MyotisNetwork.entries.mapNotNull { network -> MYOTIS[network]?.let { myotis(it, network, s) } }
         return JSONObject().put("nodes", JSONArray(nodes)).put("summary", summary(nodes))
     }
@@ -142,6 +149,14 @@ internal object NodeStatusReport {
         .put("running", true)
         .put("ready", true)
 
+    /** Desktop's `unavailable`: there's no runtime for this service on this phone. */
+    private fun unavailable(d: Definition): JSONObject = base(d)
+        .put("state", "unavailable")
+        .put("mode", "none")
+        .put("running", false)
+        .put("ready", false)
+        .put("recovery", recovery("unavailable"))
+
     /** Desktop's `normalizeMyotisNode`, from the light client page's own reading of the chain. */
     private fun myotis(d: Definition, network: MyotisNetwork, s: NodeSnapshot): JSONObject {
         val on = network in s.myotisRunning
@@ -155,6 +170,9 @@ internal object NodeStatusReport {
                 MyotisStatus.Running -> when {
                     chain == null -> "syncing"
                     chain.error != null -> "error"
+                    // A checkpoint recovery that needs the user (#195); one still under way is syncing.
+                    chain.recovery?.phase == MyotisRecovery.Phase.Blocked -> "error"
+                    chain.recovery != null || chain.staleAnchor -> "syncing"
                     chain.paused || !chain.running -> "stopped"
                     chain.ready -> "ready"
                     else -> "syncing"
@@ -177,6 +195,7 @@ internal object NodeStatusReport {
     private fun recovery(state: String): String? = when (state) {
         "disabled" -> "Enable this service in Freedom settings if the task needs it."
         "error" -> "Open Freedom's Nodes & networks page for recovery details."
+        "unavailable" -> "Freedom can't run this service on this phone."
         else -> null
     }
 
