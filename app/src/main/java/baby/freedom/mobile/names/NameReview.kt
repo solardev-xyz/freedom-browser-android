@@ -127,6 +127,18 @@ internal fun operationStatus(op: NameOperation, nowSeconds: Long): String {
     return if (note != null) "$base $note" else base
 }
 
+/**
+ * What Register or Renew says when it hands back [op], an open operation of
+ * the same choice that can't be reviewed now (waiting for its commitment,
+ * pending, an unknown outcome): the check makes way for it, so the line says
+ * why and where it stands. Null when it's ready, since its review opens instead.
+ */
+internal fun carriedOnNotice(op: NameOperation, nowSeconds: Long): String? {
+    if (op.state == State.READY) return null
+    val text = if (op.registering) R.string.namereg_open_registration_continues else R.string.namereg_open_renewal_continues
+    return Strings.get(text, op.name, operationStatus(op, nowSeconds))
+}
+
 /** The deadline line under a reveal that's ready or waiting: when its commitment runs out. */
 internal fun revealDeadline(op: NameOperation): String? {
     if (op.step != Step.REVEAL || (op.state != State.READY && op.state != State.WAITING_COMMITMENT)) return null

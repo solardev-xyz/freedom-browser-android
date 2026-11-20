@@ -205,6 +205,7 @@ fun NameRegistrationScreen(
         val from = payer ?: return
         busy = true
         error = null
+        notice = null
         scope.launch {
             val op = try {
                 registrar.start(check, intent, from.address, from.index)
@@ -218,6 +219,8 @@ fun NameRegistrationScreen(
             }
             if (op != null) {
                 checked = Checked.None
+                // The same choice already open and not ready (waiting, pending, unknown): say so instead of the check just vanishing.
+                notice = carriedOnNotice(op, System.currentTimeMillis() / 1000)
                 // A brand-new one (nothing sent yet) that can't be built is dropped again.
                 if (op.state == State.READY) review(op, fresh = op.transactionHash == null && op.step != Step.REVEAL && op.revision == 1)
             }

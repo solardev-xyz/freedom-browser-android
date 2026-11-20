@@ -34,6 +34,10 @@
     <string name="namereg_error_open_registration">%1$s already has an open registration, paid from %2$s for %3$s. Finish or dismiss it below to start a different one.</string>
     <!-- %1$s: the name, %2$s: a short account address, %3$s: years like "1 year" -->
     <string name="namereg_error_open_renewal">%1$s already has an open renewal, paid from %2$s for %3$s. Finish or dismiss it below to start a different one.</string>
+    <!-- %1$s: the name, %2$s: where its open operation stands, e.g. "Commit confirmed. Step 2 can be sent in about 45 s." -->
+    <string name="namereg_open_registration_continues">%1$s already has this registration open, so nothing new was started. %2$s It carries on below.</string>
+    <!-- %1$s: the name, %2$s: where its open operation stands -->
+    <string name="namereg_open_renewal_continues">%1$s already has this renewal open, so nothing new was started. %2$s It carries on below.</string>
     <string name="namereg_error_busy">This is being sent right now. Wait for it to finish.</string>
     <string name="namereg_error_inconsistent">This saved registration doesn\'t match its name. Dismiss it and start again.</string>
     <string name="namereg_send_busy">Another wallet transaction is still going out. Wait for it, then review this again.</string>

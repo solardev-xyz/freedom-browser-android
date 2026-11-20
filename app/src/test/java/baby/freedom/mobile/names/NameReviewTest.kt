@@ -116,4 +116,22 @@ class NameReviewTest {
         assertNotNull(revealDeadline(waiting))
         assertNull(revealDeadline(op()))
     }
+
+    @Test
+    fun `Register on a name whose same registration is waiting says it carries on, instead of the check just vanishing`() {
+        val waiting = op(step = Step.REVEAL).copy(state = State.WAITING_COMMITMENT, readyAt = 1_000, expiresAt = 87_400)
+        assertEquals(
+            "freedom.eth already has this registration open, so nothing new was started. " +
+                "Commit confirmed. Step 2 can be sent in about 45 s. It carries on below.",
+            carriedOnNotice(waiting, 955),
+        )
+        val renewing = op(intent = Intent.RENEW, step = Step.RENEW).copy(state = State.PENDING)
+        assertEquals(
+            "freedom.eth already has this renewal open, so nothing new was started. " +
+                "Waiting for the transaction to be confirmed… It carries on below.",
+            carriedOnNotice(renewing, 0),
+        )
+        assertTrue(carriedOnNotice(op().copy(state = State.DISPATCH_UNKNOWN), 0)!!.contains("won't send it again"))
+        assertNull("a ready one opens its review instead", carriedOnNotice(op(), 0))
+    }
 }
