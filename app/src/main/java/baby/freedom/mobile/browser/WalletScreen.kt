@@ -100,6 +100,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
+import baby.freedom.mobile.names.NameRegistrationScreen
+import baby.freedom.mobile.names.NamesEntrySection
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.l10n.pluralText
 import baby.freedom.mobile.ui.isLight
@@ -767,6 +769,8 @@ fun WalletScreen(
     val x402Allowances by x402.allowances.collectAsState(initial = emptyList())
     val x402Payments by x402.history.collectAsState(initial = emptyList())
     var x402HistoryOpen by remember { mutableStateOf(false) }
+    // Register and renew .eth/.wei/.gwei names (#579).
+    var namesOpen by remember { mutableStateOf(false) }
     // The connected site whose page is open (#111), by origin, so it follows the stored grant.
     var openSite by remember { mutableStateOf<String?>(null) }
     // Undo for Disconnect, Revoke and Remove rule (#423): shown on the list and on a site's page.
@@ -1152,6 +1156,11 @@ fun WalletScreen(
         return
     }
 
+    if (namesOpen) {
+        NameRegistrationScreen(onOpenUrl = onOpenUrl, onDismiss = { namesOpen = false })
+        return
+    }
+
     if (importing) {
         ImportPhrasePage(
             busy = busy,
@@ -1349,6 +1358,12 @@ fun WalletScreen(
                             x402HistoryOpen = true
                         },
                     )
+                }
+            }
+            if (walletOpen) item("names") {
+                NamesEntrySection(enabled = !busy) {
+                    error = null
+                    namesOpen = true
                 }
             }
             if (walletOpen) item("publishing") {

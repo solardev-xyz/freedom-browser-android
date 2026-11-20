@@ -42,6 +42,7 @@
 
     <!-- names/NameRegistrationScreen.kt -->
     <string name="namereg_title">Register a name</string>
+    <string name="namereg_section">Names</string>
     <string name="namereg_entry">Register a name</string>
     <string name="namereg_entry_subtitle">.eth, .wei and .gwei names on Ethereum</string>
     <string name="namereg_intro">Check a .eth, .wei or .gwei name, then register it to this wallet or renew it. Each step is a wallet transaction you review first.</string>
@@ -90,6 +91,10 @@
     <string name="namereg_op_pending">Waiting for the transaction to be confirmed…</string>
     <!-- %1$s: approximate time left, like "45 s" -->
     <string name="namereg_op_waiting">Commit confirmed. Step 2 can be sent in about %1$s.</string>
+    <!-- A short wait. %1$d: seconds -->
+    <string name="namereg_seconds">%1$d s</string>
+    <!-- A short wait. %1$d: minutes -->
+    <string name="namereg_minutes">%1$d min</string>
     <string name="namereg_op_waiting_soon">Commit confirmed. Step 2 can be sent in a moment.</string>
     <string name="namereg_op_completed_register">Registered to this wallet.</string>
     <string name="namereg_op_completed_renew">Renewed.</string>
