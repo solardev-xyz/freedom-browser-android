@@ -527,7 +527,10 @@ object EthereumProviders {
                 val p = provider ?: throw IllegalStateException("provider not ready")
                 val ps = params!!
                 params = null
-                p.request(origin, method, ps) { ask -> askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime()) }
+                // Read live, by this tab: the same site in a tab of the user's keeps its rules (#577).
+                p.request(origin, method, ps, agentHeld = { baby.freedom.mobile.agent.AgentTabs.isHeld(tab.id) }) { ask ->
+                    askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime())
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

@@ -39,13 +39,14 @@ class X402SheetTest {
     private val account1 = WalletAccount(0, "Account 1", "0x1111111111111111111111111111111111111111")
     private val account2 = WalletAccount(1, "Account 2", "0x2222222222222222222222222222222222222222")
 
-    private fun ask(balance: Long?, vararg amounts: String, account: WalletAccount? = account1) = X402Ask(
+    private fun ask(balance: Long?, vararg amounts: String, account: WalletAccount? = account1, allowanceOffered: Boolean = true) = X402Ask(
         url = "https://api.example/paid",
         description = null,
         account = account,
         options = offers(*amounts).map { X402Option(it, BuiltInChains.BASE, "USDC", 6, listed = true, balance = balance?.let(BigInteger::valueOf)) },
         unusable = emptyList(),
         allowanceWaitingOnUnlock = false,
+        allowanceOffered = allowanceOffered,
     )
 
     @Test
@@ -88,11 +89,27 @@ class X402SheetTest {
     fun `an account switch never pays from an allowance, the sheet goes up instead (R5-M2)`() {
         val options = ask(balance = 100_000, "10000").options
         val payer = account2.address
-        assertEquals(0, X402Payments.silentPayOption(true, switched = false, payer, ledger = false, options = options) { true }?.offer?.index)
-        assertNull("after a switch", X402Payments.silentPayOption(true, switched = true, payer, ledger = false, options = options) { true })
-        assertNull("not the navigation's own", X402Payments.silentPayOption(false, switched = false, payer, ledger = false, options = options) { true })
-        assertNull("no account", X402Payments.silentPayOption(true, switched = false, null, ledger = false, options = options) { true })
-        assertNull("no allowance", X402Payments.silentPayOption(true, switched = false, payer, ledger = false, options = options) { false })
+        assertEquals(0, X402Payments.silentPayOption(true, switched = false, payer, ledger = false, agentHeld = false, options = options) { true }?.offer?.index)
+        assertNull("after a switch", X402Payments.silentPayOption(true, switched = true, payer, ledger = false, agentHeld = false, options = options) { true })
+        assertNull("not the navigation's own", X402Payments.silentPayOption(false, switched = false, payer, ledger = false, agentHeld = false, options = options) { true })
+        assertNull("no account", X402Payments.silentPayOption(true, switched = false, null, ledger = false, agentHeld = false, options = options) { true })
+        assertNull("no allowance", X402Payments.silentPayOption(true, switched = false, payer, ledger = false, agentHeld = false, options = options) { false })
+    }
+
+    @Test
+    fun `a tab the agent holds never pays from an allowance, and its sheet grants none (#577)`() {
+        val options = ask(balance = 100_000, "10000").options
+        val payer = account2.address
+        assertNull("held", X402Payments.silentPayOption(true, switched = false, payer, ledger = false, agentHeld = true, options = options) { true })
+        // Taken back: the allowance pays again.
+        assertEquals(0, X402Payments.silentPayOption(true, switched = false, payer, ledger = false, agentHeld = false, options = options) { true }?.offer?.index)
+        val s = X402SheetState(ask(balance = 100_000, "10000", allowanceOffered = false))
+        assertFalse(s.allowanceOffered)
+        s.auto = true
+        s.capText = "nonsense"
+        assertNull(s.capProblem())
+        assertEquals(X402Choice(0, null), s.choice())
+        assertTrue(X402SheetState(ask(balance = 100_000, "10000")).allowanceOffered)
     }
 
     @Test
@@ -102,7 +119,7 @@ class X402SheetTest {
             LedgerKey("44'/60'/0'/0/0", "AA:BB:CC:DD:EE:FF", "Ledger Nano X"),
         )
         val a = ask(balance = 1_000_000, "10000", account = ledger)
-        assertNull(X402Payments.silentPayOption(true, switched = false, ledger.address, ledger = true, options = a.options) { true })
+        assertNull(X402Payments.silentPayOption(true, switched = false, ledger.address, ledger = true, agentHeld = false, options = a.options) { true })
         val s = X402SheetState(a)
         assertTrue(s.ledger)
         s.auto = true

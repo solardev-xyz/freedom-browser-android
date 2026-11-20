@@ -1,6 +1,7 @@
 package baby.freedom.mobile.browser
 
 import baby.freedom.mobile.R
+import baby.freedom.mobile.agent.AgentTabs
 import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainRpcException
@@ -39,12 +40,23 @@ import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /** The `window.ethereum` provider's rules (#110), with the wallet, the stores and the chain behind fakes. */
 class EthereumProviderTest {
+    private companion object {
+        /** The tab the requests come from, for agent custody (#577). */
+        const val TAB = 7L
+    }
+
+    /** [call] reads agent custody, a process-wide record: no test leaves its tab held for another. */
+    @Before
+    fun releaseTabs() = AgentTabs.clear()
+
     private val site = "https://app.example"
     private val cow = Keccak256.digest("cow".toByteArray())
     private val main = WalletAccount(0, "Account 1", "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826")
@@ -213,7 +225,8 @@ class EthereumProviderTest {
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun call(method: String, params: JSONArray = JSONArray(), origin: String = site) = runBlocking {
-        provider.request(origin, method, params) { ask ->
+        // As the bridge does: by the requesting tab, read live (#577).
+        provider.request(origin, method, params, agentHeld = { AgentTabs.isHeld(TAB) }) { ask ->
             if (ask is EthAsk.SwitchNotice) {
                 turns += ask
                 ask.switched.invokeOnCompletion { ask.switched.getCompleted()?.let { switched += it } }
@@ -323,13 +336,13 @@ class EthereumProviderTest {
             }
             val p = EthereumProvider(grants, onVault, { chainList!! }, { _, _, _, _ -> "0x1" }, sends, rules)
             answer = { EthAnswer.Approved(main) }
-            ok(p.request(site, "eth_requestAccounts", JSONArray()) { answer(it) })
+            ok(p.request(site, "eth_requestAccounts", JSONArray(), agentHeld = { false }) { answer(it) })
             // 20 minutes of a dApp's usual polling, screen on, app in front.
             repeat(20 * 6) {
                 now += 10_000L
-                ok(p.request(site, "eth_chainId", JSONArray()) { answer(it) })
-                ok(p.request(site, "eth_blockNumber", JSONArray()) { answer(it) })
-                ok(p.request(site, "eth_accounts", JSONArray()) { answer(it) })
+                ok(p.request(site, "eth_chainId", JSONArray(), agentHeld = { false }) { answer(it) })
+                ok(p.request(site, "eth_blockNumber", JSONArray(), agentHeld = { false }) { answer(it) })
+                ok(p.request(site, "eth_accounts", JSONArray(), agentHeld = { false }) { answer(it) })
                 vault.lockIfExpired()
                 if (now - 1_000_000L < 15 * 60_000L) assertTrue("open at ${now - 1_000_000L} ms", vault.unlockedNow())
             }
@@ -548,7 +561,7 @@ class EthereumProviderTest {
             grants.setChainGate = gate
             grants.setChainStarted = CompletableDeferred()
             val page = launch {
-                ok(provider.request(site, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x2105"))) { EthAnswer.Approved() })
+                ok(provider.request(site, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x2105")), agentHeld = { false }) { EthAnswer.Approved() })
             }
             grants.setChainStarted.await()
             // The page's write is in flight: the site still reads as on Ethereum, the chain Undo checks for.
@@ -856,7 +869,7 @@ class EthereumProviderTest {
         val p = EthereumProvider(grants, wallet, { BuiltInChains.ALL }, { _, _, _, _ -> null }, sends, rules, compute)
         connect()
         grants.grants[site] = EthereumProvider.Grant(main.address, 1)
-        val sig = runBlocking { p.request(site, "eth_signTypedData_v4", JSONArray().put(main.address).put(mail)) { EthAnswer.Approved() } }
+        val sig = runBlocking { p.request(site, "eth_signTypedData_v4", JSONArray().put(main.address).put(mail), agentHeld = { false }) { EthAnswer.Approved() } }
         assertTrue(sig is EthereumProvider.Reply.Ok)
         assertTrue(dispatched > 0)
     }
@@ -1125,6 +1138,42 @@ class EthereumProviderTest {
         ok(switchTo("0x1"))
         assertEquals(1, events.size)
         assertEquals(1, switched.size)
+    }
+
+    @Test
+    fun `a connected site's switch in a tab the agent holds gets the sheet, not a notice (#577)`() {
+        connect()
+        AgentTabs.clear()
+        assertTrue(AgentTabs.hold(TAB, "chat", private = false))
+        try {
+            answer = { EthAnswer.Rejected }
+            assertEquals(4001, code(switchTo("0x1")))
+            assertEquals(EthAsk.SwitchChain(site, BuiltInChains.GNOSIS, BuiltInChains.ETHEREUM), asks.single())
+            assertTrue(turns.isEmpty())
+            assertEquals(100L, grants.grants[site]?.chainId)
+        } finally {
+            AgentTabs.clear()
+        }
+        // Taken back: the switch goes at once again, with its notice.
+        asks.clear()
+        answer = { error("no sheet expected, got $it") }
+        ok(switchTo("0x1"))
+        assertTrue(asks.isEmpty())
+        assertEquals(1L, grants.grants[site]?.chainId)
+        // Taken while the notice waited for its turn: the sheet after all, never a silent switch.
+        asks.clear()
+        turnAnswer = {
+            assertTrue(AgentTabs.hold(TAB, "chat", private = false))
+            EthAnswer.Approved()
+        }
+        answer = { EthAnswer.Rejected }
+        try {
+            assertEquals(4001, code(switchTo("0x64")))
+            assertEquals(EthAsk.SwitchChain(site, BuiltInChains.ETHEREUM, BuiltInChains.GNOSIS), asks.single())
+            assertEquals(1L, grants.grants[site]?.chainId)
+        } finally {
+            AgentTabs.clear()
+        }
     }
 
     @Test
@@ -1572,6 +1621,57 @@ class EthereumProviderTest {
     private val approveData = "0x095ea7b3" + "00".repeat(64)
     private fun sent(n: Int) = EthereumProvider.Submitted.Sent("0x" + "%064x".format(n))
 
+    @Test
+    fun `a rule that would match is ignored in a tab the agent holds, and applies again once it's taken back (#577)`() {
+        grantTransferRule()
+        AgentTabs.clear()
+        assertTrue(AgentTabs.hold(TAB, "chat", private = false))
+        try {
+            // Held: the sheet, exactly as asked, with no rule on it to turn on or say is on.
+            answer = { EthAnswer.Approved(alwaysApprove = true) }
+            sends.outcomes += sent(2)
+            assertEquals(sent(2).hash, ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+            val held = asks.single() as EthAsk.SendTransaction
+            assertNull(held.autoApprove)
+            assertFalse(held.ruled)
+            // A refusal there is the user's: nothing goes out.
+            answer = { EthAnswer.Rejected }
+            assertEquals(4001, code(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+            assertEquals(2, asks.size)
+            assertEquals(1, rules.rules.size)
+            // Taken back: the rule answers again, with no sheet.
+            AgentTabs.release(TAB)
+            asks.clear()
+            answer = { error("no sheet expected") }
+            sends.outcomes += sent(3)
+            assertEquals(sent(3).hash, ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData))))
+            assertTrue(asks.isEmpty())
+        } finally {
+            AgentTabs.clear()
+        }
+    }
+
+    @Test
+    fun `a sheet in a tab the agent holds offers no rule, and turning one on writes none (#577)`() {
+        connect()
+        AgentTabs.clear()
+        assertTrue(AgentTabs.hold(TAB, "chat", private = false))
+        try {
+            answer = { EthAnswer.Approved(alwaysApprove = true) }
+            sends.outcomes += sent(1)
+            ok(call("eth_sendTransaction", tx("to" to token, "data" to transferData)))
+            assertNull((asks.single() as EthAsk.SendTransaction).autoApprove)
+            assertTrue(rules.rules.isEmpty())
+        } finally {
+            AgentTabs.clear()
+        }
+        // The same site in the user's own tab is offered it as before.
+        asks.clear()
+        answer = { EthAnswer.Rejected }
+        call("eth_sendTransaction", tx("to" to token, "data" to transferData))
+        assertNotNull((asks.single() as EthAsk.SendTransaction).autoApprove)
+    }
+
     /** Connect, then send [transferData] to [token] once with the sheet's switch turned on. */
     private fun grantTransferRule() {
         connect()
@@ -1746,7 +1846,7 @@ class EthereumProviderTest {
         val p = EthereumProvider(grants, wallet, { chainList!! }, { _, _, _, _ -> null }, replacing, rules)
         sends.outcomes += sent(2)
         runBlocking {
-            p.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+            p.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData), agentHeld = { false }) { ask ->
                 asks += ask
                 EthAnswer.Approved()
             }
@@ -1853,7 +1953,7 @@ class EthereumProviderTest {
         connect()
         sends.outcomes += sent(1)
         runBlocking {
-            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData), agentHeld = { false }) { ask ->
                 asks += ask
                 // The page's own wallet_revokePermissions, while the sheet is up.
                 assertTrue(provider.disconnect(site))
@@ -1872,12 +1972,12 @@ class EthereumProviderTest {
         connect()
         sends.outcomes += sent(1)
         runBlocking {
-            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData), agentHeld = { false }) { ask ->
                 asks += ask
                 assertTrue(provider.disconnect(site))
                 assertEquals(
                     second.address,
-                    (provider.request(site, "eth_requestAccounts", JSONArray()) { EthAnswer.Approved(second) } as EthereumProvider.Reply.Ok)
+                    (provider.request(site, "eth_requestAccounts", JSONArray(), agentHeld = { false }) { EthAnswer.Approved(second) } as EthereumProvider.Reply.Ok)
                         .value.let { (it as JSONArray).getString(0) },
                 )
                 EthAnswer.Approved(alwaysApprove = true)
