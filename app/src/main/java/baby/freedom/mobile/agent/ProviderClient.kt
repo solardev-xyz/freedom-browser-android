@@ -41,6 +41,12 @@ internal class RequestGate {
     private val revisions = HashMap<String, Long>()
     private val calls = HashMap<Call, String>()
 
+    /**
+     * Calls this gate cancelled, until they're unregistered: how [stopped]
+     * tells them from a call OkHttp cancelled itself at its deadline.
+     */
+    private val cancelled = HashSet<Call>()
+
     /** AI on, with each connection's current revision. */
     fun enable(current: Map<String, Long>) = synchronized(lock) {
         enabled = true
@@ -52,7 +58,7 @@ internal class RequestGate {
     fun disable() {
         val running = synchronized(lock) {
             enabled = false
-            calls.keys.toList().also { calls.clear() }
+            calls.keys.toList().also { calls.clear(); cancelled.addAll(it) }
         }
         running.forEach(Call::cancel)
     }
@@ -64,7 +70,7 @@ internal class RequestGate {
     fun bump(connectionId: String, revision: Long?) {
         val stale = synchronized(lock) {
             if (revision == null) revisions.remove(connectionId) else revisions[connectionId] = revision
-            calls.filterValues { it == connectionId }.keys.toList().onEach { calls.remove(it) }
+            calls.filterValues { it == connectionId }.keys.toList().onEach { calls.remove(it); cancelled.add(it) }
         }
         stale.forEach(Call::cancel)
     }
@@ -81,7 +87,19 @@ internal class RequestGate {
     }
 
     fun unregister(call: Call) {
-        synchronized(lock) { calls.remove(call) }
+        synchronized(lock) {
+            calls.remove(call)
+            cancelled.remove(call)
+        }
+    }
+
+    /**
+     * Whether [call] may no longer deliver: this gate cancelled it, or AI
+     * is off or the connection has moved past [revision]. A call cancelled
+     * by its own deadline is not stopped: it timed out.
+     */
+    fun stopped(call: Call, connectionId: String, revision: Long): Boolean = synchronized(lock) {
+        call in cancelled || !enabled || revisions[connectionId] != revision
     }
 
     /** Calls in flight; for tests. */
@@ -159,15 +177,18 @@ internal class ProviderClient(
                     override fun onFailure(call: Call, e: IOException) {
                         cont.resume(
                             when {
-                                // The gate moves before it cancels, so a call it
-                                // stopped no longer passes it.
-                                !gate.allows(connectionId, revision) -> ProviderReply.Cancelled
-                                // OkHttp's own deadline cancels the call too, and
-                                // reports `InterruptedIOException("timeout")`. Only
-                                // a server that took the request is "too slow"; a
-                                // connect that timed out never reached one.
+                                // Only the gate's own cancels (AI off, a new key
+                                // or URL) are "stopped". OkHttp's deadline cancels
+                                // the call too, so `call.isCanceled()` can't tell
+                                // the two apart.
+                                gate.stopped(call, connectionId, revision) -> ProviderReply.Cancelled
+                                // The deadline reports `InterruptedIOException`.
+                                // Only a server that took the request is "too
+                                // slow"; a DNS lookup, connect or TLS handshake
+                                // that never finished never reached one.
                                 e is InterruptedIOException && sent.value -> ProviderReply.TimedOut
-                                call.isCanceled() -> ProviderReply.Cancelled
+                                // Also a cancel from the caller: its coroutine is
+                                // gone, so nobody reads this.
                                 else -> ProviderReply.Unreachable
                             },
                         )
@@ -181,8 +202,7 @@ internal class ProviderClient(
                         } catch (e: Throwable) {
                             ProviderReply.Unreachable
                         }
-                        val stopped = !gate.allows(connectionId, revision) ||
-                            (call.isCanceled() && reply == ProviderReply.Unreachable)
+                        val stopped = gate.stopped(call, connectionId, revision)
                         cont.resume(if (stopped) ProviderReply.Cancelled else reply)
                     }
                 })

@@ -329,6 +329,48 @@ class AgentProvidersTest {
     }
 
     @Test
+    fun `a deadline that passes before the server takes the request reads as unreachable, not stopped`() = runBlocking {
+        val id = connectOllama()
+        val revision = state.connection(id)!!.revision
+        // Accepts the TCP connection and never answers the TLS handshake.
+        java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1")).use { silent ->
+            val held = java.util.concurrent.CopyOnWriteArrayList<java.net.Socket>()
+            val acceptor = Thread {
+                try {
+                    while (true) held += silent.accept()
+                } catch (e: java.io.IOException) {
+                }
+            }.apply { isDaemon = true; start() }
+            val url = HttpUrl.Builder().scheme("https").host("127.0.0.1").port(silent.localPort).addPathSegment("x").build()
+            val started = System.nanoTime()
+            val reply = ProviderClient(gate).fetch(id, revision, url, emptyMap(), 4096, timeoutMs = 700)
+            val ms = (System.nanoTime() - started) / 1_000_000
+            assertEquals(ProviderReply.Unreachable, reply)
+            assertTrue("took $ms ms", ms in 500..5_000)
+            assertTrue("the connection was accepted", held.isNotEmpty())
+            assertEquals(0, gate.inFlight())
+            silent.close()
+            held.forEach { it.close() }
+            acceptor.join(1_000)
+        }
+        // AI is still on and the revision unchanged, so the page doesn't say "stopped".
+        assertTrue(gate.allows(id, revision))
+    }
+
+    @Test
+    fun `turning AI off and on again still reads a call it stopped as stopped`() = runBlocking {
+        val id = connectOllama()
+        val revision = state.connection(id)!!.revision
+        routes["/api/tags"] = { json(tags("late")).setHeadersDelay(3, TimeUnit.SECONDS) }
+        val url = base.resolve("/api/tags")!!
+        val reply = async { ProviderClient(gate).fetch(id, revision, url, emptyMap(), 4096) }
+        withTimeout(5_000) { while (server.requestCount == 0) delay(10) }
+        gate.disable()
+        gate.enable(mapOf(id to revision))
+        assertEquals(ProviderReply.Cancelled, reply.await())
+    }
+
+    @Test
     fun `refresh models tells an answering server apart from one that can't be reached`() = runBlocking {
         val id = providers.run {
             setEnabled(true)
@@ -495,6 +537,74 @@ class AgentProvidersTest {
         assertTrue(AgentStore(file, modelFile, AesGcmCipher { aes }).state.first().keys["openai"] == "sk-SECRET-123")
         assertTrue(lost.saveApiKey("openai", "sk-NEW"))
         assertEquals("sk-NEW", lost.state.first().keys["openai"])
+    }
+
+    /** [aes], counting each call, and failing as a busy Keystore while [busy] is set. */
+    private inner class FlakyCipher : baby.freedom.mobile.data.SecretCipher {
+        private val real = AesGcmCipher { aes }
+        @Volatile var busy = false
+        @Volatile var encrypts = 0
+        @Volatile var decrypts = 0
+
+        override fun encrypt(plain: ByteArray): ByteArray {
+            encrypts++
+            if (busy) throw java.security.ProviderException("keystore busy")
+            return real.encrypt(plain)
+        }
+
+        override fun decrypt(blob: ByteArray): ByteArray {
+            decrypts++
+            if (busy) throw java.security.ProviderException("keystore busy")
+            return real.decrypt(blob)
+        }
+    }
+
+    @Test
+    fun `a favourite or default tap keeps the key blob and opens no key`() = runBlocking {
+        val cipher = FlakyCipher()
+        val p = AgentProviders(AgentStore(file, modelFile, cipher), RequestGate())
+        p.setEnabled(true)
+        assertTrue(p.saveApiKey("openai", "sk-ONE"))
+        val key = androidx.datastore.preferences.core.stringPreferencesKey("keys_v1")
+        val blob = file.state.value[key]
+        assertEquals("sk-ONE", p.state.first().keys["openai"])
+        val (enc, dec) = cipher.encrypts to cipher.decrypts
+        p.setFavorite("openai", "o3", true)
+        p.setDefault("openai", "o3")
+        assertEquals(blob, file.state.value[key])
+        assertEquals("sk-ONE", p.state.first().keys["openai"])
+        assertEquals(enc, cipher.encrypts)
+        assertEquals(dec, cipher.decrypts)
+    }
+
+    @Test
+    fun `a Keystore that fails for a moment doesn't let a new key drop the others`() = runBlocking {
+        val cipher = FlakyCipher()
+        val p = AgentProviders(AgentStore(file, modelFile, cipher), RequestGate())
+        p.setEnabled(true)
+        assertTrue(p.saveApiKey("openai", "sk-ONE"))
+        assertTrue(p.saveApiKey("anthropic", "sk-TWO"))
+        // A fresh process, whose first read of the blob meets a busy Keystore.
+        val flaky = FlakyCipher().apply { busy = true }
+        val again = AgentProviders(AgentStore(file, modelFile, flaky), RequestGate())
+        val s = again.state.first()
+        assertTrue(s.keysUnreadable)
+        assertFalse(again.saveApiKey("xai", "sk-THREE"))
+        flaky.busy = false
+        assertTrue(again.saveApiKey("xai", "sk-THREE"))
+        assertEquals(
+            mapOf("openai" to "sk-ONE", "anthropic" to "sk-TWO", "xai" to "sk-THREE"),
+            AgentStore(file, modelFile, AesGcmCipher { aes }).state.first().keys,
+        )
+    }
+
+    @Test
+    fun `only a decrypt failure that will happen again counts as a lost key`() {
+        assertTrue(AgentStore.isPermanent(javax.crypto.AEADBadTagException()))
+        assertTrue(AgentStore.isPermanent(IllegalArgumentException()))
+        assertTrue(AgentStore.isPermanent(org.json.JSONException("x")))
+        assertFalse(AgentStore.isPermanent(java.security.ProviderException()))
+        assertFalse(AgentStore.isPermanent(java.security.KeyStoreException()))
     }
 
     @Test

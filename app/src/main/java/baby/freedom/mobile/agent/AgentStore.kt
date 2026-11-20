@@ -1,6 +1,7 @@
 package baby.freedom.mobile.agent
 
 import android.content.Context
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
@@ -17,11 +18,16 @@ import baby.freedom.mobile.data.KeystoreAesKey
 import baby.freedom.mobile.data.SecretCipher
 import java.io.IOException
 import java.util.Base64
+import java.security.UnrecoverableKeyException
+import javax.crypto.AEADBadTagException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 
 /**
@@ -104,7 +110,10 @@ internal class AgentStore(
             Log.w(TAG, "reading AI settings failed (${e.javaClass.simpleName})")
             emit(emptyPreferences())
         }
-        .map(::decode)
+        .map { decode(it) }
+        // Opening the key blob is a Keystore call (a binder round trip):
+        // never on the thread that collects this for the UI.
+        .flowOn(Dispatchers.IO)
 
     /** Each connection's discovered models, by connection id. */
     val models: Flow<Map<String, List<AgentModel>>> = modelStore.data
@@ -127,8 +136,11 @@ internal class AgentStore(
      */
     suspend fun edit(change: (AgentState) -> AgentState?): Boolean = guarded("settings") {
         store.edit { prefs ->
-            val next = change(decode(prefs)) ?: return@edit
-            encode(next, prefs)
+            // A blob the Keystore can't open just now isn't a lost one:
+            // writing over it would drop every other connection's key.
+            val current = decode(prefs, failTransient = true)
+            val next = change(current) ?: return@edit
+            encode(next, prefs, current.keys)
         }
     }
 
@@ -150,9 +162,15 @@ internal class AgentStore(
         false
     }
 
-    private fun decode(prefs: Preferences): AgentState {
+    private fun decode(prefs: Preferences, failTransient: Boolean = false): AgentState {
         val connections = runCatching { decodeConnections(prefs[CONNECTIONS]) }.getOrDefault(emptyList())
-        val (keys, unreadable) = decodeKeys(prefs[KEYS])
+        val (keys, unreadable) = when (val read = decodeKeys(prefs[KEYS])) {
+            is KeyRead.Opened -> read.keys to false
+            KeyRead.Lost -> emptyMap<String, String>() to true
+            // Read as unreadable for now (nothing is sent keyless); not cached,
+            // so the next read tries again.
+            is KeyRead.Unavailable -> if (failTransient) throw read.cause else emptyMap<String, String>() to true
+        }
         val default = prefs[DEFAULT]?.split('\n')?.takeIf { it.size == 2 }?.let { ModelRef(it[0], it[1]) }
         return AgentState(
             enabled = prefs[ENABLED] ?: false,
@@ -164,39 +182,58 @@ internal class AgentStore(
         )
     }
 
-    private fun encode(state: AgentState, prefs: MutablePreferences) {
+    /** [previous]: the keys [prefs]' blob holds now, so an unchanged set keeps its blob. */
+    private fun encode(state: AgentState, prefs: MutablePreferences, previous: Map<String, String>) {
         prefs[ENABLED] = state.enabled
         prefs[NEXT_REVISION] = state.nextRevision
         prefs[CONNECTIONS] = encodeConnections(state.connections)
         val default = state.defaultModel
         if (default == null) prefs.remove(DEFAULT) else prefs[DEFAULT] = default.connectionId + "\n" + default.modelId
         val keys = state.keys.filterKeys { id -> state.connections.any { it.id == id } }
-        if (keys.isEmpty()) {
+        when {
             // An unreadable blob stays until a key is saved over it, so
             // toggling a favourite doesn't count as giving up on it.
-            if (!state.keysUnreadable) prefs.remove(KEYS)
-        } else {
-            val plain = JSONObject(keys).toString().toByteArray(Charsets.UTF_8)
-            prefs[KEYS] = Base64.getEncoder().encodeToString(cipher.encrypt(plain))
+            keys.isEmpty() -> if (!state.keysUnreadable) prefs.remove(KEYS)
+            // The same keys keep the same blob: a favourite or default tap
+            // doesn't re-encrypt them (a fresh IV, so a new blob the next
+            // read would have to decrypt again).
+            keys == previous && prefs[KEYS] != null -> Unit
+            else -> {
+                val plain = JSONObject(keys).toString().toByteArray(Charsets.UTF_8)
+                val blob = Base64.getEncoder().encodeToString(cipher.encrypt(plain))
+                prefs[KEYS] = blob
+                opened = blob to keys
+            }
         }
+    }
+
+    /** What reading the key blob came to. */
+    private sealed interface KeyRead {
+        data class Opened(val keys: Map<String, String>) : KeyRead
+
+        /** It can never be opened: the Keystore key is gone or replaced, or the blob is damaged. */
+        data object Lost : KeyRead
+
+        /** The Keystore failed this time; the blob may well open next time. */
+        data class Unavailable(val cause: IOException) : KeyRead
     }
 
     /** The last blob opened and what was in it: every request reads the keys. */
     @Volatile
     private var opened: Pair<String, Map<String, String>>? = null
 
-    private fun decodeKeys(blob: String?): Pair<Map<String, String>, Boolean> {
-        if (blob.isNullOrEmpty()) return emptyMap<String, String>() to false
-        opened?.let { (b, keys) -> if (b == blob) return keys to false }
+    private fun decodeKeys(blob: String?): KeyRead {
+        if (blob.isNullOrEmpty()) return KeyRead.Opened(emptyMap())
+        opened?.let { (b, keys) -> if (b == blob) return KeyRead.Opened(keys) }
         return try {
             val plain = String(cipher.decrypt(Base64.getDecoder().decode(blob)), Charsets.UTF_8)
             val json = JSONObject(plain)
             val keys = json.keys().asSequence().associateWith { json.getString(it) }
             opened = blob to keys
-            keys to false
+            KeyRead.Opened(keys)
         } catch (e: Exception) {
             Log.w(TAG, "AI provider keys can't be decrypted (${e.javaClass.simpleName})")
-            emptyMap<String, String>() to true
+            if (isPermanent(e)) KeyRead.Lost else KeyRead.Unavailable(IOException("AI provider keys unavailable", e))
         }
     }
 
@@ -215,6 +252,19 @@ internal class AgentStore(
 
         /** Distinct from the RPC keys' and the wallet's aliases. */
         const val KEY_ALIAS = "freedom_agent_api_keys"
+
+        /**
+         * A decrypt failure that will happen again every time: a wrong key
+         * (a lost Keystore key is regenerated under the same alias, so its
+         * old blob fails the GCM tag), a key the system invalidated, or a
+         * blob that isn't Base64, IV and ciphertext, or JSON inside. Anything
+         * else (a Keystore that's busy or restarting) may pass next time.
+         */
+        internal fun isPermanent(e: Throwable): Boolean = e is AEADBadTagException ||
+            e is KeyPermanentlyInvalidatedException ||
+            e is UnrecoverableKeyException ||
+            e is IllegalArgumentException ||
+            e is JSONException
 
         internal fun encodeConnections(list: List<AgentConnection>): String = JSONArray().apply {
             for (c in list) put(
