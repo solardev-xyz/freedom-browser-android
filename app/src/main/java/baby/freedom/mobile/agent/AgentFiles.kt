@@ -97,8 +97,10 @@ internal interface AgentDownloadClaim {
  * agent's tap on the link. One per tab, used once: the first download
  * the tab's pages start afterwards either matches it ([DownloadIntentMatch])
  * or ends it as [Start.Unapproved], and is then held for the user like
- * any page download. So does one from a window a page in the tab opened
- * (held by the chat with it), whatever its address: [Start.InPopup].
+ * any page download. One from a window a page in the tab opened (held by
+ * the chat with it) is the approved one if it matches too (the link's
+ * `target=_blank` opened that window), and otherwise ends it the same
+ * way: [Start.InPopup].
  */
 internal class DownloadIntent(
     val sessionId: String,
@@ -122,7 +124,7 @@ internal class DownloadIntent(
 
         /**
          * A window the tab's page opened (one the chat holds with it) started
-         * a download while this one waited: held for the user like any
+         * a download of another address while this one waited: held for the user like any
          * unapproved download, and the end of this intent.
          */
         data object InPopup : Start
@@ -269,9 +271,11 @@ internal object AgentDownloads {
      * download from a tab the agent holds is left to the usual offer
      * (held for the user) and noted for the agent ([takeHeld]); one that
      * met an armed intent and didn't match also ends that intent. One from
-     * a popup the chat holds with its opener is noted on the opener too,
-     * and ends an intent armed there ([DownloadIntent.Start.InPopup]): the
-     * approved tap's link may have opened that window. An earlier link's
+     * a popup the chat holds with its opener is the approved download if it
+     * is the approved link's address (a `target=_blank` link opens a window
+     * and downloads there); any other is noted on the opener too, and ends
+     * an intent armed there ([DownloadIntent.Start.InPopup]): the approved
+     * tap's link may have opened that window. An earlier link's
      * download after its wait ran out ([lapse]), in the tab or in a window
      * it opened, is noted as late on the tab it was asked on instead, and
      * leaves an intent armed there for another link waiting: that one's
@@ -287,6 +291,12 @@ internal object AgentDownloads {
             val holder = holderOf(tabId) ?: return null
             val opener = openerOf(tabId)?.takeIf { it != tabId && holderOf(it) == holder }
             if (lateOn(tabId, holder, url)) return null
+            val waiting = opener?.let { armed[it] }?.takeIf { it.sessionId == holder }
+            // The approved link's own download, from the window its tap opened (`target=_blank`).
+            if (waiting != null && DownloadIntentMatch.matches(waiting.expectedUrl, url)) {
+                armed.remove(waiting.tabId)
+                return claimFor(waiting, url)
+            }
             if (opener != null && lateOn(opener, holder, url)) {
                 // The approved link as the card showed it, not the address the page reported.
                 armed[opener]?.takeIf { it.sessionId == holder }?.lateWhileWaiting = late[opener]
@@ -295,8 +305,7 @@ internal object AgentDownloads {
             held += tabId
             if (opener != null) {
                 held += opener
-                val waiting = armed[opener]
-                if (waiting != null && waiting.sessionId == holder) {
+                if (waiting != null) {
                     armed.remove(opener)
                     waiting.start.complete(DownloadIntent.Start.InPopup)
                 }
@@ -319,6 +328,11 @@ internal object AgentDownloads {
             intent.start.complete(DownloadIntent.Start.Unapproved)
             return null
         }
+        return claimFor(intent, url)
+    }
+
+    /** [intent]'s approved download, from [url]: claimed, and answered through what's returned. */
+    private fun claimFor(intent: DownloadIntent, url: String): AgentDownloadClaim {
         intent.claimed.complete(Unit)
         return object : AgentDownloadClaim {
             override val direct = intent.direct

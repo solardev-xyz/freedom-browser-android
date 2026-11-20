@@ -189,13 +189,31 @@ class AgentFilesTest {
     }
 
     @Test
-    fun `a download from a window the tab's page opened ends the tab's intent and is noted on both`() {
+    fun `the approved address from a window the tab's page opened is the approved download`() {
         AgentDownloads.holderOf = { if (it == 1L || it == 2L) "chat" else null }
         AgentDownloads.openerOf = { if (it == 2L) 1L else null }
         val i = intent()
         assertTrue(AgentDownloads.arm(i))
-        // Even the approved address, from the popup, is the user's to answer.
+        // A target=_blank link: its tap opens a window, which downloads the link.
+        val claim = AgentDownloads.claim(2, "https://example.com/a.zip")
+        assertNotNull(claim)
+        assertTrue(i.claimed.isCompleted)
+        claim!!.started(5)
+        assertEquals(DownloadIntent.Start.Started(5, "https://example.com/a.zip"), i.start.getCompleted())
+        assertFalse(AgentDownloads.takeHeld(1))
+        assertFalse(AgentDownloads.takeHeld(2))
+        // Used up: a second one, from either tab, is held for the user.
         assertNull(AgentDownloads.claim(2, "https://example.com/a.zip"))
+        assertTrue(AgentDownloads.takeHeld(1))
+    }
+
+    @Test
+    fun `another address from a window the tab's page opened ends the tab's intent and is noted on both`() {
+        AgentDownloads.holderOf = { if (it == 1L || it == 2L) "chat" else null }
+        AgentDownloads.openerOf = { if (it == 2L) 1L else null }
+        val i = intent()
+        assertTrue(AgentDownloads.arm(i))
+        assertNull(AgentDownloads.claim(2, "https://example.com/other.zip"))
         assertEquals(DownloadIntent.Start.InPopup, i.start.getCompleted())
         assertFalse(i.claimed.isCompleted)
         assertTrue(AgentDownloads.takeHeld(1))

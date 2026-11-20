@@ -1189,13 +1189,33 @@ class BrowserToolsTest {
     }
 
     @Test
-    fun `a download the approved link starts in a new window is reported as waiting, not as none`() = runBlocking {
+    fun `the approved link's download in the window its target=_blank tap opened is the approved one`() = runBlocking {
+        downloadLink()
+        host.add(page(2))
+        files.rows[42] = files.entry(42, "report.pdf", "completed")
+        host.duringTap = {
+            // <a href=report.pdf target=_blank>: the popup is held with its opener, and downloads the link.
+            AgentTabs.popupOpened(1, 2, private = false)
+            AgentDownloads.claim(2, "https://example.com/files/report.pdf")!!.started(42)
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertFalse(out.output, out.isError)
+        assertEquals("report.pdf", out.result().getJSONObject("artifact").getString("filename"))
+        assertEquals(1, files.records.of("chat").size)
+        // Not held for the user, on either tab: nothing waits for a second answer.
+        assertFalse(AgentDownloads.takeHeld(1))
+        assertFalse(AgentDownloads.takeHeld(2))
+    }
+
+    @Test
+    fun `another address downloaded in a window the approved tap opened is reported as waiting, not as none`() = runBlocking {
         downloadLink()
         host.add(page(2))
         host.duringTap = {
-            // The link's handler window.open()s the file: the popup is held with its opener.
+            // The link's handler window.open()s some other file: the popup is held with its opener.
             AgentTabs.popupOpened(1, 2, private = false)
-            assertNull(AgentDownloads.claim(2, "https://example.com/files/report.pdf"))
+            assertNull(AgentDownloads.claim(2, "https://example.com/files/other.zip"))
         }
         val tools = toolset()
         val began = System.nanoTime()

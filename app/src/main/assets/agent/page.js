@@ -367,7 +367,7 @@
       else if (downloadsFile) entry.effect = 'file_download';
       else if (submitsForm) entry.effect = 'form_submission';
       if (tag === 'a' && element.hasAttribute('href')) {
-        var href = String(element.href || '');
+        var href = linkAddress(element);
         if (href.length <= 2048) entry.url = href; else entry.urlOmitted = true;
       }
       if (tag === 'select') {
@@ -481,10 +481,27 @@
     if (choosesFile(element, tag, inputType)) out.effect = 'file_upload';
     else if (downloads || ((tag === 'a' || tag === 'area') && element.hasAttribute('download') && activates)) out.effect = 'file_download';
     else if ((submitsForm && activates) || implicitSubmit) out.effect = 'form_submission';
-    if ((tag === 'a' || tag === 'area') && element.hasAttribute('href') && activates) out.target = String(element.href).slice(0, 4096);
+    if ((tag === 'a' || tag === 'area') && element.hasAttribute('href') && activates) out.target = linkAddress(element).slice(0, 4096);
     else if (out.effect === 'form_submission') out.target = String(element.form.action).slice(0, 4096);
     out.sensitive = isCredential(element, tag, inputType);
     return out;
+  }
+
+  /*
+   * Where a tap on a link goes, in full. An HTML link's href is that
+   * already; an SVG <a>'s is an SVGAnimatedString, its address the
+   * attribute's current value resolved against the element's base URL.
+   * Empty if it has none that resolves (a tap then goes nowhere).
+   */
+  function linkAddress(element) {
+    var href = element.href;
+    if (typeof href === 'string') return href;
+    if (!href || typeof href.animVal !== 'string') return '';
+    try {
+      return String(new URL(href.animVal, element.baseURI).href);
+    } catch (e) {
+      return '';
+    }
   }
 
   /*

@@ -830,7 +830,7 @@ internal class BrowserToolset(
                 )
                 DownloadIntent.Start.InPopup -> throw ToolError(
                     ToolError.APPROVAL_REQUIRED,
-                    "The download started in a new window the page opened, not from the approved link in this tab. It " +
+                    "A new window the page opened started a download of another address, not the approved link. It " +
                         "waits for the user in Freedom's download prompt and was not saved. Do not retry the click or the " +
                         "download; tell the user it is waiting for their answer.",
                 )
