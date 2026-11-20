@@ -12,6 +12,7 @@ import baby.freedom.mobile.browser.queryDownloadFileState
 import baby.freedom.mobile.data.DownloadEntry
 import baby.freedom.mobile.data.DownloadStatus
 import baby.freedom.mobile.data.NodeSettings
+import baby.freedom.mobile.wallet.FileSendJournal
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URI
@@ -132,6 +133,17 @@ internal class DownloadIntent(
         /** It matched, but Freedom couldn't start it (its row couldn't be written). */
         data object Failed : Start
     }
+
+    /**
+     * An earlier link whose late download ([AgentDownloads.lapse]) came
+     * while this intent waited, in its tab or a window that tab opened:
+     * the address Android reported was that link's, so this one waits on,
+     * but if its own never comes, that download may well be what this
+     * link's tap started (redirected to the earlier link's address).
+     */
+    @Volatile
+    var lateWhileWaiting: String? = null
+        internal set
 
     /** Completes when a download from the tab met this intent and matched. */
     val claimed = CompletableDeferred<Unit>()
@@ -256,7 +268,10 @@ internal object AgentDownloads {
      * download after its wait ran out ([lapse]), in the tab or in a window
      * it opened, is noted as late on the tab it was asked on instead, and
      * leaves an intent armed there for another link waiting: that one's
-     * own download may still come.
+     * own download may still come. That intent keeps the address
+     * ([DownloadIntent.lateWhileWaiting]), so if its own never comes its
+     * wait doesn't end saying the page started nothing: its link may have
+     * redirected to the earlier one's.
      */
     @Synchronized
     fun claim(tabId: Long, url: String): AgentDownloadClaim? {
@@ -264,7 +279,11 @@ internal object AgentDownloads {
         if (intent == null) {
             val holder = holderOf(tabId) ?: return null
             val opener = openerOf(tabId)?.takeIf { it != tabId && holderOf(it) == holder }
-            if (lateOn(tabId, holder, url) || (opener != null && lateOn(opener, holder, url))) return null
+            if (lateOn(tabId, holder, url)) return null
+            if (opener != null && lateOn(opener, holder, url)) {
+                armed[opener]?.takeIf { it.sessionId == holder }?.lateWhileWaiting = url
+                return null
+            }
             held += tabId
             if (opener != null) {
                 held += opener
@@ -279,6 +298,7 @@ internal object AgentDownloads {
         val holder = holderOf(tabId)
         // The lapsed link's late download, not this intent's: noted, and this one waits on.
         if (holder == intent.sessionId && !DownloadIntentMatch.matches(intent.expectedUrl, url) && lateOn(tabId, holder, url)) {
+            intent.lateWhileWaiting = url
             return null
         }
         armed.remove(tabId)
@@ -364,6 +384,13 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
 
         /** The user chose, but nothing they chose could be attached (Freedom refuses it: see `isUploadableUri`). */
         data object Refused : Result
+
+        /**
+         * The picker or camera said done but handed back no file at all
+         * (a camera app that saved nothing where it was asked to): not a
+         * choice Freedom refused, and not the user's cancel either.
+         */
+        data object Empty : Result
     }
 
     /** Whether the page's chooser opened (true) or couldn't (false). */
@@ -374,7 +401,8 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
      * The page's callback, answered as the picker answers it, with the
      * answer reported to this intent too. [withdraw]: the app is about to
      * answer it with nothing, which isn't the user's cancel. [refuse]: the
-     * user did choose, but Freedom passes nothing of it on.
+     * user did choose, but Freedom passes nothing of it on. [empty]: the
+     * picker or camera said done but handed back nothing.
      */
     inner class Callback(
         private val inner: ValueCallback<Array<Uri>>,
@@ -390,8 +418,15 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
             withdrawn = true
         }
 
+        @Volatile
+        private var empty = false
+
         fun refuse() {
             refused = true
+        }
+
+        fun empty() {
+            empty = true
         }
 
         override fun onReceiveValue(value: Array<Uri>?) {
@@ -402,6 +437,7 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
                     when {
                         withdrawn -> Result.Withdrawn
                         value.isNullOrEmpty() && refused -> Result.Refused
+                        value.isNullOrEmpty() && empty -> Result.Empty
                         value.isNullOrEmpty() -> Result.Cancelled
                         else -> Result.Picked(value.toList(), resolver)
                     },
@@ -454,6 +490,11 @@ internal object AgentUploads {
     /** The user chose in the picker, but nothing chosen may be attached, so the app answers [callback] with nothing. */
     fun refusing(callback: ValueCallback<Array<Uri>>) {
         (callback as? UploadIntent.Callback)?.refuse()
+    }
+
+    /** The picker or camera said done but handed back no file, so the app answers [callback] with nothing. */
+    fun emptyHanded(callback: ValueCallback<Array<Uri>>) {
+        (callback as? UploadIntent.Callback)?.empty()
     }
 }
 
@@ -520,7 +561,13 @@ internal data class DownloadReceipt(
  * file beside the agent's database does, so the downloads list itself is
  * untouched. Kept across restarts; a chat's records go with the chat.
  */
-internal class AgentDownloadRecords(private val file: File) {
+internal class AgentDownloadRecords(
+    private val file: File,
+    /** fsyncs the file's directory after a rename; false if it couldn't. */
+    private val dirSync: (File?) -> Boolean = FileSendJournal::syncDirectory,
+    /** Reads the file's text; replaced in tests. */
+    private val readText: (File) -> String = { it.readText() },
+) {
     data class Record(
         val sessionId: String,
         val artifactId: String,
@@ -532,19 +579,37 @@ internal class AgentDownloadRecords(private val file: File) {
     private val lock = Mutex()
     private var loaded: MutableList<Record>? = null
 
-    private fun read(): MutableList<Record> {
+    /**
+     * Records added while the file couldn't be read: listed for as long
+     * as the process lives, and written with the file's own once it reads
+     * again. Never written over an unread file, which would lose every
+     * earlier receipt.
+     */
+    private val unsaved = ArrayList<Record>()
+
+    /** Chats deleted while the file couldn't be read: their records go once it reads again. */
+    private val forgotten = HashSet<String>()
+
+    /**
+     * The records on file (with any [unsaved] merged in), or null if the
+     * file is there but couldn't be read just now: not cached, so the next
+     * call tries again. A file that reads but isn't a list of records has
+     * nothing to recover and counts as empty.
+     */
+    private fun read(): MutableList<Record>? {
         loaded?.let { return it }
-        val out = ArrayList<Record>()
         val text = try {
-            if (file.exists()) file.readText() else ""
+            if (file.exists()) readText(file) else ""
         } catch (e: Exception) {
-            ""
+            Log.w(TAG, "reading agent downloads failed (${e.javaClass.simpleName})")
+            return null
         }
         val array = try {
             if (text.isBlank()) JSONArray() else JSONArray(text)
         } catch (e: Exception) {
             JSONArray()
         }
+        val out = ArrayList<Record>()
         for (i in 0 until array.length()) {
             // Each on its own: one bad entry doesn't lose the rest.
             val o = array.optJSONObject(i) ?: continue
@@ -552,6 +617,19 @@ internal class AgentDownloadRecords(private val file: File) {
             val artifact = o.optString("artifact").takeIf { ARTIFACT_ID.matches(it) } ?: continue
             val row = o.optLong("row", -1).takeIf { it > 0 } ?: continue
             out += Record(session, artifact, row, o.optString("name"), o.optString("origin"))
+        }
+        if (unsaved.isNotEmpty() || forgotten.isNotEmpty()) {
+            val merged = trimmed((out + unsaved).filter { it.sessionId !in forgotten })
+            try {
+                write(merged)
+            } catch (e: Exception) {
+                // Still listed for as long as the process lives; written with the next change.
+                Log.w(TAG, "saving agent downloads failed (${e.javaClass.simpleName})")
+            }
+            unsaved.clear()
+            forgotten.clear()
+            out.clear()
+            out += merged
         }
         loaded = out
         return out
@@ -567,26 +645,45 @@ internal class AgentDownloadRecords(private val file: File) {
         }
         file.parentFile?.mkdirs()
         val tmp = File(file.parentFile, file.name + ".tmp")
-        FileOutputStream(tmp).use {
-            it.write(array.toString().toByteArray(Charsets.UTF_8))
-            it.fd.sync()
+        try {
+            FileOutputStream(tmp).use {
+                it.write(array.toString().toByteArray(Charsets.UTF_8))
+                it.fd.sync()
+            }
+        } catch (e: java.io.IOException) {
+            tmp.delete()
+            throw e
         }
         if (!tmp.renameTo(file)) {
             tmp.delete()
             throw java.io.IOException("can't replace ${file.name}")
         }
+        // The rename itself on flash too, not only the new file's bytes.
+        if (!dirSync(file.parentFile)) Log.w(TAG, "couldn't sync the directory of ${file.name}")
     }
 
-    /** Records a new download of [sessionId]'s, under a new receipt id. */
+    /** Only the newest [MAX_PER_CHAT] of each chat. */
+    private fun trimmed(all: List<Record>): List<Record> {
+        val drop = all.groupBy { it.sessionId }.values.flatMap { mine ->
+            if (mine.size > MAX_PER_CHAT) mine.take(mine.size - MAX_PER_CHAT) else emptyList()
+        }.toSet()
+        return if (drop.isEmpty()) all else all - drop
+    }
+
+    /**
+     * Records a new download of [sessionId]'s, under a new receipt id.
+     * Never throws for the file: one that can't be read or written now
+     * leaves the record listed in memory, saved with a later change.
+     */
     suspend fun add(sessionId: String, rowId: Long, fileName: String, sourceOrigin: String): Record = lock.withLock {
         withContext(Dispatchers.IO) {
-            val records = read()
             val record = Record(sessionId, newArtifactId(), rowId, ApprovalText.flatten(fileName, 255), sourceOrigin)
-            val next = (records + record).let { all ->
-                // Only the newest few hundred per chat.
-                val mine = all.filter { it.sessionId == sessionId }
-                if (mine.size > MAX_PER_CHAT) all - mine.take(mine.size - MAX_PER_CHAT).toSet() else all
+            val records = read()
+            if (records == null) {
+                unsaved += record
+                return@withContext record
             }
+            val next = trimmed(records + record)
             try {
                 write(next)
             } catch (e: Exception) {
@@ -600,17 +697,44 @@ internal class AgentDownloadRecords(private val file: File) {
     }
 
     suspend fun of(sessionId: String): List<Record> = lock.withLock {
-        withContext(Dispatchers.IO) { read().filter { it.sessionId == sessionId } }
+        withContext(Dispatchers.IO) {
+            val records = read() ?: unsaved.filter { it.sessionId !in forgotten }
+            records.filter { it.sessionId == sessionId }
+        }
     }
 
     /** A chat was deleted: its records go ([sessionId] null: every chat's). */
     suspend fun forget(sessionId: String?) = lock.withLock {
         withContext(Dispatchers.IO) {
+            if (sessionId == null) {
+                // Nothing to keep, so nothing to read first.
+                unsaved.clear()
+                forgotten.clear()
+                try {
+                    if (file.exists() && !file.delete()) throw java.io.IOException("can't delete ${file.name}")
+                    dirSync(file.parentFile)
+                } catch (e: Exception) {
+                    Log.w(TAG, "forgetting agent downloads failed (${e.javaClass.simpleName})")
+                }
+                loaded = ArrayList()
+                return@withContext
+            }
             val records = read()
-            val next = if (sessionId == null) emptyList() else records.filter { it.sessionId != sessionId }
+            if (records == null) {
+                // Not written over an unread file: applied once it reads again.
+                forgotten += sessionId
+                unsaved.removeAll { it.sessionId == sessionId }
+                return@withContext
+            }
+            val next = records.filter { it.sessionId != sessionId }
             if (next.size == records.size && file.exists()) return@withContext
             try {
-                if (next.isEmpty()) file.delete() else write(next)
+                if (next.isEmpty()) {
+                    file.delete()
+                    dirSync(file.parentFile)
+                } else {
+                    write(next)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "forgetting agent downloads failed (${e.javaClass.simpleName})")
             }

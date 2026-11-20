@@ -5,6 +5,7 @@ import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -150,8 +151,10 @@ class AgentFilesTest {
             return intent.result.getCompleted()
         }
         assertEquals(UploadIntent.Result.Cancelled, answer {})
-        // What FileChooser does when the picker said OK but every URI was filtered out.
+        // What FileChooser does when the picker said OK but every URI it handed back was filtered out.
         assertEquals(UploadIntent.Result.Refused, answer { AgentUploads.refusing(it) })
+        // And when it (a camera) said OK but handed back nothing at all: neither a refusal nor a cancel.
+        assertEquals(UploadIntent.Result.Empty, answer { AgentUploads.emptyHanded(it) })
         assertEquals(UploadIntent.Result.Withdrawn, answer { AgentUploads.withdrawing(it) })
         // A page's own callback (no agent upload armed) is left alone.
         AgentUploads.refusing(page)
@@ -355,9 +358,12 @@ class AgentFilesTest {
         assertTrue(AgentDownloads.lapse(a))
         val b = intent("https://example.com/b.zip")
         assertTrue(AgentDownloads.arm(b))
+        assertNull(b.lateWhileWaiting)
         // A's download comes while B waits: late, not B's unapproved one.
         assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
         assertFalse(b.start.isCompleted)
+        // Kept on B, in case B's own tap led there.
+        assertEquals("https://example.com/a.zip", b.lateWhileWaiting)
         assertFalse(AgentDownloads.takeHeld(1))
         // B's own download still starts.
         val claim = AgentDownloads.claim(1, "https://example.com/b.zip")
@@ -381,6 +387,7 @@ class AgentFilesTest {
         assertTrue(AgentDownloads.arm(b))
         assertNull(AgentDownloads.claim(2, "https://example.com/a.zip"))
         assertFalse(b.start.isCompleted)
+        assertEquals("https://example.com/a.zip", b.lateWhileWaiting)
         assertFalse(AgentDownloads.takeHeld(1))
         assertFalse(AgentDownloads.takeHeld(2))
         assertEquals("https://example.com/a.zip", AgentDownloads.takeLate(1))
@@ -393,6 +400,19 @@ class AgentFilesTest {
         assertTrue(AgentDownloads.arm(c))
         assertNull(AgentDownloads.claim(2, "https://example.com/other.zip"))
         assertEquals(DownloadIntent.Start.InPopup, c.start.getCompleted())
+    }
+
+    @Test
+    fun `a late download noted before another link's intent is armed isn't that intent's`() {
+        AgentDownloads.holderOf = { if (it == 1L) "chat" else null }
+        val a = intent("https://example.com/a.zip")
+        assertTrue(AgentDownloads.arm(a))
+        assertTrue(AgentDownloads.lapse(a))
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        val b = intent("https://example.com/b.zip")
+        assertTrue(AgentDownloads.arm(b))
+        assertNull(b.lateWhileWaiting)
+        assertEquals("https://example.com/a.zip", AgentDownloads.takeLate(1))
     }
 
     @Test
@@ -462,6 +482,48 @@ class AgentFilesTest {
         assertEquals(listOf(5L), AgentDownloadRecords(file).of("chat").map { it.rowId })
         file.writeText("not json")
         assertTrue(AgentDownloadRecords(file).of("chat").isEmpty())
+    }
+
+    @Test
+    fun `a file that can't be read just now is never written over, and its receipts come back`() = runBlocking {
+        val file = File(dir, "agent/downloads.json")
+        val a = AgentDownloadRecords(file).add("chat", 3, "a.pdf", "https://example.com")
+        val before = file.readBytes()
+        var failing = true
+        val synced = ArrayList<File?>()
+        val records = AgentDownloadRecords(
+            file,
+            dirSync = { synced += it; true },
+            readText = { if (failing) throw java.io.IOException("busy") else it.readText() },
+        )
+        // A download while the file can't be read: listed, but the file is left as it was.
+        val b = records.add("chat", 4, "b.pdf", "https://example.com")
+        assertEquals(listOf(b), records.of("chat"))
+        assertArrayEquals(before, file.readBytes())
+        assertTrue(synced.isEmpty())
+        // A chat deleted meanwhile isn't written over the unread file either.
+        records.forget("gone")
+        assertArrayEquals(before, file.readBytes())
+        // Once it reads again, the earlier receipts and the new one are both kept, on file too.
+        failing = false
+        assertEquals(listOf(a, b), records.of("chat"))
+        assertEquals(listOf(a, b), AgentDownloadRecords(file).of("chat"))
+        // Each rename's directory is synced.
+        assertEquals(listOf(file.parentFile), synced)
+    }
+
+    @Test
+    fun `a chat deleted while the file couldn't be read goes once it reads`() = runBlocking {
+        val file = File(dir, "agent/downloads.json")
+        val keep = AgentDownloadRecords(file).add("keep", 1, "k.pdf", "")
+        AgentDownloadRecords(file).add("gone", 2, "g.pdf", "")
+        var failing = true
+        val records = AgentDownloadRecords(file, readText = { if (failing) throw java.io.IOException("busy") else it.readText() })
+        records.forget("gone")
+        failing = false
+        assertTrue(records.of("gone").isEmpty())
+        assertTrue(AgentDownloadRecords(file).of("gone").isEmpty())
+        assertEquals(listOf(keep), AgentDownloadRecords(file).of("keep"))
     }
 
     @Test

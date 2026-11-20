@@ -282,9 +282,14 @@ internal class FileChooser(
         } else {
             null
         }
-        // The user chose, but nothing chosen may be uploaded: not their cancel (#600).
-        if (uris == null && result.resultCode == android.app.Activity.RESULT_OK) {
-            baby.freedom.mobile.agent.AgentUploads.refusing(p.callback)
+        // Not the user's cancel (#600): what they chose may not be uploaded,
+        // or the picker or camera handed back nothing at all.
+        val data = result.data
+        val handedBack = data?.data != null || (data?.clipData?.itemCount ?: 0) > 0
+        when (unattachedPick(result.resultCode == android.app.Activity.RESULT_OK, uris != null, handedBack)) {
+            UnattachedPick.REFUSED -> baby.freedom.mobile.agent.AgentUploads.refusing(p.callback)
+            UnattachedPick.EMPTY -> baby.freedom.mobile.agent.AgentUploads.emptyHanded(p.callback)
+            UnattachedPick.NONE -> Unit
         }
         // The requesting tab may have been closed (its WebView destroyed)
         // while the activity was open.
@@ -496,6 +501,30 @@ internal fun <U : Any> finishCapture(
     file.delete()
     if (ok && returned != null && uploadable(returned)) return returned
     return null
+}
+
+/** Why a picker or camera result attached nothing, beyond the user's cancel; see [unattachedPick]. */
+internal enum class UnattachedPick {
+    /** Attached something, or the user cancelled. */
+    NONE,
+
+    /** Something was handed back, and Freedom refused all of it (see [isUploadableUri]). */
+    REFUSED,
+
+    /** The activity said done ([ok]) but handed back nothing (a camera that saved no file). */
+    EMPTY,
+}
+
+/**
+ * For a picker or camera result: [ok] whether it said done, [attached]
+ * whether anything goes to the page, [handedBack] whether the result
+ * carried any URI at all (a capture written to its own file carries
+ * none, and is [attached]).
+ */
+internal fun unattachedPick(ok: Boolean, attached: Boolean, handedBack: Boolean): UnattachedPick = when {
+    !ok || attached -> UnattachedPick.NONE
+    handedBack -> UnattachedPick.REFUSED
+    else -> UnattachedPick.EMPTY
 }
 
 /** Where private tabs' captures go under [cacheDir] (#468). */

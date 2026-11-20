@@ -1076,6 +1076,17 @@ class BrowserToolsTest {
         assertFalse(refused.output.contains("\"action\":\"stop\""))
         assertTrue(refused.output.contains("different file"))
 
+        // Said done but handed back nothing (a camera that saved no file): neither refused nor cancelled.
+        host.duringTap = {
+            val intent = AgentUploads.take(1)!!
+            intent.opened.complete(true)
+            intent.result.complete(UploadIntent.Result.Empty)
+        }
+        val empty = tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("CAPABILITY_UNAVAILABLE", empty.code())
+        assertFalse(empty.output.contains("different file"))
+        assertTrue(empty.output.contains("without handing back any file"))
+
         // A page that says its input holds nothing afterwards isn't reported as attached.
         host.attachedFiles = 0
         host.duringTap = {
@@ -1293,6 +1304,25 @@ class BrowserToolsTest {
         val note = out.result().getString("lateDownload")
         assertTrue(note, note.contains("https://example.com/files/a.pdf"))
         assertFalse(note.contains("b.pdf"))
+        assertFalse(tools.call("browser_snapshot").result().has("lateDownload"))
+    }
+
+    @Test
+    fun `a link that leads to an earlier lapsed link's address isn't said to have started nothing`() = runBlocking {
+        downloadLink("https://example.com/files/b.pdf")
+        val earlier = DownloadIntent("chat", 1, "https://example.com/files/a.pdf", direct = true)
+        assertTrue(AgentDownloads.arm(earlier))
+        assertTrue(AgentDownloads.lapse(earlier))
+        // B's tap ends at A's address (a redirect): Android reports only that.
+        host.duringTap = { assertNull(AgentDownloads.claim(1, "https://example.com/files/a.pdf")) }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("APPROVAL_REQUIRED", out.code())
+        assertFalse(out.output, out.output.contains("did not start a download"))
+        assertTrue(out.output, out.output.contains("https://example.com/files/a.pdf"))
+        assertTrue(out.output, out.output.contains("waits for the user in Freedom's download prompt"))
+        assertTrue(files.records.of("chat").isEmpty())
+        // Said here, not again with the next step.
         assertFalse(tools.call("browser_snapshot").result().has("lateDownload"))
     }
 

@@ -655,6 +655,11 @@ internal class BrowserToolset(
                     "The user chose a file, but Freedom can't attach that file to a page. Nothing was attached. Ask " +
                         "the user to choose a different file.",
                 )
+                UploadIntent.Result.Empty -> throw ToolError(
+                    ToolError.CAPABILITY_UNAVAILABLE,
+                    "The file chooser (or camera) closed without handing back any file. Nothing was attached. Ask the " +
+                        "user whether to try again.",
+                )
                 is UploadIntent.Result.Picked -> {
                     // The pick reached the page either way; the agent hears of it only
                     // if the chat still holds the tab, on the page the card named.
@@ -779,6 +784,8 @@ internal class BrowserToolset(
                 // out is answered below, not left to start unreported.
                 // One that comes later still waits for the user, and is said with a later step.
                 if (AgentDownloads.lapse(intent)) {
+                    // An earlier link's late download came meanwhile: this tap may have started it.
+                    intent.lateWhileWaiting?.let { throw lateWhileWaitingError(tab.id, href, it) }
                     throw ToolError(
                         ToolError.WAIT_TIMEOUT,
                         "The page did not start a download within ${DOWNLOAD_START_WAIT_MS / 1_000} seconds of the approved " +
@@ -1109,6 +1116,24 @@ internal class BrowserToolset(
         const val MAX_LINK_CHARS = 4_096
 
         /** [link]'s download (approved earlier) came after browser_download stopped waiting for it. */
+        /**
+         * [href]'s wait ran out, but meanwhile a download came at [earlier]'s
+         * address, an earlier link whose own wait had run out. Android says
+         * only where a download ended, so it may be [href]'s, redirected
+         * there: not said as "the page started nothing". Said instead of the
+         * separate lateDownload note for [earlier], which it covers.
+         */
+        fun lateWhileWaitingError(tabId: Long, href: String, earlier: String): ToolError {
+            AgentDownloads.takeLate(tabId, earlier)
+            return ToolError(
+                ToolError.APPROVAL_REQUIRED,
+                "After the approved tap on $href, the page started a download at the address of $earlier, approved " +
+                    "earlier, whose wait had already run out (this link may lead there). It was not saved: it waits for " +
+                    "the user in Freedom's download prompt. Do not call browser_download for either link again; tell " +
+                    "the user it is waiting for their answer.",
+            )
+        }
+
         fun lateDownloadNote(link: String) = "The download of $link, approved earlier, started after " +
             "browser_download had stopped waiting for it. It was not saved: it waits for the user in Freedom's " +
             "download prompt. Do not call browser_download for that link again; tell the user it is waiting for " +
