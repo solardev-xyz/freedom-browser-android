@@ -64,7 +64,10 @@ import baby.freedom.mobile.browser.restartsTapGuard
 @Composable
 internal fun AgentApprovalHost() {
     val approval by AgentApprovals.shown.collectAsState()
+    val transfer by AgentTransfers.shown.collectAsState()
     val shown = approval ?: return
+    // A wallet transfer's sheet asked earlier (#596) comes first: never both at once.
+    if (transfer.let { it != null && it.id < shown.id }) return
     androidx.compose.runtime.key(shown.id) {
         val tap = rememberArmedTapGuard(shown.id)
         val guard = tap.guard

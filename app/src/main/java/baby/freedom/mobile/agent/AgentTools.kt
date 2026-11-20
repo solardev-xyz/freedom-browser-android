@@ -26,7 +26,9 @@ internal interface AgentTool {
  * The tools a chat offers the model (#574): the harmless
  * [CurrentTimeTool], the browser tools ([BrowserToolset], #575),
  * which ask the user to approve every interaction, the read-only
- * [NodeStatusTool] (#577) and [SwarmPublishTools] (#597).
+ * [NodeStatusTool] (#577), [WalletTransferTool] (#596), whose every
+ * transfer goes to the user on its own review sheet, and
+ * [SwarmPublishTools] (#597), whose every publication does too.
  */
 internal class ToolRegistry(tools: List<AgentTool>) {
     private val byName = tools.associateBy { it.spec.name }
@@ -63,11 +65,13 @@ internal class ToolRegistry(tools: List<AgentTool>) {
 
         /**
          * A chat's tools: the clock, its own browser tools (#575), the
-         * read-only node status (#577) and Swarm publishing (#597).
+         * read-only node status (#577), wallet transfers (#596) and Swarm
+         * publishing (#597).
          */
         fun forChat(sessionId: String, app: () -> android.content.Context) =
             ToolRegistry(
                 listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) + BrowserToolset(sessionId).tools + NodeStatusTool() +
+                    WalletTransferTool(sessionId) +
                     SwarmPublishTools(sessionId, { AgentPublications.get(app()) }, { NodePublishBackend(app()) }).tools,
             )
     }

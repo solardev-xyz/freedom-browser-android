@@ -384,4 +384,9 @@
         <item quantity="one">An earlier publication from this chat may already be on Swarm: Freedom couldn\'t learn how it ended.</item>
         <item quantity="other">%1$d earlier publications from this chat may already be on Swarm: Freedom couldn\'t learn how they ended.</item>
     </plurals>
+    <!-- Freedom Agent's wallet_transfer sheet (#596). -->
+    <string name="agent_transfer_title">Freedom Agent wants to send funds</string>
+    <string name="agent_transfer_note">Freedom Agent proposed this transfer. Check the recipient and the amount: nothing is sent until you confirm.</string>
+    <string name="agent_transfer_locked">Confirming asks for your screen lock first, to open the wallet.</string>
+    <string name="agent_transfer_decline">Don\'t send</string>
 </resources>
