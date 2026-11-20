@@ -1080,8 +1080,36 @@ class SwarmProvider(
     // ACT shares (#540)
     // ---------------------------------------------------------------
 
-    /** Per origin: its ACT consents run one at a time ([openAct]). */
-    private val actLocks = ConcurrentHashMap<String, Mutex>()
+    /**
+     * Per (origin, tab): its ACT consents run one at a time ([openAct]).
+     * Kept only while a call holds or waits on it, like [originJoins].
+     */
+    private val actLocks = HashMap<Pair<String, Long?>, ActLock>()
+
+    private class ActLock {
+        val mutex = Mutex()
+        var users = 0
+    }
+
+    /** How many (origin, tab) ACT consent locks are held or waited on; for tests. */
+    internal fun actConsentLocks(): Int = synchronized(actLocks) { actLocks.size }
+
+    /**
+     * [block] under the ACT consent lock of [origin] on [tab]. Scoped to
+     * one tab: a tab's sheets come one at a time anyway, so this holds
+     * nothing up that wasn't already waiting, while a sheet left unseen
+     * on a background tab never makes another tab's call wait out its
+     * sheet time with no sheet of its own (R1-F1).
+     */
+    private suspend fun <T> withActLock(origin: String, tab: Long?, block: suspend () -> T): T {
+        val key = origin to tab
+        val lock = synchronized(actLocks) { actLocks.getOrPut(key) { ActLock() }.also { it.users++ } }
+        try {
+            return lock.mutex.withLock { block() }
+        } finally {
+            synchronized(actLocks) { if (--lock.users == 0) actLocks.remove(key) }
+        }
+    }
 
     /**
      * desktop's `swarm_openAct` (#648): open content a publisher shared
@@ -1089,10 +1117,11 @@ class SwarmProvider(
      * The request is checked first ([SwarmAct.validate]): a sheet is
      * only shown for one that would run, in its canonical form. Consent
      * is per (site, publisher): the sheet names the publisher, and its
-     * "always allow" covers that publisher only. A site's consents run
-     * one at a time, so an "always allow" ticked on the first answers the
-     * site's next ones from the same publisher instead of leaving their
-     * sheets queued behind it. The page's timer stops once it's allowed.
+     * "always allow" covers that publisher only. A site's consents on
+     * one tab run one at a time ([withActLock]), so an "always allow"
+     * ticked on the first answers that tab's next ones from the same
+     * publisher instead of leaving their sheets queued behind it; another
+     * tab asks on its own. The page's timer stops once it's allowed.
      *
      * Then like `swarm_readData`: one request against the site's read
      * budget, a join slot ([acquireJoin]) held for the node read, and the
@@ -1110,7 +1139,7 @@ class SwarmProvider(
             return invalid(r.message, r.reason, r.option?.let { JSONObject().put("option", it) })
         }
         val publisher = share.publisher.publicKey
-        actLocks.computeIfAbsent(origin) { Mutex() }.withLock {
+        withActLock(origin, calls.subscriber?.tab) {
             if (!grants.actAllowed(origin, publisher)) {
                 val answer = calls.ask(SwarmAsk.Act(origin, share.publisher, share.reference, share.path))
                 if (!answer.allowed) throw Invalid(rejected())

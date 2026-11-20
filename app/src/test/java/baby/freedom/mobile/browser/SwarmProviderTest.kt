@@ -2637,6 +2637,56 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `an ACT sheet left unseen on one tab doesn't hold up the same site's call on another tab`() {
+        connect()
+        serveAct()
+        val background = kotlinx.coroutines.CompletableDeferred<SwarmProvider.Answer>()
+        val onScreen = FakeSubscriber(tab = 2)
+        val replies = runBlocking {
+            val a = async {
+                provider.request(site, "swarm_openAct", actParams(), {}, page) { asked += it; background.await() }
+            }
+            while (asked.isEmpty()) kotlinx.coroutines.yield()
+            // Tab 1's sheet is still up, unanswered: tab 2 gets its own at once and is answered.
+            val b = provider.request(site, "swarm_openAct", actParams(publisher = otherActKey), {}, onScreen) {
+                asked += it
+                SwarmProvider.Answer(true)
+            }
+            assertEquals(2, asked.size)
+            assertEquals("held and waited on: tab 1's only", 1, provider.actConsentLocks())
+            background.complete(SwarmProvider.Answer(false))
+            listOf(a.await(), b)
+        }
+        assertEquals(4001, err(replies[0]).code)
+        okJson(replies[1])
+        assertEquals("let go of once no call holds or waits on it", 0, provider.actConsentLocks())
+    }
+
+    @Test
+    fun `ACT consent locks are let go of, cancelled calls too`() {
+        connect()
+        serveAct()
+        runBlocking {
+            val never = kotlinx.coroutines.CompletableDeferred<SwarmProvider.Answer>()
+            val held = async { provider.request(site, "swarm_openAct", actParams(), {}, page) { asked += it; never.await() } }
+            val waiting = async { provider.request(site, "swarm_openAct", actParams(), {}, page) { asked += it; never.await() } }
+            while (asked.isEmpty()) kotlinx.coroutines.yield()
+            repeat(5) { kotlinx.coroutines.yield() }
+            assertEquals(1, provider.actConsentLocks())
+            waiting.cancelAndJoin()
+            held.cancelAndJoin()
+        }
+        assertEquals(0, provider.actConsentLocks())
+        // Many sites, each asked once: none of their locks is kept.
+        for (i in 1..20) {
+            val origin = "https://site$i.example"
+            connect(origin)
+            okJson(call("swarm_openAct", actParams(), origin = origin))
+        }
+        assertEquals(0, provider.actConsentLocks())
+    }
+
+    @Test
     fun `an ACT read cancelled with its page while the site's limits are read keeps no join slot`() {
         connect()
         grants.act += site to actKey
