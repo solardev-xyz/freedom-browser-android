@@ -46,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -333,16 +334,19 @@ private fun ProviderPage(
         return
     }
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     val isLan = definition.kind == ProviderKind.Lan
     val hasKeyField = !isLan || definition.id == ProviderCatalog.COMPATIBLE
+    // Keyed on the provider, not the target: saving a new server gives the
+    // same page its connection id, and its status line must survive that.
     // The key is held in plain `remember`: never in saved instance state.
-    var key by remember(target) { mutableStateOf("") }
-    var reveal by remember(target) { mutableStateOf(false) }
-    var name by rememberSaveable(target) { mutableStateOf(connection?.name ?: "") }
-    var url by rememberSaveable(target) { mutableStateOf(connection?.baseUrl ?: "") }
-    var busy by remember(target) { mutableStateOf(false) }
-    var line by remember(target) { mutableStateOf<String?>(null) }
-    var filter by rememberSaveable(target) { mutableStateOf("") }
+    var key by remember(target.providerId) { mutableStateOf("") }
+    var reveal by remember(target.providerId) { mutableStateOf(false) }
+    var name by rememberSaveable(target.providerId) { mutableStateOf(connection?.name ?: "") }
+    var url by rememberSaveable(target.providerId) { mutableStateOf(connection?.baseUrl ?: "") }
+    var busy by remember(target.providerId) { mutableStateOf(false) }
+    var line by remember(target.providerId) { mutableStateOf<String?>(null) }
+    var filter by rememberSaveable(target.providerId) { mutableStateOf("") }
     var confirmRemove by remember { mutableStateOf(false) }
     if (reveal) SecureWindow()
 
@@ -366,6 +370,7 @@ private fun ProviderPage(
     }
 
     fun save() = run {
+        focusManager.clearFocus()
         val id = if (isLan) {
             providers.saveLan(
                 definition.id, connection?.id, name, urlCheck?.url ?: return@run null,

@@ -2,7 +2,7 @@
 <!-- Settings → AI and its model providers (#573). -->
 <resources>
     <string name="agent_group_ai">AI</string>
-    <string name="agent_page_ai">AI</string>
+    <string name="agent_page_ai">AI features</string>
     <string name="agent_section_ai">AI</string>
     <string name="agent_page_summary_off">Off</string>
     <string name="agent_page_summary_none">On · No provider yet</string>
@@ -91,7 +91,7 @@
     <string name="agent_url_scheme">Start with http:// or https://.</string>
     <string name="agent_url_credentials">Leave the user name and password out of the address.</string>
     <string name="agent_url_query">Leave out anything after ? or #.</string>
-    <string name="agent_url_public_http">Plain http:// only works for a private network address. Use https:// or the server\'s IP address.</string>
+    <string name="agent_url_public_http">Plain http:// only works for this phone or a private network address, typed as numbers (10.x, 172.16–31.x, 192.168.x). Use https:// for anything else.</string>
     <string name="agent_url_onion">.onion servers aren\'t supported.</string>
 
     <string name="agent_test">Test connection</string>

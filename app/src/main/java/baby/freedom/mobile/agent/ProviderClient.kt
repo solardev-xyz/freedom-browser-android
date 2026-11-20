@@ -8,6 +8,7 @@ import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.ConnectionPool
 import okhttp3.Dns
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -105,7 +106,8 @@ internal sealed interface ProviderReply {
  * One OkHttp client for every provider: no redirects (desktop's
  * `redirect: 'error'`: a server can't move a request, and its key, to
  * another host), no retries of a request that may have reached the
- * server, no cookies or cache, a direct connection (no system proxy) and
+ * server (and so no pooled idle connections, which only a retry makes
+ * safe to reuse), no cookies or cache, a direct connection (no system proxy) and
  * an overall deadline per call ([OkHttpClient.callTimeout]: DNS, connect,
  * sending, waiting and reading the body, all together). `localhost` is
  * answered here with the loopback addresses, never asked of DNS, so the
@@ -198,6 +200,10 @@ internal class ProviderClient(
             .followRedirects(false)
             .followSslRedirects(false)
             .retryOnConnectionFailure(false)
+            // No idle connection is kept: without retries, a pooled
+            // connection the server has since closed (an idle timeout, an
+            // HTTP/1.0 server) would fail the next request outright.
+            .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
             .proxy(Proxy.NO_PROXY)
             .dns(LOOPBACK_DNS)
             .connectTimeout(10, TimeUnit.SECONDS)

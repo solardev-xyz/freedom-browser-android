@@ -103,7 +103,7 @@ class SettingsPagesTest {
         assertEquals("Nodes & networks", SettingsPage.Nodes.title)
         assertEquals("Name resolution", SettingsPage.Names.title)
         assertEquals("About Freedom", SettingsPage.About.title)
-        assertEquals("AI", SettingsPage.Ai.title)
+        assertEquals("AI features", SettingsPage.Ai.title)
         assertEquals(listOf(SettingsSection.Ai), settingsSections(SettingsPage.Ai, isDefaultBrowser = false))
     }
 

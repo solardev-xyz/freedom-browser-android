@@ -371,4 +371,15 @@ class AgentProvidersTest {
         routes["/v1/chat/completions"] = { MockResponse().setChunkedBody(Buffer().writeUtf8("x".repeat(400_000)), 4096) }
         assertEquals(TestResult.BadReply, providers.testConnection(id, "m"))
     }
+
+    @Test
+    fun `a server that closes its connection after each answer still answers the next request`() = runBlocking {
+        // On the emulator an HTTP/1.0 server's closed connection, reused, failed the request after it.
+        routes["/api/tags"] = { json(tags("a")).setSocketPolicy(SocketPolicy.DISCONNECT_AT_END) }
+        routes["/v1/chat/completions"] = { json(chatReply()).setSocketPolicy(SocketPolicy.DISCONNECT_AT_END) }
+        val id = connectOllama()
+        assertEquals(RefreshResult.Done, providers.refreshModels(id))
+        assertEquals(TestResult.Ok, providers.testConnection(id, "a"))
+        assertEquals(RefreshResult.Done, providers.refreshModels(id))
+    }
 }
