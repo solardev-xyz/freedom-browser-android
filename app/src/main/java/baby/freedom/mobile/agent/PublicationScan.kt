@@ -272,11 +272,13 @@ internal object PublicationScan {
      * `settings.SECRET_KEY`). Dotted words that start anywhere else stay a
      * value even when one of them is a credential name, as in the passwords
      * `Super.Secret` or `Admin.Password`; a digit anywhere, as in most real
-     * passwords, keeps it a value too.
+     * passwords, keeps it a value too. The root must be written exactly as
+     * code writes it, in lower case: several roots are ordinary words, so a
+     * capitalised one (`App.Password`, `Config.Secret`) is a password.
      */
     internal fun codeReference(value: String): Boolean {
         val segments = value.split('.')
-        return segments.size >= 2 && segments.all { CODE_SEGMENT.matches(it) } && segments[0].lowercase() in CODE_ROOTS
+        return segments.size >= 2 && segments.all { CODE_SEGMENT.matches(it) } && segments[0] in CODE_ROOTS
     }
 
     /**

@@ -482,6 +482,9 @@ class PublicationScanTest {
         for (line in listOf(
             "password: Tr0ub4dor.3horse", "password: correct.horse.battery", "token = \"self.token.data\"",
             "password: Super.Secret", "DB_PASSWORD=Admin.Password", "api_key: Secret.Sauce.Recipe",
+            // A code root is matched as code writes it; capitalised, it is an ordinary word.
+            "DB_PASSWORD=App.Password", "password: Config.Secret", "secret: State.Machine", "token: Secrets.Vault",
+            "password = SELF.Token", "api_key: Settings.Default",
         )) {
             assertEquals(line, listOf("credential-assignment"), rulesIn(line))
             assertTrue(line, SecretBackstop.containsSecret(line))
