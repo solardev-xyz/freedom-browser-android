@@ -54,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
@@ -424,7 +425,10 @@ internal fun swarmManifestSummary(rows: List<ManifestCapability>?): String? =
  * line says so. A site whose permission manifest (#122) manages some rows
  * says which ([manifestRows]), with Ask each time to go back to a sheet
  * per upload and signature ([onAskEachTime]); [askEachTimeFailed] is the
- * site where that couldn't be saved.
+ * site where that couldn't be saved. A site's ACT rules (#540) are
+ * listed one per publisher — the full key, and its address — each with
+ * its own Remove ([onRemoveAct]: origin, key); [actRemoveFailed] is the
+ * (origin, key) whose removal couldn't be saved.
  */
 @Composable
 internal fun SwarmSitesSection(
@@ -434,6 +438,8 @@ internal fun SwarmSitesSection(
     manifestRows: Map<String, List<ManifestCapability>> = emptyMap(),
     onAskEachTime: (String) -> Unit = {},
     askEachTimeFailed: String? = null,
+    onRemoveAct: (String, String) -> Unit = { _, _ -> },
+    actRemoveFailed: Pair<String, String>? = null,
 ) {
     SectionCard(title = stringResource(R.string.send_connected_to_swarm)) {
         grants.forEach { grant ->
@@ -473,6 +479,42 @@ internal fun SwarmSitesSection(
                     }
                 }
                 TextButton(onClick = { onRevoke(grant.origin) }) { Text(stringResource(R.string.common_disconnect)) }
+            }
+            if (grant.act.isNotEmpty()) {
+                Text(
+                    stringResource(R.string.send_swarm_act_rules),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            grant.act.forEach { rule ->
+                val address = SwarmAct.publisher(rule.publicKey)?.address
+                val removeLabel = stringResource(R.string.send_swarm_act_remove_cd, address ?: rule.publicKey)
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp).testTag("swarm-act-rule")) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(rule.publicKey, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                        address?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    TextButton(
+                        onClick = { onRemoveAct(grant.origin, rule.publicKey) },
+                        modifier = Modifier.testTag("swarm-act-remove").semantics { contentDescription = removeLabel },
+                    ) { Text(stringResource(R.string.common_remove)) }
+                }
+                if (actRemoveFailed == grant.origin to rule.publicKey) {
+                    Text(
+                        stringResource(R.string.send_swarm_act_remove_failed),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
     }

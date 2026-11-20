@@ -38,6 +38,12 @@
     <string name="swarm_message_warning_gsoc">Anyone who knows this room can read this message: it is posted unencrypted. It uses your storage.</string>
     <string name="swarm_message_approve">Send</string>
     <string name="swarm_message_always">Always allow this site to send messages without asking</string>
+    <!-- swarm_openAct (#540): content a publisher shared with the user's node through Swarm access control (ACT) -->
+    <string name="swarm_act_title">Open shared content</string>
+    <string name="swarm_act_request">wants to open content this publisher shared with you</string>
+    <string name="swarm_act_warning">Your Swarm node decrypts this with its own key and gives the content to this site. Only content this publisher shared with you can be opened.</string>
+    <string name="swarm_act_approve">Open</string>
+    <string name="swarm_act_always">Always allow this site to open what this publisher shares with you</string>
     <!-- What a publish is: a count of files, the content type, or these -->
     <plurals name="swarm_publish_files">
         <item quantity="one">%d file</item>
@@ -70,6 +76,11 @@
     <string name="swarm_detail_signed_by">Signed by</string>
     <string name="swarm_detail_topic">Topic</string>
     <string name="swarm_detail_room_address">Room address</string>
+    <!-- An ACT share's publisher: its public key, and that key's Ethereum address -->
+    <string name="swarm_detail_publisher">Publisher</string>
+    <string name="swarm_detail_publisher_address">Publisher address</string>
+    <string name="swarm_detail_reference">Reference</string>
+    <string name="swarm_detail_path">Path</string>
 
     <!-- SwarmManifestSheet.kt: the permission-manifest sheet -->
     <string name="swarm_manifest_publish_label">Publish content</string>

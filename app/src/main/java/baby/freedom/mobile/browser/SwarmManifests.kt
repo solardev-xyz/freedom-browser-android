@@ -392,6 +392,13 @@ class SwarmManifests(
         fun available(projection: ManifestProjection): Boolean
         suspend fun enabled(origin: String, projection: ManifestProjection): Boolean
         suspend fun set(origin: String, projection: ManifestProjection, on: Boolean)
+
+        /**
+         * Whether [origin] holds a grant outside every projection that
+         * disconnecting would take with it — an ACT rule (#540) — so a
+         * connection the manifest no longer owns stays, as the user's.
+         */
+        suspend fun keepsConnection(origin: String): Boolean
     }
 
     class Ack(val decision: String, val source: String, val whyShown: String?, val decidedAt: Long)
@@ -772,7 +779,7 @@ class SwarmManifests(
             val leaving = operations.map { it.first }.toSet()
             val usersOwn = CONNECTION_RIDERS.any { rider ->
                 rider !in leaving && rider !in record.managed && projections.available(rider) && projections.enabled(origin, rider)
-            }
+            } || projections.keepsConnection(origin)
             if (usersOwn) {
                 operations.removeAll { it.first == ManifestProjection.Connection }
                 record.detached += ManifestProjection.Connection
