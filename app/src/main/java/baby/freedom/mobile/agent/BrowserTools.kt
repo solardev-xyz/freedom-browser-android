@@ -707,7 +707,10 @@ internal class BrowserToolset(
      * start wait ran out waits for the user too, and is said with the next
      * step on the tab (`lateDownload`, naming that link), or instead of
      * asking again here when this call names the same link; a call for
-     * another link goes ahead and says it with its own result.
+     * another link goes ahead and says it with its own result. If that
+     * earlier link's late download comes during this call's start wait and
+     * this link's own never does, the call says so as its result (its tap
+     * may have led there), not that the page started no download.
      * The card shows that address in full; one it can't
      * show as it is isn't asked about. A download that starts on the
      * approval alone stops if the turn stops or it can't be recorded.

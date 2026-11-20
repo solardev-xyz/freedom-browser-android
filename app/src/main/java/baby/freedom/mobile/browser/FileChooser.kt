@@ -284,8 +284,9 @@ internal class FileChooser(
         }
         // Not the user's cancel (#600): what they chose may not be uploaded,
         // or the picker or camera handed back nothing at all.
+        // A capture only ever takes the camera's own data URI (finishCapture).
         val data = result.data
-        val handedBack = data?.data != null || (data?.clipData?.itemCount ?: 0) > 0
+        val handedBack = data?.data != null || (p.captureFile == null && (data?.clipData?.itemCount ?: 0) > 0)
         when (unattachedPick(result.resultCode == android.app.Activity.RESULT_OK, uris != null, handedBack)) {
             UnattachedPick.REFUSED -> baby.freedom.mobile.agent.AgentUploads.refusing(p.callback)
             UnattachedPick.EMPTY -> baby.freedom.mobile.agent.AgentUploads.emptyHanded(p.callback)

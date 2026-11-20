@@ -135,7 +135,8 @@ internal class DownloadIntent(
     }
 
     /**
-     * An earlier link whose late download ([AgentDownloads.lapse]) came
+     * An earlier approved link (as its card showed it, never the address
+     * the page reported) whose late download ([AgentDownloads.lapse]) came
      * while this intent waited, in its tab or a window that tab opened:
      * the address Android reported was that link's, so this one waits on,
      * but if its own never comes, that download may well be what this
@@ -281,7 +282,8 @@ internal object AgentDownloads {
             val opener = openerOf(tabId)?.takeIf { it != tabId && holderOf(it) == holder }
             if (lateOn(tabId, holder, url)) return null
             if (opener != null && lateOn(opener, holder, url)) {
-                armed[opener]?.takeIf { it.sessionId == holder }?.lateWhileWaiting = url
+                // The approved link as the card showed it, not the address the page reported.
+                armed[opener]?.takeIf { it.sessionId == holder }?.lateWhileWaiting = late[opener]
                 return null
             }
             held += tabId
@@ -298,7 +300,7 @@ internal object AgentDownloads {
         val holder = holderOf(tabId)
         // The lapsed link's late download, not this intent's: noted, and this one waits on.
         if (holder == intent.sessionId && !DownloadIntentMatch.matches(intent.expectedUrl, url) && lateOn(tabId, holder, url)) {
-            intent.lateWhileWaiting = url
+            intent.lateWhileWaiting = late[tabId]
             return null
         }
         armed.remove(tabId)
