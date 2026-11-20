@@ -63,9 +63,22 @@ internal enum class ActionKind {
     /** A link that downloads. */
     Download,
 
-    // Not yet tools on Android; listed so they can't arrive as interactions.
+    /**
+     * A wallet transfer (`wallet_transfer`). It asks on its own sheet
+     * ([AgentTransfers]) in every mode and never comes through
+     * [ApprovalPolicy]; listed so it reads as always asking.
+     */
     Transfer,
+
+    /**
+     * A Swarm publication (`swarm_publish`, #597). It asks on its own
+     * card ([SwarmPublishTools]) in every mode and never comes through
+     * [ApprovalPolicy]; [BrowserToolset.kindOf] maps it here only so it
+     * reads as always asking.
+     */
     Publish,
+
+    // Not yet tools on Android; listed so they can't arrive as interactions.
     NodeWrite,
     DomainTransaction,
     PageTool,

@@ -38,6 +38,8 @@ class BackupRulesTest {
     /** Plain files beside them: the Swarm manifests' record of which Swarm grants they own. */
     private val files = mapOf(
         "../browser/SwarmProviderBridge.kt" to "swarm-manifests.json",
+        // Freedom Agent's publication journal (#597): it names the chats, which stay behind.
+        "../agent/SwarmPublishTool.kt" to "agent-publications.json",
     )
 
     private val root = File("..")
@@ -131,6 +133,8 @@ class BackupRulesTest {
         "app/src/main/java/baby/freedom/mobile/browser/Publish.kt" to "filesDir, \"publish/history.json\")",
         // Excluded above, with the grants it owns.
         "app/src/main/java/baby/freedom/mobile/browser/SwarmProviderBridge.kt" to "File(app.filesDir, \"swarm-manifests.json\")",
+        // Excluded above, with the chats it names.
+        "app/src/main/java/baby/freedom/mobile/agent/SwarmPublishTool.kt" to "filesDir, \"agent-publications.json\")",
     )
 
     private data class Pin(val source: String, val text: String, val path: String?)

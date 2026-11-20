@@ -56,7 +56,8 @@ import baby.freedom.mobile.browser.restartsTapGuard
  * such. Its buttons, a swipe down, a tap outside and Back ignore input
  * until it has been on screen untouched for
  * [PromptTapGuard.PROTECTION_MS], like the app's other approval sheets;
- * dismissing it is Don't allow. Each answer settles the one request the
+ * dismissing it is Don't allow. A publish ([AgentAction.Publish], #597)
+ * has its own card and buttons ([PublishApprovalContent]). Each answer settles the one request the
  * card was shown for.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -94,6 +95,13 @@ internal fun AgentApprovalHost() {
                     .padding(horizontal = 24.dp)
                     .padding(bottom = 16.dp),
             ) {
+                val publish = shown.action as? AgentAction.Publish
+                if (publish != null) {
+                    PublishApprovalContent(shown, publish, tap) { outcome ->
+                        if (guard.accepts()) AgentApprovals.settle(shown.id, outcome)
+                    }
+                    return@Column
+                }
                 Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                     ApprovalBody(shown)
                 }
@@ -169,6 +177,8 @@ private fun ApprovalBody(approval: AgentApproval) {
         }
         is AgentAction.Press -> TargetRows(action.target)
         is AgentAction.Scroll -> action.target?.takeIf { it.role != "viewport" }?.let { TargetRows(it) }
+        // Shown by PublishApprovalContent instead.
+        is AgentAction.Publish -> Unit
         is AgentAction.Dialog -> {
             Field(stringResource(R.string.agent_approve_message), action.message.ifEmpty { "—" })
             if (action.accept && action.promptText != null) {
@@ -231,6 +241,7 @@ private fun headline(action: AgentAction): String = when (action) {
         },
     )
     is AgentAction.Dialog -> stringResource(if (action.accept) R.string.agent_approve_dialog_ok else R.string.agent_approve_dialog_cancel)
+    is AgentAction.Publish -> stringResource(R.string.agent_publish_headline)
 }
 
 @Composable

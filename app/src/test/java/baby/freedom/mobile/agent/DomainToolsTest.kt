@@ -129,7 +129,7 @@ class DomainToolsTest {
         for (tool in t.values) assertFalse(tool.spec.parameters.getBoolean("additionalProperties"))
         val intents = t["domain_prepare"]!!.spec.parameters.getJSONObject("properties").getJSONObject("intent").getJSONArray("enum")
         assertEquals(listOf("set_website", "clear_website", "set_address", "set_text", "register", "renew"), (0 until intents.length()).map(intents::getString))
-        val names = ToolRegistry.forChat("s").specs.map { it.name }
+        val names = ToolRegistry.forChat("s") { error("not needed to list the tools") }.specs.map { it.name }
         assertTrue(names.containsAll(t.keys))
     }
 

@@ -60,7 +60,7 @@ class AgentSkillsTest {
         assertTrue(denied.output.startsWith("[POLICY_DENIED]"))
         assertTrue(tool.run(JSONObject().put("path", "/freedom-agent/skills/dweb-domains/wei.md").put("mode", "w")).isError)
         // A chat offers it only when skills ship.
-        assertTrue(ToolRegistry.forChat("s", skills = skills).specs.any { it.name == "read" })
-        assertFalse(ToolRegistry.forChat("s").specs.any { it.name == "read" })
+        assertTrue(ToolRegistry.forChat("s", skills = skills) { error("not needed to list the tools") }.specs.any { it.name == "read" })
+        assertFalse(ToolRegistry.forChat("s") { error("not needed to list the tools") }.specs.any { it.name == "read" })
     }
 }
