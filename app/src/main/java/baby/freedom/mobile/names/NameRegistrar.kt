@@ -491,13 +491,14 @@ class NameRegistrar internal constructor(
         /**
          * Nothing was sent; [message] says why ([english] for the agent's
          * model), and the step can be reviewed again. [rejected]: the user
-         * refused it on their Ledger.
+         * refused it on their Ledger; [stale]: its fee was priced too long ago.
          */
         data class NotSent(
             val message: String,
             override val unsaved: Boolean = false,
             val english: String = message,
             val rejected: Boolean = false,
+            val stale: Boolean = false,
         ) : Dispatched
 
         /** The wallet may have sent it: it's never sent again, only settled from chain state. */
@@ -562,7 +563,7 @@ class NameRegistrar internal constructor(
                     notSent(op.id, Said(outcome.message, outcome.english))
                 }
                 WalletSender.Broadcast.Busy -> notSent(op.id, Strings.said(R.string.namereg_send_busy))
-                is WalletSender.Broadcast.Stale -> notSent(op.id, Strings.said(R.string.namereg_send_stale))
+                is WalletSender.Broadcast.Stale -> notSent(op.id, Strings.said(R.string.namereg_send_stale), stale = true)
                 WalletSender.Broadcast.Rejected -> notSent(op.id, Strings.said(R.string.namereg_send_rejected), rejected = true)
             }
         } finally {
@@ -570,9 +571,9 @@ class NameRegistrar internal constructor(
         }
     }
 
-    private suspend fun notSent(id: String, said: Said, rejected: Boolean = false): Dispatched {
+    private suspend fun notSent(id: String, said: Said, rejected: Boolean = false, stale: Boolean = false): Dispatched {
         val saved = record(id) { it.copy(state = State.READY, message = said.text, declined = rejected) }
-        return Dispatched.NotSent(said.text, unsaved = !saved, english = said.english, rejected = rejected)
+        return Dispatched.NotSent(said.text, unsaved = !saved, english = said.english, rejected = rejected, stale = stale)
     }
 
     /**
