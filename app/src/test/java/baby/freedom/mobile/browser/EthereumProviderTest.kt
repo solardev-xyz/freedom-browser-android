@@ -336,13 +336,13 @@ class EthereumProviderTest {
             }
             val p = EthereumProvider(grants, onVault, { chainList!! }, { _, _, _, _ -> "0x1" }, sends, rules)
             answer = { EthAnswer.Approved(main) }
-            ok(p.request(site, "eth_requestAccounts", JSONArray()) { answer(it) })
+            ok(p.request(site, "eth_requestAccounts", JSONArray(), agentHeld = { false }) { answer(it) })
             // 20 minutes of a dApp's usual polling, screen on, app in front.
             repeat(20 * 6) {
                 now += 10_000L
-                ok(p.request(site, "eth_chainId", JSONArray()) { answer(it) })
-                ok(p.request(site, "eth_blockNumber", JSONArray()) { answer(it) })
-                ok(p.request(site, "eth_accounts", JSONArray()) { answer(it) })
+                ok(p.request(site, "eth_chainId", JSONArray(), agentHeld = { false }) { answer(it) })
+                ok(p.request(site, "eth_blockNumber", JSONArray(), agentHeld = { false }) { answer(it) })
+                ok(p.request(site, "eth_accounts", JSONArray(), agentHeld = { false }) { answer(it) })
                 vault.lockIfExpired()
                 if (now - 1_000_000L < 15 * 60_000L) assertTrue("open at ${now - 1_000_000L} ms", vault.unlockedNow())
             }
@@ -561,7 +561,7 @@ class EthereumProviderTest {
             grants.setChainGate = gate
             grants.setChainStarted = CompletableDeferred()
             val page = launch {
-                ok(provider.request(site, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x2105"))) { EthAnswer.Approved() })
+                ok(provider.request(site, "wallet_switchEthereumChain", JSONArray().put(JSONObject().put("chainId", "0x2105")), agentHeld = { false }) { EthAnswer.Approved() })
             }
             grants.setChainStarted.await()
             // The page's write is in flight: the site still reads as on Ethereum, the chain Undo checks for.
@@ -869,7 +869,7 @@ class EthereumProviderTest {
         val p = EthereumProvider(grants, wallet, { BuiltInChains.ALL }, { _, _, _, _ -> null }, sends, rules, compute)
         connect()
         grants.grants[site] = EthereumProvider.Grant(main.address, 1)
-        val sig = runBlocking { p.request(site, "eth_signTypedData_v4", JSONArray().put(main.address).put(mail)) { EthAnswer.Approved() } }
+        val sig = runBlocking { p.request(site, "eth_signTypedData_v4", JSONArray().put(main.address).put(mail), agentHeld = { false }) { EthAnswer.Approved() } }
         assertTrue(sig is EthereumProvider.Reply.Ok)
         assertTrue(dispatched > 0)
     }
@@ -1846,7 +1846,7 @@ class EthereumProviderTest {
         val p = EthereumProvider(grants, wallet, { chainList!! }, { _, _, _, _ -> null }, replacing, rules)
         sends.outcomes += sent(2)
         runBlocking {
-            p.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+            p.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData), agentHeld = { false }) { ask ->
                 asks += ask
                 EthAnswer.Approved()
             }
@@ -1953,7 +1953,7 @@ class EthereumProviderTest {
         connect()
         sends.outcomes += sent(1)
         runBlocking {
-            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData), agentHeld = { false }) { ask ->
                 asks += ask
                 // The page's own wallet_revokePermissions, while the sheet is up.
                 assertTrue(provider.disconnect(site))
@@ -1972,12 +1972,12 @@ class EthereumProviderTest {
         connect()
         sends.outcomes += sent(1)
         runBlocking {
-            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData)) { ask ->
+            provider.request(site, "eth_sendTransaction", tx("to" to token, "data" to transferData), agentHeld = { false }) { ask ->
                 asks += ask
                 assertTrue(provider.disconnect(site))
                 assertEquals(
                     second.address,
-                    (provider.request(site, "eth_requestAccounts", JSONArray()) { EthAnswer.Approved(second) } as EthereumProvider.Reply.Ok)
+                    (provider.request(site, "eth_requestAccounts", JSONArray(), agentHeld = { false }) { EthAnswer.Approved(second) } as EthereumProvider.Reply.Ok)
                         .value.let { (it as JSONArray).getString(0) },
                 )
                 EthAnswer.Approved(alwaysApprove = true)

@@ -84,9 +84,11 @@ class X402Ask internal constructor(
     /**
      * Whether the sheet may offer to grant an allowance: not in a tab
      * Freedom Agent holds (#577), where nothing may pay without a sheet
-     * and nothing is set up that later would.
+     * and nothing is set up that later would. No default, so a new
+     * construction site has to decide custody instead of offering one by
+     * omission (#592 R2-M1).
      */
-    val allowanceOffered: Boolean = true,
+    val allowanceOffered: Boolean,
 )
 
 /** The user's yes on an x402 sheet: which offer ([X402Option]'s index in [X402Ask.options]), and an allowance to grant. */

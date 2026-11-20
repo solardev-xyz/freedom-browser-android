@@ -365,13 +365,15 @@ class EthereumProvider(
      * none is offered on its sheet, and a connected site's switch to a
      * built-in chain gets the Switch network sheet instead of a notice.
      * Read again at each of those decisions, so a tab the user takes back
-     * mid-request is theirs again from the next one.
+     * mid-request is theirs again from the next one. Deliberately no
+     * default: a caller that forgot custody must not compile, rather than
+     * silently read every tab as the user's (#592 R2-M1).
      */
     suspend fun request(
         origin: String,
         method: String,
         params: JSONArray,
-        agentHeld: () -> Boolean = { false },
+        agentHeld: () -> Boolean,
         ask: suspend (EthAsk) -> EthAnswer,
     ): Reply = try {
         dispatch(origin, method, params, agentHeld, ask)

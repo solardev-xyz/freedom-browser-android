@@ -48,6 +48,7 @@ class X402LedgerSheetTest {
             options = offers.map { X402Option(it, BuiltInChains.BASE, "USDC", 6, listed = true, balance = BigInteger.valueOf(1_000_000)) },
             unusable = emptyList(),
             allowanceWaitingOnUnlock = false,
+            allowanceOffered = true,
         )
     }
 
