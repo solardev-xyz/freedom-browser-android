@@ -15,8 +15,14 @@ import java.math.BigInteger
  * already the user's language, and [english] the same words for the agent's
  * model (#599), which is told nothing in the phone's language.
  */
-class NameException(val code: Code, message: String, val english: String = message) : Exception(message) {
-    constructor(code: Code, said: Said) : this(code, said.text, said.english)
+class NameException(
+    val code: Code,
+    message: String,
+    val english: String = message,
+    /** The operation can never go as prepared (its record or the name's authority changed): it's marked stale. */
+    val outdated: Boolean = false,
+) : Exception(message) {
+    constructor(code: Code, said: Said, outdated: Boolean = false) : this(code, said.text, said.english, outdated)
 
     enum class Code { INVALID, UNSUPPORTED, UNAVAILABLE, UNVERIFIED, STALE, QUOTE_CHANGED, CONFLICT, SECURE_STORAGE, FUNDS }
 }
@@ -26,7 +32,7 @@ internal fun refuse(code: NameException.Code, message: String): Nothing = throw 
 /** [said] for the screen, and in English ([NameException.english]) for the agent's `domain_*` tools. */
 internal fun refuse(code: NameException.Code, said: Said): Nothing = throw NameException(code, said)
 
-/** The three namespaces Freedom registers and renews in (#579). */
+/** The three namespaces Freedom registers, renews and writes records in (#579, #599). */
 enum class NameSpace(val tld: String) {
     /** ENS, `ETHRegistrarController` commit/reveal. */
     ETH("eth"),

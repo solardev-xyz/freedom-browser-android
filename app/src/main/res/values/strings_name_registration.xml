@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Registering and renewing .eth, .wei and .gwei names (#579):
-  names/NameRegistrationScreen.kt and the errors names/* hands it.
+  Registering and renewing .eth, .wei and .gwei names (#579), and the
+  record writes Freedom Agent prepares (#599): names/NameRegistrationScreen.kt,
+  the reviews (names/NameReview.kt) and the errors names/* hands them.
 -->
 <resources>
     <!-- names/NameContracts.kt, NameChain.kt, NameRegistrar.kt -->

@@ -17,10 +17,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * One registration or renewal, from its first quote to its last
- * transaction — desktop's `domain-operations.json` record. A
+ * One registration, renewal or record write, from its first quote to
+ * its last transaction — desktop's `domain-operations.json` record. A
  * registration is two transactions: [Step.COMMIT], then, once the
- * commitment is old enough, [Step.REVEAL]; a renewal is one.
+ * commitment is old enough, [Step.REVEAL]; a renewal is one, and a
+ * record write ([Step.RECORD], #599) is one.
  *
  * [account] is the address that pays and, for a registration, owns the
  * name: the commitment binds it, so the operation never moves to

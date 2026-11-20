@@ -96,7 +96,8 @@ class RpcNameReads(private val rpc: WalletRpc) : NameReads {
 
 /**
  * What the chain says about one name, read at one block — desktop's
- * `DomainChain.inspect` for registration and renewal.
+ * `DomainChain.inspect`, for registration and renewal and, with the
+ * records asked for, for record writes (#599).
  */
 class NameChain(
     private val reads: NameReads,

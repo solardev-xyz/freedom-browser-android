@@ -36,20 +36,22 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * Registering and renewing `.eth`, `.wei` and `.gwei` names (#579), a
- * port of desktop's `src/main/domains/service.js` for its `register` and
- * `renew` intents, as a screen of its own; the agent's `domain_*` tools
- * reuse it later.
+ * Registering and renewing `.eth`, `.wei` and `.gwei` names (#579), and
+ * setting their website, address and text records (#599): a port of
+ * desktop's `src/main/domains/service.js`, used by the name screen
+ * (register and renew) and the agent's `domain_*` tools (all of it).
  *
  * A registration is commit/reveal: [start] draws a secret, seals it and
  * saves the operation *before* anything is signed; [plan] builds each
  * step's transaction from fresh chain state (code hashes, availability,
  * price, the commitment's age) for the wallet's review; [dispatch]
  * checks it once more, marks it dispatching on disk, and only then hands
- * it to the wallet. An outcome that can't be told (the app stopped, or
- * the wallet may have sent it) is never sent again: [refresh] settles it
+ * it to the wallet. A record write ([startRecord]) is one step, built
+ * the same way. An outcome that can't be told (the app stopped, or the
+ * wallet may have sent it) is never sent again: [refresh] settles it
  * from the chain alone — the receipt of the signed bytes when their hash
- * is known, the commitment on chain, the name owned, the expiry moved.
+ * is known, the commitment on chain, the name owned, the expiry moved,
+ * the record set.
  */
 class NameRegistrar internal constructor(
     private val reads: NameReads,
@@ -296,7 +298,20 @@ class NameRegistrar internal constructor(
     suspend fun plan(id: String): Plan = readsGuarded {
         val op = get(id) ?: refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_gone))
         if (op.state != State.READY) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_not_ready))
-        build(op)
+        try {
+            build(op)
+        } catch (e: NameException) {
+            // A record write that's out of date for good (the name's authority or the record changed) is
+            // marked stale, as a dispatch marks it, so it doesn't hold the name open for another write.
+            if (e.outdated) {
+                try {
+                    save(op.copy(state = State.STALE, message = e.message), op.revision)
+                } catch (s: NameException) {
+                    Log.w(TAG, "couldn't mark a stale operation: ${s.code}")
+                }
+            }
+            throw e
+        }
     }
 
     /**
@@ -430,9 +445,9 @@ class NameRegistrar internal constructor(
     private suspend fun buildRecord(op: NameOperation, parsed: ParsedName, state: NameChain.State, s: NameChain.Snapshot): Plan {
         val record = op.record ?: refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_invalid))
         val r = recordsOf(state)
-        if (authorityOf(state) != op.authority) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_record_changed))
+        if (authorityOf(state) != op.authority) throw NameException(NameException.Code.STALE, Strings.said(R.string.namereg_error_record_changed), outdated = true)
         authorize(parsed, r, op.account, s)
-        if (currentValue(r, record) != op.before) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_record_changed))
+        if (currentValue(r, record) != op.before) throw NameException(NameException.Code.STALE, Strings.said(R.string.namereg_error_record_changed), outdated = true)
         val role = if (parsed.space == NameSpace.ETH) Role.RESOLVER else Role.nft(parsed.space)
         val data = when (record.kind) {
             NameRecord.Kind.CONTENTHASH -> NameContracts.setContenthashData(parsed, hexBytes(record.value))

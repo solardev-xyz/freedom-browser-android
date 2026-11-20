@@ -767,13 +767,15 @@ class NameRegistrarTest {
         val op = r.startRecord("alice.wei", Intent.SET_TEXT, record, me, 0)
         chain.recordVersion["wei"] = BigInteger.TWO
         refused(NameException.Code.STALE) { r.plan(op.id) }
-        chain.recordVersion.remove("wei")
-        val plan = r.plan(op.id)
+        // Out of date for good: marked stale, so it doesn't hold the name open for a fresh write.
+        assertEquals(State.STALE, r.get(op.id)!!.state)
+        val next = r.startRecord("alice.wei", Intent.SET_TEXT, record, me, 0)
+        val plan = r.plan(next.id)
         chain.text["wei"] = hashMapOf("url" to "someone else's")
         var sends = 0
         refused(NameException.Code.STALE) { r.dispatch(plan) { sends++; WalletSender.Broadcast.Sent(hash1) } }
         assertEquals(0, sends)
-        assertEquals(State.STALE, r.get(op.id)!!.state)
+        assertEquals(State.STALE, r.get(next.id)!!.state)
     }
 
     @Test

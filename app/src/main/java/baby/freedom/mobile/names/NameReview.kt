@@ -132,13 +132,22 @@ private fun recordRows(op: NameOperation, own: List<WalletAccount>?): List<NameR
         ),
     )
     record.key?.let { rows += NameReviewRow(Strings.get(R.string.namereg_review_key), Eip712.visible(it)) }
-    val empty = Strings.get(R.string.namereg_review_empty)
     val before = op.before.orEmpty()
-    val unset = before.isEmpty() || before == "0x" || before.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true)
-    rows += NameReviewRow(Strings.get(R.string.namereg_review_current), if (unset) empty else Eip712.visible(before))
+    // "Unset" as each kind has it: no contenthash bytes, the zero address, an empty text — a text that reads "0x" is text.
+    val unset = when (record.kind) {
+        NameRecord.Kind.CONTENTHASH -> before.isEmpty() || before == "0x"
+        NameRecord.Kind.ADDRESS -> before.isEmpty() || before.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true)
+        NameRecord.Kind.TEXT -> before.isEmpty()
+    }
+    rows += NameReviewRow(Strings.get(R.string.namereg_review_current), if (unset) Strings.get(R.string.namereg_review_empty) else Eip712.visible(before))
+    val cleared = when (record.kind) {
+        NameRecord.Kind.CONTENTHASH -> record.value == "0x"
+        NameRecord.Kind.ADDRESS -> false
+        NameRecord.Kind.TEXT -> record.value.isEmpty()
+    }
     val next = when {
-        op.reference != null -> "bzz://${op.reference}"
-        record.value == "0x" -> Strings.get(R.string.namereg_review_cleared)
+        record.kind == NameRecord.Kind.CONTENTHASH && op.reference != null -> "bzz://${op.reference}"
+        cleared -> Strings.get(R.string.namereg_review_cleared)
         else -> Eip712.visible(record.value)
     }
     rows += NameReviewRow(Strings.get(R.string.namereg_review_new), next)

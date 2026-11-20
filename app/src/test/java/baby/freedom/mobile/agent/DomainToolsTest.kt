@@ -383,4 +383,68 @@ class DomainToolsTest {
         assertTrue(agentSheetFirst(3, 4, null))
         assertFalse(agentSheetFirst(3, null, 2))
     }
+
+    @Test
+    fun `an inspection past desktop's bound comes back short, still labelled untrusted`() {
+        ownWei()
+        val keys = (1..8).map { "k$it" }
+        chain.text["wei"] = HashMap(keys.associateWith { "x".repeat(8_000) })
+        val out = json(run("domain_inspect", """{"name":"alice.wei","textKeys":${org.json.JSONArray(keys)}}"""))
+        assertTrue(out.getBoolean("truncated"))
+        assertEquals(DomainToolset.INSPECT_UNTRUSTED, out.getString("untrusted"))
+        assertFalse(out.has("records"))
+    }
+
+    @Test
+    fun `a renewal and a cleared website are each one sheet with the price or nothing sent`() {
+        ownWei()
+        val renew = json(run("domain_prepare", """{"name":"alice.wei","intent":"renew"}"""))
+        assertEquals("renew", renew.getString("step"))
+        json(run("domain_execute", """{"operationId":"${renew.getString("operationId")}"}"""))
+        assertEquals(Step.RENEW, asked.single().plan.step)
+        assertEquals(NameContracts.withBuffer(chain.nftFee), asked.single().quote.request.amount)
+        assertTrue(asked.single().review.rows.any { it.label == "Ownership" })
+
+        chain.owner["gwei"] = me.address
+        chain.expiry["gwei"] = BigInteger.valueOf(chain.timestamp + NameContracts.YEAR)
+        chain.contenthash["gwei"] = "0xe40101fa011b20" + "ab".repeat(32)
+        val clear = json(run("domain_prepare", """{"name":"alice.gwei","intent":"clear_website"}"""))
+        assertEquals("0x", clear.getJSONObject("record").getString("value"))
+        assertEquals("0xe40101fa011b20" + "ab".repeat(32), clear.getString("previous"))
+        json(run("domain_execute", """{"operationId":"${clear.getString("operationId")}"}"""))
+        assertEquals(BigInteger.ZERO, asked.last().quote.request.amount)
+        assertEquals(NameContracts.Role.GWEI.address, asked.last().quote.request.to)
+        assertEquals("(cleared)", asked.last().review.rows.single { it.label == "New" }.value)
+    }
+
+    @Test
+    fun `a write refused as changed when it's sent ends stale, so it doesn't hold the name`() {
+        ownWei()
+        val id = json(run("domain_prepare", """{"name":"alice.wei","intent":"set_text","key":"url","value":"new"}""")).getString("operationId")
+        chain.text["wei"] = hashMapOf("url" to "someone else's")
+        assertEquals("INTERNAL_ERROR", code(run("domain_execute", """{"operationId":"$id"}""")))
+        assertTrue(asked.isEmpty())
+        assertEquals("stale", json(run("domain_operation_status", """{"operationId":"$id"}""")).getString("state"))
+        // A fresh one can be prepared now.
+        val again = json(run("domain_prepare", """{"name":"alice.wei","intent":"set_text","key":"url","value":"new"}"""))
+        assertFalse(again.getString("operationId") == id)
+    }
+
+    @Test
+    fun `a declined step stays declined across a restart, and a journal from before the agent still reads`() {
+        val id = json(run("domain_prepare", """{"name":"fresh.wei","intent":"register"}""")).getString("operationId")
+        answers = { TransferAnswer.Declined }
+        run("domain_execute", """{"operationId":"$id"}""")
+        val saved = baby.freedom.mobile.names.NameJournalCodec.encode(journal.saved)
+        val back = baby.freedom.mobile.names.NameJournalCodec.decode(saved).single()
+        assertTrue(back.declined)
+        assertEquals("chat-1", back.chat)
+        // An entry written before #599 has none of the new keys.
+        val old = saved.getJSONArray("operations").getJSONObject(0)
+        for (k in listOf("chat", "declined", "record", "before", "authority", "publicationId", "reference")) old.remove(k)
+        val read = baby.freedom.mobile.names.NameJournalCodec.decode(saved).single()
+        assertFalse(read.declined)
+        assertNull(read.chat)
+        assertNull(read.record)
+    }
 }
