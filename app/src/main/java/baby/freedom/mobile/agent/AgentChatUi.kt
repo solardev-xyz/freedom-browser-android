@@ -436,8 +436,10 @@ internal fun chatRows(turns: List<ChatTurn>, live: AgentChats.Live?, parsers: Mu
     for (turn in turns) {
         val l = live?.takeIf { it.turnId == turn.id }
         val text = l?.text ?: turn.assistantText
-        val pieces = if (text.isEmpty()) emptyList() else Markdown.pieces(parsers.getOrPut(turn.id) { Markdown.Incremental() }.parse(text))
-        if (text.length <= LAZY_REPLY_CHARS) {
+        val blocks = if (text.isEmpty()) emptyList() else parsers.getOrPut(turn.id) { Markdown.Incremental() }.parse(text)
+        val lazy = text.length > LAZY_REPLY_CHARS
+        val pieces = Markdown.pieces(blocks, chunked = lazy)
+        if (!lazy) {
             rows += ChatRow.Whole(turn, l, pieces)
         } else {
             rows += ChatRow.Head(turn)

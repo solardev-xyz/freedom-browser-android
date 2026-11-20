@@ -205,11 +205,13 @@ internal object Markdown {
     }
 
     /**
-     * [blocks] as the pieces they're drawn in: one per block, a long
-     * block in [chunks]. A piece's [MdPiece.key] stays the same while the
-     * reply grows, so a list keyed by it keeps what's already drawn.
+     * [blocks] as the pieces they're drawn in: one per block, or with
+     * [chunked], a long block in [chunks]. A piece's [MdPiece.key] stays
+     * the same while the reply grows, so a list keyed by it keeps what's
+     * already drawn. Unchunked for a reply drawn whole: its pieces share
+     * one selection, and a copy across a cut would lose its line break.
      */
-    fun pieces(blocks: List<MdBlock>): List<MdPiece> {
+    fun pieces(blocks: List<MdBlock>, chunked: Boolean): List<MdPiece> {
         val out = ArrayList<MdPiece>(blocks.size)
         blocks.forEachIndexed { b, block ->
             val text = when (block) {
@@ -220,7 +222,7 @@ internal object Markdown {
                 is MdBlock.Code -> block.text
                 MdBlock.Rule -> ""
             }
-            val parts = chunks(text)
+            val parts = if (chunked) chunks(text) else listOf(text)
             parts.forEachIndexed { c, part -> out += MdPiece(b, c, block, part, c == parts.size - 1) }
         }
         return out
@@ -451,9 +453,9 @@ internal fun markdownPalette(): Markdown.Palette {
 /**
  * A reply's [pieces] ([Markdown.pieces]) drawn as Markdown, in one
  * column. A reply still coming in is drawn again every 80 ms, so each
- * piece keeps its styled text and layout while it's unchanged, and only
- * the growing end is laid out again. A very long reply is drawn piece by
- * piece in the chat's own lazy list instead ([MdPieceView], `chatRows`).
+ * block keeps its styled text and layout while it's unchanged. A very
+ * long reply is drawn piece by piece, its long blocks cut, in the chat's
+ * own lazy list instead ([MdPieceView], `chatRows`).
  */
 @Composable
 internal fun MarkdownPieces(pieces: List<MdPiece>, modifier: Modifier = Modifier) {

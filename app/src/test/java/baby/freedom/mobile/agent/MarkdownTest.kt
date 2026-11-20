@@ -2,6 +2,7 @@ package baby.freedom.mobile.agent
 
 import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -102,6 +103,10 @@ class MarkdownTest {
         val short = turn("a", "## Hi\n\n- one\n- two")
         val whole = chatRows(listOf(short), null, parsers).single() as ChatRow.Whole
         assertEquals(3, whole.pieces.size)
+        // Drawn whole, a long block isn't cut: one selection copies it with its line breaks.
+        val code = "```\n" + (1..300).joinToString("\n") { "line $it of the code" } + "\n```"
+        val wholeCode = chatRows(listOf(turn("c", code)), null, parsers).single() as ChatRow.Whole
+        assertEquals(1, wholeCode.pieces.size)
 
         val para = "A paragraph of **text**.\n\n"
         val long = para.repeat(LAZY_REPLY_CHARS / para.length + 10)
@@ -118,20 +123,15 @@ class MarkdownTest {
     }
 
     @Test
-    fun `a 780k-character reply parses on from its last blank line, not from its start (R1-M3)`() {
+    fun `a growing reply keeps the blocks before its last blank line, not parsing them again (R1-M3)`() {
         val para = "Some **bold** text with `code` and a [link](https://x.y) and more words.\n\n"
         val reply = para.repeat(780_000 / para.length)
         val p = Markdown.Incremental()
-        p.parse(reply)
-        val whole = (1..5).minOf { val t = System.nanoTime(); Markdown.parse(reply); System.nanoTime() - t }
-        var grown = reply
-        val step = (1..5).minOf {
-            grown += "more "
-            val t = System.nanoTime()
-            p.parse(grown)
-            System.nanoTime() - t
-        }
-        assertTrue("whole ${whole / 1_000} µs, step ${step / 1_000} µs", step * 3 < whole)
+        val first = p.parse(reply)
+        val next = p.parse(reply + "more ")
+        assertEquals(Markdown.parse(reply + "more "), next)
+        // Every block before the resume point is the very same object: reused, not re-parsed.
+        for (k in 0 until first.size - 1) assertSame(first[k], next[k])
     }
 
     @Test
