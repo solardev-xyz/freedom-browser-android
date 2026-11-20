@@ -275,6 +275,79 @@ class AgentProvidersTest {
     }
 
     @Test
+    fun `a slow first answer is waited for up to the call's deadline, not cut short by a read timeout`() = runBlocking {
+        // A server loading a model sends nothing until it has a reply: no
+        // separate read timeout may fire before the call's own deadline.
+        assertEquals(0, ProviderClient.httpClient().readTimeoutMillis)
+        assertTrue(ProviderClient.LAN_TEST_TIMEOUT_MS > ProviderClient.CALL_TIMEOUT_MS)
+        val id = connectOllama()
+        routes["/v1/chat/completions"] = { json(chatReply()).setHeadersDelay(1_500, TimeUnit.MILLISECONDS) }
+        val client = ProviderClient(gate)
+        val (url, body) = ProviderClient.testRequest(ProviderCatalog.definition(ProviderCatalog.OLLAMA)!!, base, "m")
+        val revision = state.connection(id)!!.revision
+        assertTrue(client.fetch(id, revision, url, emptyMap(), 4096, body, timeoutMs = 5_000) is ProviderReply.Body)
+        assertEquals(TestResult.Ok, providers.testConnection(id, "m"))
+    }
+
+    @Test
+    fun `a server that doesn't answer before the deadline reads as timed out, not unreachable`() = runBlocking {
+        val id = connectOllama()
+        val revision = state.connection(id)!!.revision
+        val client = ProviderClient(gate)
+        // Nothing at all before the deadline.
+        routes["/api/tags"] = { json(tags("late")).setHeadersDelay(3, TimeUnit.SECONDS) }
+        val url = base.resolve("/api/tags")!!
+        assertEquals(ProviderReply.TimedOut, client.fetch(id, revision, url, emptyMap(), 4096, timeoutMs = 500))
+        // Headers, then a body that stalls past it.
+        routes["/api/tags"] = { stalled() }
+        assertEquals(ProviderReply.TimedOut, client.fetch(id, revision, url, emptyMap(), 4096, timeoutMs = 500))
+        assertEquals(0, gate.inFlight())
+    }
+
+    @Test
+    fun `a connect that times out reads as unreachable, not as a slow server`() = runBlocking {
+        val id = connectOllama()
+        val revision = state.connection(id)!!.revision
+        // A black-holed address: the connect itself never completes.
+        val http = ProviderClient.httpClient().newBuilder()
+            .socketFactory(object : javax.net.SocketFactory() {
+                override fun createSocket() = object : java.net.Socket() {
+                    override fun connect(endpoint: java.net.SocketAddress?, timeout: Int) =
+                        throw java.net.SocketTimeoutException("connect timed out")
+                }
+                override fun createSocket(h: String?, p: Int) = throw UnsupportedOperationException()
+                override fun createSocket(h: String?, p: Int, l: java.net.InetAddress?, lp: Int) =
+                    throw UnsupportedOperationException()
+                override fun createSocket(h: java.net.InetAddress?, p: Int) = throw UnsupportedOperationException()
+                override fun createSocket(h: java.net.InetAddress?, p: Int, l: java.net.InetAddress?, lp: Int) =
+                    throw UnsupportedOperationException()
+            })
+            .build()
+        val reply = ProviderClient(gate, http).fetch(id, revision, base.resolve("/api/tags")!!, emptyMap(), 4096)
+        assertEquals(ProviderReply.Unreachable, reply)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `refresh models tells an answering server apart from one that can't be reached`() = runBlocking {
+        val id = providers.run {
+            setEnabled(true)
+            saveLan(ProviderCatalog.COMPATIBLE, null, "lan", base.resolve("/v1")!!, key = null)!!
+        }
+        for ((code, expected) in listOf(
+            401 to RefreshResult.Unauthorized, 403 to RefreshResult.Unauthorized, 404 to RefreshResult.NotFound,
+            429 to RefreshResult.RateLimited, 500 to RefreshResult.ServerError, 503 to RefreshResult.ServerError,
+            400 to RefreshResult.Refused, 302 to RefreshResult.Refused,
+        )) {
+            routes["/v1/models"] = {
+                MockResponse().setResponseCode(code).setHeader("Location", "http://127.0.0.1:1/x").setBody("{}")
+            }
+            assertEquals("$code", expected, providers.refreshModels(id))
+        }
+        assertNull(models[id])
+    }
+
+    @Test
     fun `a dropped connection reads as unreachable`() = runBlocking {
         val id = connectOllama()
         routes["/api/tags"] = { MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) }

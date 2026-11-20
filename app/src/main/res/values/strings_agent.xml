@@ -72,6 +72,7 @@
     <string name="agent_api_key_optional">API key (optional)</string>
     <string name="agent_api_key_new_url">A new address needs its key typed again; the saved one isn\'t sent to it.</string>
     <string name="agent_remove_key">Remove key</string>
+    <string name="agent_removing_key">Removing…</string>
     <string name="agent_key_removed">Key removed.</string>
     <string name="agent_show_key">Show key</string>
     <string name="agent_hide_key">Hide key</string>
@@ -110,12 +111,16 @@
     <string name="agent_test_server_error">The provider had an error. Try again later.</string>
     <string name="agent_test_refused">The provider refused the request.</string>
     <string name="agent_test_unreachable">Couldn\'t reach the server.</string>
+    <string name="agent_test_timed_out">The server didn\'t reply in time. One loading a model can take a while: try again in a moment.</string>
     <string name="agent_test_bad_reply">The server answered, but not with a model reply.</string>
     <string name="agent_test_bad_url">The saved address isn\'t allowed. Enter it again.</string>
     <string name="agent_test_cancelled">Stopped: AI was turned off or the key changed.</string>
     <string name="agent_refresh_done">Model list updated.</string>
     <string name="agent_refresh_too_large">The model list is too large to load.</string>
     <string name="agent_refresh_unusable">The server didn\'t send a model list Freedom can use.</string>
+    <string name="agent_refresh_not_found">The server answered, but has no model list at this address. Check the URL.</string>
+    <string name="agent_refresh_not_found_compatible">The server answered, but has no model list at this address. Check the URL: it usually ends in /v1.</string>
+    <string name="agent_refresh_timed_out">The server didn\'t send its model list in time. Try again.</string>
     <string name="agent_refresh_failed">Couldn\'t save the model list. Try again.</string>
 
     <string name="agent_models">Models</string>

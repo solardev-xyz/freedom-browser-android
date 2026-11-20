@@ -1,7 +1,9 @@
 package baby.freedom.mobile.agent
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -12,7 +14,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -45,12 +46,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -286,16 +291,25 @@ private fun testLine(result: TestResult, model: String, keyed: Boolean): String 
     TestResult.ServerError -> Strings.get(R.string.agent_test_server_error)
     TestResult.Refused -> Strings.get(R.string.agent_test_refused)
     TestResult.Unreachable -> Strings.get(R.string.agent_test_unreachable)
+    TestResult.TimedOut -> Strings.get(R.string.agent_test_timed_out)
     TestResult.BadReply -> Strings.get(R.string.agent_test_bad_reply)
     TestResult.BadUrl -> Strings.get(R.string.agent_test_bad_url)
     TestResult.Cancelled -> Strings.get(R.string.agent_test_cancelled)
 }
 
-private fun refreshLine(result: RefreshResult): String = when (result) {
+private fun refreshLine(result: RefreshResult, definition: ProviderDefinition): String = when (result) {
     RefreshResult.Done -> Strings.get(R.string.agent_refresh_done)
     RefreshResult.NoKey -> Strings.get(R.string.agent_test_no_key)
     RefreshResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
+    RefreshResult.NotFound -> Strings.get(
+        if (definition.id == ProviderCatalog.COMPATIBLE) R.string.agent_refresh_not_found_compatible
+        else R.string.agent_refresh_not_found,
+    )
+    RefreshResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
+    RefreshResult.ServerError -> Strings.get(R.string.agent_test_server_error)
+    RefreshResult.Refused -> Strings.get(R.string.agent_test_refused)
     RefreshResult.Unreachable -> Strings.get(R.string.agent_test_unreachable)
+    RefreshResult.TimedOut -> Strings.get(R.string.agent_refresh_timed_out)
     RefreshResult.TooLarge -> Strings.get(R.string.agent_refresh_too_large)
     RefreshResult.Unusable -> Strings.get(R.string.agent_refresh_unusable)
     RefreshResult.BadUrl -> Strings.get(R.string.agent_test_bad_url)
@@ -346,7 +360,9 @@ private fun ProviderPage(
     var reveal by remember(target.providerId) { mutableStateOf(false) }
     var name by rememberSaveable(target.providerId) { mutableStateOf(connection?.name ?: "") }
     var url by rememberSaveable(target.providerId) { mutableStateOf(connection?.baseUrl ?: "") }
-    var busy by remember(target.providerId) { mutableStateOf(false) }
+    // Which action is running, so only its own button says so.
+    var running by remember(target.providerId) { mutableStateOf<PageAction?>(null) }
+    val busy = running != null
     var line by remember(target.providerId) { mutableStateOf<String?>(null) }
     var filter by rememberSaveable(target.providerId) { mutableStateOf("") }
     var confirmRemove by remember { mutableStateOf(false) }
@@ -361,20 +377,20 @@ private fun ProviderPage(
     val urlMoved = isLan && connection != null && connection.hasKey &&
         urlCheck?.url?.let(ProviderUrls::display) != connection.baseUrl
 
-    fun run(block: suspend () -> String?) {
-        if (busy) return
-        busy = true
+    fun run(action: PageAction, block: suspend () -> String?) {
+        if (running != null) return
+        running = action
         line = null
         scope.launch {
             try {
                 line = block()
             } finally {
-                busy = false
+                running = null
             }
         }
     }
 
-    fun save() = run {
+    fun save() = run(PageAction.Saving) {
         focusManager.clearFocus()
         val id = if (isLan) {
             providers.saveLan(
@@ -388,7 +404,9 @@ private fun ProviderPage(
         key = ""
         onSaved(id)
         // Fetch the list the new key or server offers, where there is one to fetch.
-        if (definition.catalogPath == null) null else refreshLine(providers.refreshModels(id))
+        if (definition.catalogPath == null) return@run null
+        running = PageAction.Refreshing
+        refreshLine(providers.refreshModels(id), definition)
     }
 
     FullScreenScaffold(
@@ -493,14 +511,10 @@ private fun ProviderPage(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Button(onClick = { save() }, enabled = canSave, modifier = Modifier.heightIn(min = 48.dp)) {
-                                Text(
-                                    stringResource(
-                                        when {
-                                            busy -> R.string.agent_saving
-                                            isLan -> R.string.agent_save
-                                            else -> R.string.agent_save_key
-                                        },
-                                    ),
+                                BusyLabel(
+                                    running == PageAction.Saving,
+                                    if (isLan) R.string.agent_save else R.string.agent_save_key,
+                                    R.string.agent_saving,
                                 )
                             }
                             if (connection != null) {
@@ -508,30 +522,37 @@ private fun ProviderPage(
                                 OutlinedButton(
                                     onClick = {
                                         val model = testWith ?: return@OutlinedButton
-                                        run {
+                                        run(PageAction.Testing) {
                                             val keyed = connection.id in state.keys
                                             testLine(providers.testConnection(connection.id, model.id), model.name, keyed)
                                         }
                                     },
                                     enabled = !busy && testWith != null,
                                     modifier = Modifier.heightIn(min = 48.dp),
-                                ) { Text(stringResource(R.string.agent_test)) }
+                                ) { BusyLabel(running == PageAction.Testing, R.string.agent_test, R.string.agent_testing) }
                                 val savedUrl = connection.baseUrl?.let { ProviderUrls.validate(it).url }
                                 if (isLan && hasKeyField && connection.hasKey && savedUrl != null) TextButton(
                                     onClick = {
-                                        run {
+                                        run(PageAction.RemovingKey) {
                                             val id = providers.saveLan(definition.id, connection.id, connection.name, savedUrl, key = "")
                                             Strings.get(if (id == null) R.string.agent_save_failed else R.string.agent_key_removed)
                                         }
                                     },
                                     enabled = !busy,
                                     modifier = Modifier.heightIn(min = 48.dp),
-                                ) { Text(stringResource(R.string.agent_remove_key), color = MaterialTheme.colorScheme.error) }
+                                ) {
+                                    BusyLabel(
+                                        running == PageAction.RemovingKey, R.string.agent_remove_key, R.string.agent_removing_key,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                }
                                 if (definition.catalogPath != null) OutlinedButton(
-                                    onClick = { run { refreshLine(providers.refreshModels(connection.id)) } },
+                                    onClick = { run(PageAction.Refreshing) { refreshLine(providers.refreshModels(connection.id), definition) } },
                                     enabled = !busy,
                                     modifier = Modifier.heightIn(min = 48.dp),
-                                ) { Text(stringResource(R.string.agent_refresh_models)) }
+                                ) {
+                                    BusyLabel(running == PageAction.Refreshing, R.string.agent_refresh_models, R.string.agent_refreshing)
+                                }
                             }
                         }
                         line?.let {
@@ -606,6 +627,24 @@ private fun ProviderPage(
     }
 }
 
+/** What a provider's page is doing; one at a time. */
+private enum class PageAction { Saving, Testing, Refreshing, RemovingKey }
+
+/**
+ * A button label that reads [busyRes] while its own action runs. It is
+ * as wide as the wider of the two, so the row of buttons doesn't reflow
+ * when it changes.
+ */
+@Composable
+private fun BusyLabel(busy: Boolean, idleRes: Int, busyRes: Int, color: Color = Color.Unspecified) {
+    val idle = stringResource(idleRes)
+    val working = stringResource(busyRes)
+    Box(contentAlignment = Alignment.Center) {
+        Text(if (busy) idle else working, modifier = Modifier.alpha(0f).clearAndSetSemantics {})
+        Text(if (busy) working else idle, color = color)
+    }
+}
+
 /** Past this many models the page offers a filter. */
 private const val FILTER_FROM = 12
 
@@ -627,7 +666,13 @@ private fun ModelRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 56.dp)
-            .selectable(selected = isDefault, role = Role.RadioButton, onClick = onDefault)
+            // A radio button, with TalkBack's action naming the model.
+            .semantics { selected = isDefault }
+            .clickable(
+                onClickLabel = stringResource(R.string.agent_model_use_default, model.name),
+                role = Role.RadioButton,
+                onClick = onDefault,
+            )
             .padding(start = 4.dp),
     ) {
         RadioButton(selected = isDefault, onClick = null)

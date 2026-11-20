@@ -13,11 +13,15 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /** What Refresh models came to. */
-internal enum class RefreshResult { Done, NoKey, Unauthorized, Unreachable, TooLarge, Unusable, BadUrl, Cancelled, Failed }
+internal enum class RefreshResult {
+    Done, NoKey, Unauthorized, NotFound, RateLimited, ServerError, Refused, Unreachable, TimedOut, TooLarge, Unusable,
+    BadUrl, Cancelled, Failed,
+}
 
 /** What Test connection came to. Never anything the server wrote. */
 internal enum class TestResult {
-    Ok, NoKey, Unauthorized, ModelNotFound, RateLimited, ServerError, Refused, Unreachable, BadReply, BadUrl, Cancelled,
+    Ok, NoKey, Unauthorized, ModelNotFound, RateLimited, ServerError, Refused, Unreachable, TimedOut, BadReply, BadUrl,
+    Cancelled,
 }
 
 /**
@@ -253,10 +257,17 @@ internal class AgentProviders(
                     if (store.setModels(connectionId, models)) RefreshResult.Done else RefreshResult.Failed
                 }
             }
-            is ProviderReply.Status ->
-                if (reply.code == 401 || reply.code == 403) RefreshResult.Unauthorized else RefreshResult.Unreachable
+            // The server answered: never "couldn't reach" it.
+            is ProviderReply.Status -> when (reply.code) {
+                401, 403 -> RefreshResult.Unauthorized
+                404 -> RefreshResult.NotFound
+                429 -> RefreshResult.RateLimited
+                in 500..599 -> RefreshResult.ServerError
+                else -> RefreshResult.Refused
+            }
             ProviderReply.TooLarge -> RefreshResult.TooLarge
             ProviderReply.Unreachable -> RefreshResult.Unreachable
+            ProviderReply.TimedOut -> RefreshResult.TimedOut
             ProviderReply.Cancelled -> RefreshResult.Cancelled
         }
     }
@@ -275,6 +286,11 @@ internal class AgentProviders(
         val reply = client.fetch(
             connectionId, connection.revision, url,
             ProviderClient.authHeaders(definition, key), ProviderCatalog.TEST_MAX_BYTES, json = body,
+            timeoutMs = if (definition.kind == ProviderKind.Lan) {
+                ProviderClient.LAN_TEST_TIMEOUT_MS
+            } else {
+                ProviderClient.CALL_TIMEOUT_MS
+            },
         )
         when (reply) {
             is ProviderReply.Body ->
@@ -289,6 +305,7 @@ internal class AgentProviders(
             }
             ProviderReply.TooLarge -> TestResult.BadReply
             ProviderReply.Unreachable -> TestResult.Unreachable
+            ProviderReply.TimedOut -> TestResult.TimedOut
             ProviderReply.Cancelled -> TestResult.Cancelled
         }
     }

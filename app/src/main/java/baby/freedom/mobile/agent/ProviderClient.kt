@@ -1,6 +1,7 @@
 package baby.freedom.mobile.agent
 
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.InetAddress
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
@@ -11,6 +12,7 @@ import okhttp3.Callback
 import okhttp3.ConnectionPool
 import okhttp3.Dns
 import okhttp3.HttpUrl
+import okhttp3.Interceptor
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -95,6 +97,9 @@ internal sealed interface ProviderReply {
     data object TooLarge : ProviderReply
     data object Unreachable : ProviderReply
 
+    /** The server took the request but didn't finish answering within the call's deadline. */
+    data object TimedOut : ProviderReply
+
     /** AI was turned off, or the key or URL changed, before or while it ran. */
     data object Cancelled : ProviderReply
 }
@@ -118,8 +123,11 @@ internal sealed interface ProviderReply {
  */
 internal class ProviderClient(
     private val gate: RequestGate,
-    private val http: OkHttpClient = DEFAULT_HTTP,
+    http: OkHttpClient = DEFAULT_HTTP,
 ) {
+    /** [http], noting on each request when it reached a connected server. */
+    private val http: OkHttpClient = http.newBuilder().addNetworkInterceptor(SENT).build()
+
     /**
      * Fetches [url] (a GET, or a JSON POST of [json]) for [connectionId]
      * at [revision], reading at most [maxBytes] of the answer. Cancelling
@@ -135,7 +143,8 @@ internal class ProviderClient(
         json: JSONObject? = null,
         timeoutMs: Long = CALL_TIMEOUT_MS,
     ): ProviderReply {
-        val request = Request.Builder().url(url).apply {
+        val sent = Sent()
+        val request = Request.Builder().url(url).tag(Sent::class.java, sent).apply {
             header("Accept", "application/json")
             headers.forEach { (k, v) -> header(k, v) }
             if (json != null) post(json.toString().toRequestBody(JSON))
@@ -148,7 +157,20 @@ internal class ProviderClient(
                 cont.invokeOnCancellation { call.cancel() }
                 call.enqueue(object : Callback {
                     override fun onFailure(call: Call, e: IOException) {
-                        cont.resume(if (call.isCanceled()) ProviderReply.Cancelled else ProviderReply.Unreachable)
+                        cont.resume(
+                            when {
+                                // The gate moves before it cancels, so a call it
+                                // stopped no longer passes it.
+                                !gate.allows(connectionId, revision) -> ProviderReply.Cancelled
+                                // OkHttp's own deadline cancels the call too, and
+                                // reports `InterruptedIOException("timeout")`. Only
+                                // a server that took the request is "too slow"; a
+                                // connect that timed out never reached one.
+                                e is InterruptedIOException && sent.value -> ProviderReply.TimedOut
+                                call.isCanceled() -> ProviderReply.Cancelled
+                                else -> ProviderReply.Unreachable
+                            },
+                        )
                     }
 
                     override fun onResponse(call: Call, response: Response) {
@@ -159,7 +181,9 @@ internal class ProviderClient(
                         } catch (e: Throwable) {
                             ProviderReply.Unreachable
                         }
-                        cont.resume(if (call.isCanceled()) ProviderReply.Cancelled else reply)
+                        val stopped = !gate.allows(connectionId, revision) ||
+                            (call.isCanceled() && reply == ProviderReply.Unreachable)
+                        cont.resume(if (stopped) ProviderReply.Cancelled else reply)
                     }
                 })
             }
@@ -182,14 +206,32 @@ internal class ProviderClient(
                 if (buffer.size > maxBytes) return ProviderReply.TooLarge
             }
             ProviderReply.Body(buffer.readUtf8())
+        } catch (e: InterruptedIOException) {
+            ProviderReply.TimedOut
         } catch (e: IOException) {
             ProviderReply.Unreachable
         }
     }
 
+    /** Set once a request is on a connection to the server, before it is written. */
+    private class Sent {
+        @Volatile var value = false
+    }
+
     companion object {
+        private val SENT = Interceptor { chain ->
+            chain.request().tag(Sent::class.java)?.value = true
+            chain.proceed(chain.request())
+        }
+
         const val CALL_TIMEOUT_MS = 30_000L
         const val CATALOG_TIMEOUT_MS = 20_000L
+
+        /**
+         * Test connection to a server on the network: a local server may
+         * load the model from disk before it answers the first prompt.
+         */
+        const val LAN_TEST_TIMEOUT_MS = 90_000L
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
         /** `localhost` and `*.localhost` are loopback, as Chromium has it; everything else asks the system. */
@@ -213,7 +255,10 @@ internal class ProviderClient(
             .proxy(Proxy.NO_PROXY)
             .dns(LOOPBACK_DNS)
             .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            // No separate read timeout: a prompt's answer can take a while to
+            // start (a model loading), and each call's own deadline
+            // ([CALL_TIMEOUT_MS], or the one [fetch] is given) bounds it.
+            .readTimeout(0, TimeUnit.SECONDS)
             .writeTimeout(20, TimeUnit.SECONDS)
             .callTimeout(CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .build()
