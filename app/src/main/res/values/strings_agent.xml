@@ -277,6 +277,7 @@
     <string name="agent_sign_in_bad_reply">The provider\'s answer couldn\'t be used, so nothing was opened or saved.</string>
     <string name="agent_sign_in_save_failed">Signed in, but couldn\'t save it. Try again.</string>
     <string name="agent_sign_in_bad_grant">OpenAI\'s answer couldn\'t be used, so nothing was saved. Sign in again.</string>
+    <string name="agent_sign_in_unexpected">Something went wrong on this phone and the sign-in stopped. Try again.</string>
     <string name="agent_sign_in_no_device_id">Freedom couldn\'t save this phone\'s sign-in id. Try again.</string>
     <string name="agent_sign_in_port_busy">Something else on this phone is using the sign-in port (1455), maybe another sign-in. Close it and try again.</string>
     <string name="agent_sign_in_no_callback">The browser didn\'t come back in time. Sign in again.</string>

@@ -863,7 +863,7 @@ internal class AgentProviders(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            publish(generation, LoginState.Failed(providerId, LoginFailure.BadReply))
+            publish(generation, LoginState.Failed(providerId, LoginFailure.Unexpected))
         }
     }
 
@@ -883,8 +883,9 @@ internal class AgentProviders(
             }
             processHold.hold()
             try {
+                // Freedom built this page itself: failing its own check isn't OpenAI's doing.
                 if (!ChatGptLogin.isAuthorizeUrl(session.authorizeUrl)) {
-                    return publish(generation, LoginState.Failed(providerId, LoginFailure.BadReply))
+                    return publish(generation, LoginState.Failed(providerId, LoginFailure.Unexpected))
                 }
                 synchronized(loginLock) {
                     if (generation != loginGeneration) return
@@ -911,7 +912,7 @@ internal class AgentProviders(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            publish(generation, LoginState.Failed(providerId, LoginFailure.BadReply))
+            publish(generation, LoginState.Failed(providerId, LoginFailure.Unexpected))
         }
     }
 

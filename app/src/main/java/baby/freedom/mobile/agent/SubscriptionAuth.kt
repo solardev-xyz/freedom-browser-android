@@ -140,8 +140,14 @@ internal enum class LoginFailure {
     /** OpenAI refused to finish the sign-in (the code or its PKCE verifier wasn't accepted). */
     NotAccepted,
 
-    /** This installation's id ([AgentStore.deviceId]) couldn't be read or saved; nothing was sent. */
+    /** This installation's id ([AgentStore.deviceId]) couldn't be read or saved, or isn't a UUID; nothing was sent. */
     NoDeviceId,
+
+    /** OpenAI answered the code exchange, but not with a usable grant; nothing was saved. */
+    BadGrant,
+
+    /** Something on the phone failed before any answer could be judged (an unexpected error, a page Freedom built itself that didn't pass its own check). */
+    Unexpected,
 }
 
 /** A sign-in's progress, as Settings → AI shows it ([AgentProviders.login]). */

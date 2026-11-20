@@ -78,7 +78,7 @@ internal class ChatGptLogin(
      * opened (desktop). The caller must [Session.close] what it gets.
      */
     fun open(deviceId: String): Opened {
-        if (!UUID.matches(deviceId)) return Opened.Failed(LoginFailure.BadReply)
+        if (!UUID.matches(deviceId)) return Opened.Failed(LoginFailure.NoDeviceId)
         val verifier = randomValue()
         val state = randomValue()
         val server = ServerSocket()
@@ -137,7 +137,16 @@ internal class ChatGptLogin(
         private val arrival = CompletableDeferred<Arrival>()
         private val connections = HashSet<Socket>()
         private val handling = AtomicInteger()
-        private val answered = AtomicBoolean(false)
+
+        /**
+         * The page the sign-in ended with, once [answer] has run. Set, and
+         * read together with [arrival], under [answerLock]: whichever of
+         * [answer] and a callback comes second sends the page, so a
+         * callback landing as the sign-in ends (a timeout, Cancel) still
+         * gets it rather than an empty answer from [close].
+         */
+        private var answered: CallbackPage? = null
+        private val answerLock = Any()
         private val closed = AtomicBoolean(false)
 
         private val acceptor = thread(isDaemon = true, name = "chatgpt-sign-in") { acceptLoop() }
@@ -201,9 +210,14 @@ internal class ChatGptLogin(
                 return release(socket)
             }
             // The first callback that matches is the one; the browser's tab
-            // waits for its page until the sign-in has ended.
-            if (!arrival.complete(Arrival(callback, socket))) {
+            // waits for its page until the sign-in has ended, or gets it now
+            // if it already has.
+            val (taken, page) = synchronized(answerLock) { arrival.complete(Arrival(callback, socket)) to answered }
+            if (!taken) {
                 respond(socket, 409, CallbackPage.Invalid)
+                release(socket)
+            } else if (page != null) {
+                respond(socket, statusOf(page), page)
                 release(socket)
             }
         }
@@ -258,7 +272,8 @@ internal class ChatGptLogin(
             val text = pasted.trim()
             if (text.length > MAX_HEAD_BYTES) return Submitted.Invalid
             val callback = text.toHttpUrlOrNull()?.let(::callbackOf) ?: return Submitted.Invalid
-            return if (arrival.complete(Arrival(callback, null))) Submitted.Accepted else Submitted.Late
+            val taken = synchronized(answerLock) { arrival.complete(Arrival(callback, null)) }
+            return if (taken) Submitted.Accepted else Submitted.Late
         }
 
         /** Waits for the callback, up to [timeoutMs]; null when none came. */
@@ -267,14 +282,19 @@ internal class ChatGptLogin(
 
         /** Tells the browser's tab, if it's waiting, how the sign-in ended. Only the first answer counts. */
         fun answer(page: CallbackPage) {
-            if (!answered.compareAndSet(false, true)) return
-            @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-            val socket = if (arrival.isCompleted) arrival.getCompleted().socket else null
+            val socket = synchronized(answerLock) {
+                if (answered != null) return
+                answered = page
+                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                if (arrival.isCompleted) arrival.getCompleted().socket else null
+            }
             if (socket != null) {
-                respond(socket, if (page == CallbackPage.Success) 200 else 400, page)
+                respond(socket, statusOf(page), page)
                 release(socket)
             }
         }
+
+        private fun statusOf(page: CallbackPage) = if (page == CallbackPage.Success) 200 else 400
 
         /** Stops listening; a tab still waiting is told the sign-in was cancelled. Idempotent. */
         override fun close() {
@@ -331,7 +351,7 @@ internal class ChatGptLogin(
                 .add("resource", RESOURCE)
                 .build(),
         )
-        return tokens(reply, callback.clientId, needsIdToken = true)
+        return tokens(reply, callback.clientId, needsIdToken = true, unusable = LoginFailure.BadGrant)
     }
 
     /** Renews [credential] as the client it was issued to (Pi's `refreshAccessToken`). */
@@ -349,7 +369,7 @@ internal class ChatGptLogin(
         )
         // A refresh token that's been used, revoked or expired.
         if (reply is AuthReply.Answer && reply.code in 400..403) return RefreshOutcome.SignInAgain
-        return when (val t = tokens(reply, clientId, needsIdToken = false)) {
+        return when (val t = tokens(reply, clientId, needsIdToken = false, unusable = LoginFailure.BadReply)) {
             is SubscriptionAuth.Finished.Done -> RefreshOutcome.Fresh(t.credential)
             is SubscriptionAuth.Finished.Failed -> RefreshOutcome.Failed(t.failure)
         }
@@ -358,9 +378,16 @@ internal class ChatGptLogin(
     /**
      * A token answer, checked as desktop checks it: access and refresh
      * tokens, a scope that includes direct use of the token
-     * ([DIRECT_SCOPE]), a lifetime, and on sign-in an ID token too.
+     * ([DIRECT_SCOPE]), a lifetime, and on sign-in an ID token too. An
+     * answer that falls short is [unusable]: [LoginFailure.BadGrant] on
+     * sign-in, so only an answer OpenAI actually gave is blamed on it.
      */
-    private fun tokens(reply: AuthReply, clientId: String, needsIdToken: Boolean): SubscriptionAuth.Finished {
+    private fun tokens(
+        reply: AuthReply,
+        clientId: String,
+        needsIdToken: Boolean,
+        unusable: LoginFailure,
+    ): SubscriptionAuth.Finished {
         val body = when (reply) {
             is AuthReply.Failed -> return SubscriptionAuth.Finished.Failed(reply.failure)
             is AuthReply.Answer -> {
@@ -368,7 +395,7 @@ internal class ChatGptLogin(
                     return SubscriptionAuth.Finished.Failed(LoginFailure.NotAccepted)
                 }
                 if (reply.code !in 200..299) return SubscriptionAuth.Finished.Failed(AuthHttp.failureOf(reply.code))
-                reply.json() ?: return SubscriptionAuth.Finished.Failed(LoginFailure.BadReply)
+                reply.json() ?: return SubscriptionAuth.Finished.Failed(unusable)
             }
         }
         fun text(key: String) = (body.opt(key) as? String)?.takeIf { it.isNotBlank() }
@@ -381,7 +408,7 @@ internal class ChatGptLogin(
             DIRECT_SCOPE !in scope.trim().split(WHITESPACE) ||
             !SubscriptionAuth.headerSafe(access) || !SubscriptionAuth.headerSafe(refresh)
         ) {
-            return SubscriptionAuth.Finished.Failed(LoginFailure.BadReply)
+            return SubscriptionAuth.Finished.Failed(unusable)
         }
         val lifetime = (expiresIn * 1000).toLong().coerceAtMost(MAX_LIFETIME_MS)
         return SubscriptionAuth.Finished.Done(

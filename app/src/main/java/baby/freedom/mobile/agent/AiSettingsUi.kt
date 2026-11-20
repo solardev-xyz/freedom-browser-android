@@ -720,9 +720,8 @@ private fun ProviderPage(
     }
 }
 
-private fun loginLine(providerId: String, failure: LoginFailure): String = Strings.get(
-    // Sign in with ChatGPT has opened a page by then: say only that nothing was saved.
-    if (failure == LoginFailure.BadReply && providerId == ChatGptLogin.PROVIDER) R.string.agent_sign_in_bad_grant else when (failure) {
+private fun loginLine(failure: LoginFailure): String = Strings.get(
+    when (failure) {
         LoginFailure.Denied -> R.string.agent_sign_in_denied
         LoginFailure.Expired -> R.string.agent_sign_in_expired
         LoginFailure.NotEnabled -> R.string.agent_sign_in_not_enabled
@@ -738,6 +737,8 @@ private fun loginLine(providerId: String, failure: LoginFailure): String = Strin
         LoginFailure.NotCompleted -> R.string.agent_sign_in_not_completed
         LoginFailure.NotAccepted -> R.string.agent_sign_in_not_accepted
         LoginFailure.NoDeviceId -> R.string.agent_sign_in_no_device_id
+        LoginFailure.BadGrant -> R.string.agent_sign_in_bad_grant
+        LoginFailure.Unexpected -> R.string.agent_sign_in_unexpected
     },
 )
 
@@ -932,7 +933,7 @@ private fun SubscriptionSignIn(
                     ) { Text(stringResource(R.string.agent_sign_in_cancel)) }
                 }
                 val status = when (mine) {
-                    is LoginState.Failed -> loginLine(definition.id, mine.failure)
+                    is LoginState.Failed -> loginLine(mine.failure)
                     is LoginState.Done -> Strings.get(R.string.agent_sign_in_done, definition.name)
                     else -> null
                 }

@@ -306,7 +306,7 @@ class ChatGptLoginTest {
             val (status, page) = get(callback(stateOf(session)))
             assertEquals(bad.toString(), 400, status)
             assertTrue(page.contains("Connection unsuccessful"))
-            assertEquals(bad.toString(), SubscriptionAuth.Finished.Failed(LoginFailure.BadReply), finished.await())
+            assertEquals(bad.toString(), SubscriptionAuth.Finished.Failed(LoginFailure.BadGrant), finished.await())
             session.close()
         }
     }
@@ -320,7 +320,46 @@ class ChatGptLoginTest {
         } finally {
             holder.close()
         }
-        assertEquals(ChatGptLogin.Opened.Failed(LoginFailure.BadReply), login.open("not-a-uuid"))
+        // A sign-in id that isn't one is this phone's problem, not OpenAI's.
+        assertEquals(ChatGptLogin.Opened.Failed(LoginFailure.NoDeviceId), login.open("not-a-uuid"))
+    }
+
+    @Test
+    fun `a callback that lands just after the sign-in ended still gets its page`() = runBlocking {
+        // The timeout (or Cancel) answers first; the tab arriving after it
+        // is told how it ended, not left with an empty answer by close().
+        for ((ending, words) in listOf(CallbackPage.Failed to "Connection unsuccessful", CallbackPage.Cancelled to "Connection cancelled")) {
+            val session = open()
+            try {
+                session.answer(ending)
+                val (status, page) = get(callback(stateOf(session)))
+                assertEquals(ending.toString(), 400, status)
+                assertTrue(page, page.contains(words))
+                // Only the first answer counts, and the address is taken.
+                session.answer(CallbackPage.Success)
+                assertEquals(ChatGptLogin.Submitted.Late, session.submit("http://127.0.0.1:$port" + callback(stateOf(session))))
+            } finally {
+                session.close()
+            }
+        }
+        assertTrue(tokenRequests().isEmpty())
+    }
+
+    @Test
+    fun `answering and a callback racing each other always give the tab its page`() = runBlocking {
+        repeat(40) {
+            val session = open()
+            try {
+                val tab = async(Dispatchers.IO) { get(callback(stateOf(session))) }
+                val ending = async(Dispatchers.IO) { session.answer(CallbackPage.Failed) }
+                ending.await()
+                val (status, page) = tab.await()
+                assertEquals(400, status)
+                assertTrue(page, page.contains("Connection unsuccessful"))
+            } finally {
+                session.close()
+            }
+        }
     }
 
     @Test
