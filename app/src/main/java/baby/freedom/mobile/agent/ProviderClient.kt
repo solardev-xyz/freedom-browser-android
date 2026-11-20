@@ -106,6 +106,25 @@ internal class RequestGate {
     internal fun inFlight(): Int = synchronized(lock) { calls.size }
 }
 
+/** How a chat step's stream ended (#574), without anything the server said. */
+internal sealed interface StreamEnd {
+    /** The body ended; whether it was a whole answer is the parser's call. */
+    data object Ended : StreamEnd
+
+    /** The server answered with [code]; its body is never read or shown. */
+    data class Status(val code: Int) : StreamEnd
+
+    /** The stream carried an error, or an answer that can't be used. */
+    data class Wire(val error: WireError) : StreamEnd
+    data object Unreachable : StreamEnd
+
+    /** The server stopped sending for [ProviderClient.STREAM_IDLE_MS]. */
+    data object TimedOut : StreamEnd
+
+    /** AI was turned off, or the key or URL changed, before or while it ran. */
+    data object Cancelled : StreamEnd
+}
+
 /** What a request to a provider came back with, without anything the server said. */
 internal sealed interface ProviderReply {
     data class Body(val text: String) : ProviderReply
@@ -123,8 +142,9 @@ internal sealed interface ProviderReply {
 }
 
 /**
- * The requests Settings → AI makes (#573): list a provider's models and
- * send one short Test connection prompt. No chat yet (#574).
+ * The requests made to model providers: Settings → AI's (#573) model
+ * lists and one short Test connection prompt ([fetch]), and a chat's
+ * streamed steps (#574, [stream]).
  *
  * One OkHttp client for every provider: no redirects (desktop's
  * `redirect: 'error'`: a server can't move a request, and its key, to
@@ -145,6 +165,12 @@ internal class ProviderClient(
 ) {
     /** [http], noting on each request when it reached a connected server. */
     private val http: OkHttpClient = http.newBuilder().addNetworkInterceptor(SENT).build()
+
+    /** The same, for a chat's streamed answers: no whole-call deadline, but an idle one. */
+    private val streamHttp: OkHttpClient = this.http.newBuilder()
+        .callTimeout(0, TimeUnit.MILLISECONDS)
+        .readTimeout(STREAM_IDLE_MS, TimeUnit.MILLISECONDS)
+        .build()
 
     /**
      * Fetches [url] (a GET, or a JSON POST of [json]) for [connectionId]
@@ -212,6 +238,84 @@ internal class ProviderClient(
         }
     }
 
+    /**
+     * Streams one chat step (#574): POSTs [json] to [url] for
+     * [connectionId] at [revision] and hands each server-sent event to
+     * [onEvent] (its `event:` name, if any, and its data) as it arrives,
+     * on OkHttp's thread. [onEvent] may throw [WireException] to end the
+     * stream; the answer's body is never read when the server refuses
+     * (a non-2xx status).
+     *
+     * There's no deadline on the whole answer (a long one takes as long
+     * as it takes) but the server must keep sending: [STREAM_IDLE_MS]
+     * without a byte ends it as [StreamEnd.TimedOut]. Cancelling the
+     * caller cancels the call at once, from the cancelling thread, as do
+     * [RequestGate.disable] and [RequestGate.bump] ([StreamEnd.Cancelled]).
+     */
+    suspend fun stream(
+        connectionId: String,
+        revision: Long,
+        url: HttpUrl,
+        headers: Map<String, String>,
+        json: JSONObject,
+        onEvent: (event: String?, data: String) -> Unit,
+    ): StreamEnd {
+        val sent = Sent()
+        val request = Request.Builder().url(url).tag(Sent::class.java, sent).apply {
+            header("Accept", "text/event-stream")
+            headers.forEach { (k, v) -> header(k, v) }
+            post(json.toString().toRequestBody(JSON))
+        }.build()
+        val call = streamHttp.newCall(request)
+        call.timeout().timeout(0, TimeUnit.MILLISECONDS)
+        if (!gate.register(call, connectionId, revision)) return StreamEnd.Cancelled
+        return try {
+            suspendCancellableCoroutine { cont ->
+                // From the thread that cancels, never the one blocked reading.
+                cont.invokeOnCancellation { call.cancel() }
+                call.enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {
+                        cont.resume(
+                            when {
+                                gate.stopped(call, connectionId, revision) -> StreamEnd.Cancelled
+                                e is InterruptedIOException && sent.value -> StreamEnd.TimedOut
+                                else -> StreamEnd.Unreachable
+                            },
+                        )
+                    }
+
+                    override fun onResponse(call: Call, response: Response) {
+                        val end = try {
+                            response.use { readEvents(it, onEvent) }
+                        } catch (e: WireException) {
+                            StreamEnd.Wire(e.error)
+                        } catch (e: SseReader.TooLarge) {
+                            StreamEnd.Wire(WireError.BadReply)
+                        } catch (e: InterruptedIOException) {
+                            StreamEnd.TimedOut
+                        } catch (e: Throwable) {
+                            // Anything thrown here is on OkHttp's own thread:
+                            // it would crash the app and leave the caller waiting.
+                            StreamEnd.Unreachable
+                        }
+                        // Checked before the call is unregistered, which forgets the gate's cancels.
+                        val stopped = gate.stopped(call, connectionId, revision)
+                        cont.resume(if (stopped) StreamEnd.Cancelled else end)
+                    }
+                })
+            }
+        } finally {
+            gate.unregister(call)
+        }
+    }
+
+    private fun readEvents(response: Response, onEvent: (String?, String) -> Unit): StreamEnd {
+        if (!response.isSuccessful) return StreamEnd.Status(response.code)
+        val body = response.body ?: return StreamEnd.Unreachable
+        SseReader(body.source()).forEach(onEvent)
+        return StreamEnd.Ended
+    }
+
     private fun read(response: Response, maxBytes: Long): ProviderReply {
         if (!response.isSuccessful) return ProviderReply.Status(response.code)
         val body = response.body ?: return ProviderReply.Unreachable
@@ -245,6 +349,12 @@ internal class ProviderClient(
         }
 
         const val CALL_TIMEOUT_MS = 30_000L
+
+        /**
+         * How long a chat's answer may go without a byte (#574): a server
+         * on the network may load the model from disk before the first.
+         */
+        const val STREAM_IDLE_MS = 120_000L
         const val CATALOG_TIMEOUT_MS = 20_000L
 
         /**
@@ -310,31 +420,42 @@ internal class ProviderClient(
             }
         }
 
+        /**
+         * Where [definition]'s prompts go, at [base]: Test connection's
+         * one and a chat's (#574).
+         */
+        fun endpoint(definition: ProviderDefinition, base: HttpUrl): HttpUrl = when (definition.wire) {
+            WireFormat.AnthropicMessages -> base.plus("messages")
+            WireFormat.OpenAiResponses -> base.plus("responses")
+            WireFormat.OpenAiChat -> {
+                val api = if (definition.id == ProviderCatalog.OLLAMA) {
+                    rootOfOllama(base).newBuilder().addPathSegment("v1").build()
+                } else {
+                    base
+                }
+                api.plus("chat/completions")
+            }
+        }
+
         /** The Test connection request for [definition] at [base]: its URL and body. */
         fun testRequest(definition: ProviderDefinition, base: HttpUrl, modelId: String): Pair<HttpUrl, JSONObject> {
             val user = JSONObject().put("role", "user").put("content", TEST_PROMPT)
+            val url = endpoint(definition, base)
             return when (definition.wire) {
-                WireFormat.AnthropicMessages -> base.plus("messages") to JSONObject()
+                WireFormat.AnthropicMessages -> url to JSONObject()
                     .put("model", modelId)
                     .put("max_tokens", TEST_MAX_TOKENS)
                     .put("messages", JSONArray().put(user))
-                WireFormat.OpenAiResponses -> base.plus("responses") to JSONObject()
+                WireFormat.OpenAiResponses -> url to JSONObject()
                     .put("model", modelId)
                     .put("input", TEST_PROMPT)
                     .put("max_output_tokens", TEST_MAX_TOKENS)
                     .put("store", false)
-                WireFormat.OpenAiChat -> {
-                    val api = if (definition.id == ProviderCatalog.OLLAMA) {
-                        rootOfOllama(base).newBuilder().addPathSegment("v1").build()
-                    } else {
-                        base
-                    }
-                    api.plus("chat/completions") to JSONObject()
-                        .put("model", modelId)
-                        .put("max_tokens", TEST_MAX_TOKENS)
-                        .put("stream", false)
-                        .put("messages", JSONArray().put(user))
-                }
+                WireFormat.OpenAiChat -> url to JSONObject()
+                    .put("model", modelId)
+                    .put("max_tokens", TEST_MAX_TOKENS)
+                    .put("stream", false)
+                    .put("messages", JSONArray().put(user))
             }
         }
 
