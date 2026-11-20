@@ -65,9 +65,10 @@ import baby.freedom.mobile.browser.restartsTapGuard
 internal fun AgentApprovalHost() {
     val approval by AgentApprovals.shown.collectAsState()
     val transfer by AgentTransfers.shown.collectAsState()
+    val domain by AgentDomains.shown.collectAsState()
     val shown = approval ?: return
-    // A wallet transfer's sheet asked earlier (#596) comes first: never both at once.
-    if (transfer.let { it != null && it.id < shown.id }) return
+    // A wallet transfer's (#596) or a name transaction's (#599) sheet asked earlier comes first: never two at once.
+    if (!agentSheetFirst(shown.id, transfer?.id, domain?.id)) return
     androidx.compose.runtime.key(shown.id) {
         val tap = rememberArmedTapGuard(shown.id)
         val guard = tap.guard

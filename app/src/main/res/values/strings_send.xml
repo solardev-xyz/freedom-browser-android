@@ -106,6 +106,8 @@
     <string name="send_requester_swarm_node">your Swarm node (funding and a postage stamp)</string>
     <!-- A name registration's transaction (#579). %1$s: the name -->
     <string name="send_requester_name">registering or renewing %1$s</string>
+    <!-- A name's record write (#599). %1$s: the name -->
+    <string name="send_requester_name_records">changing the records of %1$s</string>
     <string name="send_requester_pairing_code">a scanned pairing code</string>
 
     <!-- wallet/Send.kt: recipients -->

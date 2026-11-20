@@ -118,15 +118,19 @@ internal object NameAbi {
     }
 
     /** The dynamic `string` at the head word [index] of [words], or null when malformed. */
-    fun dynamicString(words: List<ByteArray>, index: Int): String? {
+    fun dynamicString(words: List<ByteArray>, index: Int): String? = dynamicBytes(words, index)?.let { String(it, Charsets.UTF_8) }
+
+    /** The dynamic `bytes` at the head word [index] of [words], or null when malformed. */
+    fun dynamicBytes(words: List<ByteArray>, index: Int): ByteArray? {
         val offset = words.getOrNull(index)?.let(::wordUint) ?: return null
         if (offset.mod(BigInteger.valueOf(32)).signum() != 0 || offset > BigInteger.valueOf(32L * words.size)) return null
         val at = offset.toInt() / 32
         val length = words.getOrNull(at)?.let(::wordUint) ?: return null
         if (length > BigInteger.valueOf(32L * (words.size - at - 1))) return null
         val n = length.toInt()
-        val data = (at + 1 until at + 1 + (n + 31) / 32).fold(ByteArray(0)) { acc, i -> acc + words[i] }.copyOf(n)
-        return String(data, Charsets.UTF_8)
+        val data = ByteArray(((n + 31) / 32) * 32)
+        for (i in 0 until (n + 31) / 32) words[at + 1 + i].copyInto(data, i * 32)
+        return data.copyOf(n)
     }
 
     fun ByteArray.toHexString(): String = joinToString("") { "%02x".format(it) }
