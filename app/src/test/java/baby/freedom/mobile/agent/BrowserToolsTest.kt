@@ -102,6 +102,10 @@ class BrowserToolsTest {
             return canFront
         }
 
+        /** Whether the tab is already on screen, for a step the mode lets run without a card. */
+        var shown: () -> Boolean = { true }
+        override fun onScreen(id: Long) = shown()
+
         /** Run between a tap's touch down and its lift. */
         var duringTap: () -> Unit = {}
         val cancelledTaps = ArrayList<Pair<Float, Float>>()
@@ -148,12 +152,25 @@ class BrowserToolsTest {
     private val asked = ArrayList<AgentApproval>()
     private var answer: (AgentApproval) -> ApprovalOutcome = { ApprovalOutcome.Approved }
 
-    private fun toolset(session: String = "chat") = BrowserToolset(
+    private fun toolset(session: String = "chat", approvals: ChatApprovals = ChatApprovals.AskEveryTime) = BrowserToolset(
         session,
         browser = { host },
         ask = { a -> asked += a; answer(a) },
         pageScript = { "PAGE" },
+        approvals = approvals,
     )
+
+    /** A chat in [mode] whose classifier answers [check], recording what it was given. */
+    private class Approvals(var mode0: ApprovalMode, var check: InteractionClassification) : ChatApprovals {
+        val inputs = ArrayList<InteractionInput>()
+        override val mode get() = mode0
+        override suspend fun classifyInteraction(input: InteractionInput): InteractionClassification {
+            inputs += input
+            return check
+        }
+    }
+
+    private val ordinary = InteractionClassification(InteractionKind.ORDINARY, 0.95, "Open the result.", emptyList())
 
     private fun page(id: Long, url: String = "example.com/", private: Boolean = false, internal: Boolean = false, document: Int = 3) =
         AgentTab(id, url, "Example", loading = false, private = private, internal = internal, document = document, active = false)
@@ -610,5 +627,178 @@ class BrowserToolsTest {
         val a = asked.single()
         assertEquals("embedded.example", (a.action as AgentAction.Dialog).from)
         assertEquals("example.com", a.site)
+    }
+
+    @Test
+    fun `allow website interactions clicks without a card, still bound to the page`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val approvals = Approvals(ApprovalMode.AllowWebsiteInteractions, InteractionIntentClassifier.uncertain())
+        val tools = toolset(approvals = approvals)
+        val ref = snapshotRef(tools)
+        assertFalse(tools.call("browser_click", JSONObject().put("ref", ref)).isError)
+        assertTrue(asked.isEmpty())
+        assertTrue(approvals.inputs.isEmpty())
+        assertEquals(listOf(100f to 200f), host.taps)
+        // The page changing before it runs refuses it, card or no card.
+        val again = snapshotRef(tools)
+        host.onFront = { host.add(page(1, document = 4)) }
+        assertEquals("STALE_ELEMENT_REFERENCE", tools.call("browser_click", JSONObject().put("ref", again)).code())
+        assertEquals(1, host.taps.size)
+        // A navigation runs without a card too.
+        host.onFront = {}
+        assertFalse(tools.call("browser_navigate", JSONObject().put("url", "https://example.org/")).isError)
+        assertTrue(asked.isEmpty())
+    }
+
+    @Test
+    fun `a relaxed mode never takes the screen without the user's tap`() = runBlocking {
+        for (mode in listOf(ApprovalMode.AllowWebsiteInteractions, ApprovalMode.SensitiveActions)) {
+            host.tabs.clear()
+            AgentTabs.clear()
+            asked.clear()
+            host.fronted.clear()
+            host.taps.clear()
+            host.add(page(1))
+            AgentTabs.hold(1, "chat", private = false)
+            val tools = toolset(approvals = Approvals(mode, ordinary))
+            // Another tab, a panel or the chat is on screen: switching asks, saying why.
+            host.shown = { false }
+            answer = { ApprovalOutcome.Declined }
+            assertEquals("$mode", "USER_DECLINED", tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).code())
+            assertEquals(ApprovalCheck.NeedsScreen, asked.single().check)
+            assertTrue(host.fronted.isEmpty())
+            assertTrue(host.taps.isEmpty())
+            // The user's OK switches to it, as any approved card does.
+            asked.clear()
+            answer = { ApprovalOutcome.Approved }
+            assertFalse(tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).isError)
+            assertEquals(1, asked.size)
+            assertEquals(listOf(1L), host.fronted)
+            assertEquals(1, host.taps.size)
+            // On screen when decided, gone before it runs: refused, nothing switched or tapped.
+            asked.clear()
+            host.fronted.clear()
+            var reads = 0
+            host.shown = { reads++ == 0 }
+            assertEquals("CAPABILITY_UNAVAILABLE", tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).code())
+            assertTrue(asked.isEmpty())
+            assertTrue(host.fronted.isEmpty())
+            assertEquals(1, host.taps.size)
+            // Already on screen: it runs without a card.
+            host.shown = { true }
+            assertFalse(tools.call("browser_click", JSONObject().put("ref", snapshotRef(tools))).isError)
+            assertTrue(asked.isEmpty())
+            assertEquals(2, host.taps.size)
+        }
+        host.shown = { true }
+    }
+
+    @Test
+    fun `downloads, file choosers and dialog answers ask in every mode`() = runBlocking {
+        for (mode in ApprovalMode.entries) {
+            for (effect in listOf("file_download", "file_upload")) {
+                host.tabs.clear()
+                AgentTabs.clear()
+                asked.clear()
+                host.add(page(1))
+                AgentTabs.hold(1, "chat", private = false)
+                host.control = JSONObject().put("role", "link").put("tag", "a").put("name", "Get it").put("effect", effect)
+                val approvals = Approvals(mode, ordinary)
+                val tools = toolset(approvals = approvals)
+                val ref = snapshotRef(tools)
+                assertFalse(tools.call("browser_click", JSONObject().put("ref", ref)).isError)
+                assertEquals("$mode $effect", 1, asked.size)
+                assertTrue(approvals.inputs.isEmpty())
+            }
+            asked.clear()
+            host.dialog = AgentDialog("confirm", "Leave?", null, "https://example.com/")
+            val approvals = Approvals(mode, ordinary)
+            val tools = toolset(approvals = approvals)
+            tools.call("browser_focus_tab", JSONObject().put("tabId", "1"))
+            val dialogRef = tools.call("browser_get_dialog").result().getJSONObject("dialog").getString("dialogRef")
+            assertFalse(tools.call("browser_handle_dialog", JSONObject().put("dialogRef", dialogRef).put("accept", true)).isError)
+            assertEquals("$mode dialog", 1, asked.size)
+            assertTrue(approvals.inputs.isEmpty())
+        }
+    }
+
+    @Test
+    fun `sensitive actions runs what the check calls ordinary and asks, with its reason, otherwise`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val approvals = Approvals(ApprovalMode.SensitiveActions, ordinary)
+        val tools = toolset(approvals = approvals)
+        val ref = snapshotRef(tools)
+        assertFalse(tools.call("browser_click", JSONObject().put("ref", ref).put("intent", "Open details")).isError)
+        assertTrue(asked.isEmpty())
+        val input = approvals.inputs.single()
+        assertEquals("browser_click", input.operation)
+        assertEquals("Open details", input.intent)
+        assertEquals("example.com", input.origin)
+        assertEquals("Search", input.label)
+        assertEquals(1, host.taps.size)
+
+        approvals.check = InteractionClassification(InteractionKind.CONSEQUENTIAL, 0.97, "Posts the comment.", emptyList())
+        val ref2 = snapshotRef(tools)
+        assertFalse(tools.call("browser_click", JSONObject().put("ref", ref2)).isError)
+        assertEquals(ApprovalCheck.Judged("Posts the comment."), asked.single().check)
+        assertEquals(2, host.taps.size)
+
+        // A form submission asks without the model.
+        asked.clear()
+        approvals.inputs.clear()
+        approvals.check = ordinary
+        host.control = JSONObject(host.control.toString()).put("effect", "form_submission").put("target", "https://example.com/post")
+        val ref3 = snapshotRef(tools)
+        answer = { ApprovalOutcome.Declined }
+        assertEquals("USER_DECLINED", tools.call("browser_click", JSONObject().put("ref", ref3)).code())
+        assertEquals(ApprovalCheck.SendsForm, asked.single().check)
+        assertTrue(approvals.inputs.isEmpty())
+        assertEquals(2, host.taps.size)
+
+        // A check that gave no answer says so, not as the model's word.
+        asked.clear()
+        answer = { ApprovalOutcome.Approved }
+        host.control = JSONObject().put("role", "button").put("tag", "button").put("name", "Search")
+        approvals.check = InteractionIntentClassifier.uncertain(ClassifierReason.TIMEOUT)
+        val ref4 = snapshotRef(tools)
+        assertFalse(tools.call("browser_click", JSONObject().put("ref", ref4)).isError)
+        assertEquals(ApprovalCheck.NoAnswer, asked.single().check)
+    }
+
+    @Test
+    fun `the action kinds follow what the page's markup says, which can only make it ask`() {
+        val t = PageTarget("button", "button", "Go")
+        assertEquals(ActionKind.PageInteraction, BrowserToolset.kindOf(AgentAction.Click(t)))
+        assertEquals(ActionKind.FormSubmission, BrowserToolset.kindOf(AgentAction.Press(t.copy(effect = "form_submission"), "Enter")))
+        assertEquals(ActionKind.Download, BrowserToolset.kindOf(AgentAction.Click(t.copy(effect = "file_download"))))
+        assertEquals(ActionKind.Upload, BrowserToolset.kindOf(AgentAction.Click(t.copy(effect = "file_upload"))))
+        assertEquals(ActionKind.Navigate, BrowserToolset.kindOf(AgentAction.Navigate("https://a.example/", newTab = true)))
+        assertEquals(ActionKind.Dialog, BrowserToolset.kindOf(AgentAction.Dialog("alert", "hi", true, null)))
+        assertEquals(ActionKind.PageInteraction, BrowserToolset.kindOf(AgentAction.Scroll(null, "down", 1.0)))
+        // A password or one-time-code field: typing or a key into it is a credential; a tap isn't.
+        val code = PageTarget("textbox", "input", "Code", sensitive = true)
+        assertEquals(ActionKind.Credential, BrowserToolset.kindOf(AgentAction.Type(code, "123456", replace = true)))
+        assertEquals(ActionKind.Credential, BrowserToolset.kindOf(AgentAction.Press(code, "5")))
+        assertEquals(ActionKind.PageInteraction, BrowserToolset.kindOf(AgentAction.Click(code)))
+        // The page's markup for a form still wins: it asks either way.
+        assertEquals(ActionKind.FormSubmission, BrowserToolset.kindOf(AgentAction.Press(code.copy(effect = "form_submission"), "Enter")))
+    }
+
+    @Test
+    fun `typing into a password or one-time-code field asks in sensitive actions without the model`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        host.control = JSONObject().put("role", "textbox").put("tag", "input").put("name", "Code").put("sensitive", true)
+        val approvals = Approvals(ApprovalMode.SensitiveActions, ordinary)
+        val tools = toolset(approvals = approvals)
+        val ref = snapshotRef(tools)
+        answer = { ApprovalOutcome.Declined }
+        assertEquals("USER_DECLINED", tools.call("browser_type", JSONObject().put("ref", ref).put("text", "123456")).code())
+        val card = asked.single()
+        assertEquals(ApprovalCheck.Credential, card.check)
+        assertTrue((card.action as AgentAction.Type).target.sensitive)
+        assertTrue(approvals.inputs.isEmpty())
     }
 }

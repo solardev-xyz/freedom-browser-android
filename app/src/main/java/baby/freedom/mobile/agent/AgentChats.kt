@@ -69,6 +69,47 @@ internal class AgentChats(
 
     private val registries = java.util.concurrent.ConcurrentHashMap<String, ToolRegistry>()
 
+    /** Each chat's approval mode (#595), as last read from or written to its session. */
+    private val modes = java.util.concurrent.ConcurrentHashMap<String, ApprovalMode>()
+
+    /** A running turn's classifier: the turn's own model, and the request it's for. */
+    private class TurnCheck(val run: ClassifierRun, val userText: String)
+
+    private val checks = java.util.concurrent.ConcurrentHashMap<String, TurnCheck>()
+
+    /** [sessionId]'s approval mode, the strictest until its session is read. */
+    fun modeOf(sessionId: String): ApprovalMode = modes[sessionId] ?: ApprovalMode.DEFAULT
+
+    /**
+     * [sessionId]'s approval mode and classifier, for its browser tools:
+     * the mode as it is when an action is decided, the classifier on the
+     * model of the turn that's running (none running: uncertain, so it asks).
+     */
+    fun approvalsOf(sessionId: String): ChatApprovals = object : ChatApprovals {
+        override val mode: ApprovalMode get() = modeOf(sessionId)
+
+        override suspend fun classifyInteraction(input: InteractionInput): InteractionClassification {
+            val check = checks[sessionId] ?: return InteractionIntentClassifier.uncertain(ClassifierReason.UNAVAILABLE)
+            return InteractionIntentClassifier.classify(check.run, input, check.userText)
+        }
+    }
+
+    /**
+     * Sets [sessionId]'s approval mode; it applies from the next action
+     * the agent takes, in a turn already running too. False if it
+     * couldn't be saved (the mode stays as it was).
+     */
+    suspend fun setMode(sessionId: String, mode: ApprovalMode): Boolean = withContext(NonCancellable) {
+        try {
+            if (dao.setApprovalMode(sessionId, mode.wire) == 0) return@withContext false
+            modes[sessionId] = mode
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "saving a chat's approval mode failed (${e.javaClass.simpleName})")
+            false
+        }
+    }
+
     private fun toolsOf(sessionId: String): ToolRegistry = registries.getOrPut(sessionId) { toolsFor(sessionId) }
 
     /** Set once turns a stopped app left running are marked interrupted: nothing starts before. */
@@ -94,11 +135,12 @@ internal class AgentChats(
 
     /**
      * Sends [text] with [model] in session [sessionId] (a new chat when
-     * null) and starts its turn. Returns the session's id, or null when
-     * nothing was sent: the session is still running a turn, the text is
-     * empty or too long, or it couldn't be saved.
+     * null, under approval [mode]; an existing chat keeps its own, set
+     * with [setMode]) and starts its turn. Returns the session's id, or
+     * null when nothing was sent: the session is still running a turn,
+     * the text is empty or too long, or it couldn't be saved.
      */
-    suspend fun send(sessionId: String?, text: String, model: ModelRef): String? {
+    suspend fun send(sessionId: String?, text: String, model: ModelRef, mode: ApprovalMode = ApprovalMode.DEFAULT): String? {
         val message = text.trim()
         if (message.isEmpty() || message.length > MAX_MESSAGE_CHARS) return null
         swept.await()
@@ -118,9 +160,10 @@ internal class AgentChats(
                 withContext(NonCancellable) {
                     if (sessionId == null) {
                         dao.start(
-                            ChatSession(id, titleOf(message), model.connectionId, model.modelId, now, now),
+                            ChatSession(id, titleOf(message), model.connectionId, model.modelId, now, now, approvalMode = mode.wire),
                             turn,
                         )
+                        modes[id] = mode
                         turn
                     } else {
                         dao.session(sessionId) ?: return@withContext null
@@ -150,11 +193,16 @@ internal class AgentChats(
         var lastShown = 0L
         var lastSaved = started
         var outcome: TurnOutcome? = null
+        var check: TurnCheck? = null
         try {
             outcome = when (val target = providers.chatTarget(model)) {
                 is ChatTarget.Unavailable -> TurnOutcome("", target.error)
                 is ChatTarget.Ready -> {
                     val session = dao.session(turn.sessionId)
+                    // Only if not set since: a mode picked while the row was read wins.
+                    session?.let { modes.putIfAbsent(turn.sessionId, ApprovalMode.of(it.approvalMode)) }
+                    val stream = ModelStream { request, onText -> providers.streamStep(target, request, onText) }
+                    check = TurnCheck(ClassifierRun(stream, model.modelId), turn.userText).also { checks[turn.sessionId] = it }
                     // Desktop's hydration: only whole turns go back to the model.
                     val history = dao.turns(turn.sessionId)
                         .filter { it.position < turn.position && it.status == ChatStatus.COMPLETED && it.assistantText.isNotBlank() }
@@ -163,11 +211,15 @@ internal class AgentChats(
                     val prompt = systemPromptFor(target)
                     val toolsKey = "${target.connection.id}\u0000${target.connection.revision}\u0000${model.modelId}"
                     val loop = AgentLoop(
-                        model = { request, onText -> providers.streamStep(target, request, onText) },
+                        model = stream,
                         tools = toolsOf(turn.sessionId),
                         limits = limitsOf(target.definition),
                         modelId = model.modelId,
-                        systemPrompt = { prompt + "\n\n" + TimeContext.block(Instant.ofEpochMilli(clock()), zone()) },
+                        // The approval mode as it is for each request: the user can change it mid-turn.
+                        systemPrompt = {
+                            prompt + "\n\n" + ApprovalPolicy.prompt(modeOf(turn.sessionId)) + "\n\n" +
+                                TimeContext.block(Instant.ofEpochMilli(clock()), zone())
+                        },
                         toolsUnsupported = toolsKey in noTools,
                         onToolsUnsupported = { noTools += toolsKey },
                     )
@@ -207,6 +259,7 @@ internal class AgentChats(
             Log.w(TAG, "a chat turn failed (${e.javaClass.simpleName})")
             outcome = TurnOutcome(runCatching { latest.toString() }.getOrDefault(""), ChatError.BadReply)
         } finally {
+            check?.let { checks.remove(turn.sessionId, it) }
             withContext(NonCancellable) {
                 val o = outcome
                 val status = when (o?.error) {
@@ -265,6 +318,7 @@ internal class AgentChats(
     suspend fun deleteAll(): Boolean = withContext(NonCancellable) {
         lock.withLock { jobs.values.toList() }.forEach { it.cancelAndJoin() }
         for (id in registries.keys.toList()) forgetTools(id)
+        modes.clear()
         try {
             dao.deleteAll()
             true
@@ -277,6 +331,7 @@ internal class AgentChats(
     /** A deleted chat's tools go, and the tabs it held go back to the user (#575). */
     private fun forgetTools(sessionId: String) {
         registries.remove(sessionId)
+        modes.remove(sessionId)
         AgentApprovals.withdrawSession(sessionId)
         AgentTransfers.withdrawSession(sessionId)
         AgentTabs.releaseChat(sessionId)
@@ -326,10 +381,12 @@ internal class AgentChats(
             instance ?: run {
                 val app = context.applicationContext
                 val prompt = app.assets.open(PROMPT_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }
-                AgentChats(
+                lateinit var chats: AgentChats
+                chats = AgentChats(
                     AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt,
-                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId) },
+                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId)) },
                 )
+                chats
             }.also { instance = it }
         }
     }

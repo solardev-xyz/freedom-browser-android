@@ -470,12 +470,39 @@
       ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].indexOf(inputType) < 0;
     var out = { role: info.role, tag: tag, name: info.name.slice(0, 300) };
     if (tag === 'input' && inputType === 'file') out.effect = 'file_upload';
-    else if (tag === 'a' && element.hasAttribute('download') && activates) out.effect = 'file_download';
+    else if ((tag === 'a' || tag === 'area') && element.hasAttribute('download') && activates) out.effect = 'file_download';
     else if ((submitsForm && activates) || implicitSubmit) out.effect = 'form_submission';
-    if (tag === 'a' && element.hasAttribute('href') && activates) out.target = String(element.href).slice(0, 4096);
+    if ((tag === 'a' || tag === 'area') && element.hasAttribute('href') && activates) out.target = String(element.href).slice(0, 4096);
     else if (out.effect === 'form_submission') out.target = String(element.form.action).slice(0, 4096);
-    out.sensitive = inputType === 'password' || /password|one-time-code/i.test(element.getAttribute('autocomplete') || '');
+    out.sensitive = isCredential(element, tag, inputType);
     return out;
+  }
+
+  /*
+   * A password or one-time-code field: one by its type or autocomplete;
+   * one the page masks with CSS (-webkit-text-security) instead; or a
+   * one-character box of a split code, the boxes after the first named
+   * only by their group: a box marked one-time-code in its form, else
+   * within three levels up, short of the body. Not a plain text field
+   * the page gives no sign of: that one's typing goes to the model's
+   * check, given only a character count and the field's label.
+   */
+  function isCredential(element, tag, inputType) {
+    var credentialAutocomplete = /password|one-time-code/i;
+    if (inputType === 'password' || credentialAutocomplete.test(element.getAttribute('autocomplete') || '')) return true;
+    if (tag !== 'input') return false;
+    var view = element.ownerDocument.defaultView;
+    var style = view ? view.getComputedStyle(element) : null;
+    var masked = style ? style.getPropertyValue('-webkit-text-security') : '';
+    if (masked && masked !== 'none') return true;
+    if (element.maxLength !== 1) return false;
+    var otp = 'input[autocomplete*="one-time-code" i]';
+    if (element.form) return Boolean(element.form.querySelector(otp));
+    var group = element.parentElement;
+    for (var depth = 0; group && group !== element.ownerDocument.body && depth < 3; depth += 1, group = group.parentElement) {
+      if (group.querySelector(otp)) return true;
+    }
+    return false;
   }
 
   function usable(element, frameWindow) {
