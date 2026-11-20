@@ -47,6 +47,8 @@ internal class AgentChats(
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: () -> ZoneId = ZoneId::systemDefault,
     private val limitsOf: (ProviderDefinition) -> ContextLimits = ContextLimits::of,
+    /** A deleted chat's publication receipts go with it (#597); null: every chat's. */
+    private val forgetPublications: (String?) -> Unit = {},
 ) {
     /** A turn in progress: its reply so far. */
     data class Live(val sessionId: String, val turnId: String, val text: String)
@@ -307,6 +309,8 @@ internal class AgentChats(
         forgetTools(sessionId)
         try {
             dao.deleteSession(sessionId)
+            // Only once the chat is gone: a chat that stays keeps its receipts.
+            forgetPublications(sessionId)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting a chat failed (${e.javaClass.simpleName})")
@@ -321,6 +325,7 @@ internal class AgentChats(
         modes.clear()
         try {
             dao.deleteAll()
+            forgetPublications(null)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")
@@ -384,7 +389,10 @@ internal class AgentChats(
                 lateinit var chats: AgentChats
                 chats = AgentChats(
                     AgentDatabase.get(app).chats(), AgentProviders.get(app), prompt,
-                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId)) },
+                    toolsFor = { sessionId -> ToolRegistry.forChat(sessionId, chats.approvalsOf(sessionId)) { app } },
+                    forgetPublications = { id ->
+                        if (id == null) AgentPublications.forgetAll(app) else AgentPublications.forgetSession(app, id)
+                    },
                 )
                 chats
             }.also { instance = it }

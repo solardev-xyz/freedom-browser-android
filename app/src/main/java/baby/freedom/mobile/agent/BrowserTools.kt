@@ -667,6 +667,8 @@ internal class BrowserToolset(
         if (decision == PolicyDecision.Proceed) return approval
         return when (ask(approval)) {
             ApprovalOutcome.Approved -> approval
+            // A browser card never offers these; anything but its own Allow is a no.
+            is ApprovalOutcome.Publish, ApprovalOutcome.AskToFix,
             ApprovalOutcome.Declined -> throw ToolError(
                 ToolError.USER_DECLINED,
                 "The user declined this action. Nothing was done.",
@@ -693,6 +695,8 @@ internal class BrowserToolset(
         fun kindOf(action: AgentAction): ActionKind = when (action) {
             is AgentAction.Navigate -> ActionKind.Navigate
             is AgentAction.Dialog -> ActionKind.Dialog
+            // swarm_publish (#597): asks in every mode, on its own card.
+            is AgentAction.Publish -> ActionKind.Publish
             is AgentAction.Click, is AgentAction.Type, is AgentAction.Select, is AgentAction.Press, is AgentAction.Scroll -> {
                 val target = ApprovalBinding.targetOf(action)
                 when (target?.effect) {
@@ -737,6 +741,8 @@ internal class BrowserToolset(
                 is AgentAction.Press -> base.copy(operation = BrowserToolSpecs.PRESS, key = action.key)
                 is AgentAction.Scroll -> base.copy(operation = BrowserToolSpecs.SCROLL, direction = action.direction, pages = action.pages)
                 is AgentAction.Dialog -> base.copy(operation = BrowserToolSpecs.HANDLE_DIALOG)
+                // Never classified (a publication always asks); named for completeness.
+                is AgentAction.Publish -> base.copy(operation = SwarmPublishTools.PUBLISH)
             }
         }
 
@@ -848,6 +854,7 @@ internal class ToolError(
         const val CAPABILITY_UNAVAILABLE = "CAPABILITY_UNAVAILABLE"
         const val INTERNAL = "INTERNAL_ERROR"
         const val TAB_BUSY = "TAB_BUSY"
+        const val PUBLICATION_FIX_REQUESTED = "SWARM_PUBLICATION_FIX_REQUESTED"
 
         fun recoveryFor(code: String): Triple<String, String, String?> = when (code) {
             USER_DECLINED -> Triple(
@@ -867,6 +874,13 @@ internal class ToolError(
                 "Call browser_list_tabs and choose a current task-owned tab. Create a new task tab only if the user " +
                     "task requires one; do not reuse a stale tab ID.",
                 BrowserToolSpecs.LIST_TABS,
+            )
+            PUBLICATION_FIX_REQUESTED -> Triple(
+                "correct_input",
+                "Remove or replace the flagged values without repeating them in chat (keep secrets out of published " +
+                    "content entirely), then call swarm_publish again. Freedom scans the new content and the user " +
+                    "approves it again.",
+                null,
             )
             TAB_BUSY -> Triple(
                 "refresh_state",
