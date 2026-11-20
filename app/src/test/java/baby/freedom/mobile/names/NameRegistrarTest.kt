@@ -267,6 +267,8 @@ class NameRegistrarTest {
         assertEquals(State.DISPATCH_UNKNOWN, r.get(op.id)!!.state)
         assertEquals(hash2, r.get(op.id)!!.transactionHash)
         assertEquals(hash2, journal.saved.single().transactionHash)
+        // And it reads back after a restart.
+        assertEquals(hash2, NameJournalCodec.decode(NameJournalCodec.encode(journal.saved)).single().transactionHash)
         // Not mined yet: still unknown.
         assertEquals(State.DISPATCH_UNKNOWN, r.refresh(op.id)!!.state)
         // Try again in the wallet sent the same bytes, and they reverted: still revealable in its window.

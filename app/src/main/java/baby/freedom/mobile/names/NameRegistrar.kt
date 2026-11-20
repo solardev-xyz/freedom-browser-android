@@ -46,8 +46,8 @@ import kotlinx.coroutines.withContext
  * checks it once more, marks it dispatching on disk, and only then hands
  * it to the wallet. An outcome that can't be told (the app stopped, or
  * the wallet may have sent it) is never sent again: [refresh] settles it
- * from the chain alone — the commitment on chain, the name owned, the
- * expiry moved.
+ * from the chain alone — the receipt of the signed bytes when their hash
+ * is known, the commitment on chain, the name owned, the expiry moved.
  */
 class NameRegistrar internal constructor(
     private val reads: NameReads,
@@ -512,10 +512,13 @@ class NameRegistrar internal constructor(
     }
 
     /**
-     * An outcome nobody could tell: only the chain settles it. A commit
-     * whose commitment is on chain moves to the reveal (the commit went
-     * out — the reveal is a new step); a reveal or renewal is done once
-     * its effect is there. Otherwise it stays, and is never resent.
+     * An outcome nobody could tell: only the chain settles it. When the
+     * signed bytes' hash is known, an undisputed receipt settles it as a
+     * sent step's would (a reverted reveal back to ready in its window, a
+     * reverted renewal failed). Else a commit whose commitment is on chain
+     * moves to the reveal (the commit went out — the reveal is a new
+     * step); a reveal or renewal is done once its effect is there.
+     * Otherwise it stays, and is never resent.
      */
     private suspend fun reconcile(op: NameOperation): NameOperation? {
         val s = chain.snapshot()
