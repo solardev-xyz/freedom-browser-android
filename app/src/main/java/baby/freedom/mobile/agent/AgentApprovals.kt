@@ -19,6 +19,18 @@ internal sealed interface AgentAction {
     data class Press(val target: PageTarget, val key: String) : AgentAction
     data class Scroll(val target: PageTarget?, val direction: String, val pages: Double) : AgentAction
 
+    /** Tap a file input (browser_upload, #600): the user picks the file in Android's picker (or the camera, for `capture`). */
+    data class Upload(val target: PageTarget) : AgentAction
+
+    /**
+     * Tap a download link (browser_download, #600): only a download of the
+     * link's exact address (fragment aside, [DownloadIntentMatch]) is saved
+     * without another prompt, once; any other download the tap starts, even
+     * where the link redirects to on its own site, waits for the user.
+     * [target]'s address is the link's in full, as matched.
+     */
+    data class Download(val target: PageTarget) : AgentAction
+
     /**
      * Answer the page's [kind] dialog: OK ([accept]) or Cancel, with a
      * prompt's [promptText]. [from]: the site of the frame that opened it,
@@ -326,6 +338,8 @@ internal object ApprovalBinding {
         is AgentAction.Select -> action.target
         is AgentAction.Press -> action.target
         is AgentAction.Scroll -> action.target
+        is AgentAction.Upload -> action.target
+        is AgentAction.Download -> action.target
         else -> null
     }
 }

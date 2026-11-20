@@ -369,13 +369,35 @@ class DownloadManager private constructor(context: Context) {
         // accepted after that session ended, it's dropped ([enqueue]).
         val session = if (private) privateSession() else null
         fun offer(contentLength: Long) {
+            // The one download an approved `browser_download` covers in a
+            // tab Freedom Agent holds (#600): the user's Allow on the
+            // agent's card was the yes, so it starts without this prompt
+            // (unless they ask where to save each file). Any other
+            // download from such a tab is offered as usual: held for the user.
+            val claim = if (private) null else baby.freedom.mobile.agent.AgentDownloads.claim(tabId, url)
+            if (claim?.direct == true) {
+                enqueue(
+                    url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, null, null, blob,
+                    onRow = claim::started,
+                    onNoRow = claim::failed,
+                )
+                return
+            }
             val queued = offerQueue.offer(
                 tabId, requestedBy, name, target.displayUrl, contentLength.coerceAtLeast(-1), private,
                 mimeType = saveAsMimeType(normalizeMime(mimeType)),
-                discard = { blob?.release() },
+                discard = {
+                    blob?.release()
+                    claim?.declined()
+                },
             ) { saveTo ->
-                enqueue(url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo, blob)
+                enqueue(
+                    url, userAgent, contentDisposition, mimeType, contentLength, refererOrigin, session, saveTo, blob,
+                    onRow = { claim?.started(it) },
+                    onNoRow = { claim?.failed() },
+                )
             }
+            if (!queued) claim?.notQueued()
             if (!queued) blob?.release()
             if (!queued) Log.i(LOG_TAG, "download offer from tab $tabId dropped (tab blocked or closed, or $MAX_PENDING_OFFERS waiting)")
         }
@@ -467,6 +489,10 @@ class DownloadManager private constructor(context: Context) {
         saveTo: PickedDocument? = null,
         /** A `blob:` download's file, held by its page ([start]). */
         blob: BlobSource? = null,
+        /** Told the new row's id once it's listed (Freedom Agent's receipt, #600). */
+        onRow: (Long) -> Unit = {},
+        /** Told instead when no row was listed (its write failed, or the job went first). */
+        onNoRow: () -> Unit = {},
     ) {
         val target = if (blob != null) {
             DownloadTarget.Blob(url, blob)
@@ -475,63 +501,88 @@ class DownloadManager private constructor(context: Context) {
         }
         val guessedMime = normalizeMime(mimeType)
         scope.launch {
-            staleSweep.join()
-            val picked = saveTo?.uri?.let(Uri::parse)
-            if (picked != null && saveTo != null && session != null) {
-                // Private downloads always go to Download/Freedom (#322).
-                DownloadSaveTo.discard(appContext, picked, saveTo.created)
+            var listed = false
+            try {
+                enqueueRow(target, url, userAgent, contentDisposition, guessedMime, contentLength, refererOrigin, session, saveTo, blob) {
+                    listed = true
+                    onRow(it)
+                }
+            } finally {
+                if (!listed) onNoRow()
             }
-            val savesTo = picked?.takeIf { session == null }
-            // Listed under the name the user gave it in the picker (or
-            // the one the provider settled on).
-            val initialName = savesTo?.let(::queryDisplayName)
-                ?: downloadFileName(contentDisposition, url, guessedMime, ::extensionForMime)
-            val row = DownloadEntry(
-                    fileName = initialName,
-                    // Spelled the same whenever it is saved (#490 R1-M2).
-                    displayUrl = storedDisplayUrl(DisplayUrl.settledName(target.displayUrl)),
-                    // A data: URI *is* the file — possibly megabytes — and
-                    // doesn't belong in a history row (Room's cursor window
-                    // is 2 MB); nor does any other address over 8 KiB
-                    // (#461 R1-M3). A blob: URL means nothing once its page
-                    // is gone (and nothing can read it but that page).
-                    // Blank means "can't be retried" (and can't be paused).
-                    sourceUrl = storedSourceUrl(target, url),
-                    mimeType = guessedMime ?: "application/octet-stream",
-                    contentUri = null,
-                    status = DownloadStatus.RUNNING,
-                    totalBytes = contentLength.coerceAtLeast(-1),
-                    receivedBytes = 0,
-                    error = null,
-                    startedAt = System.currentTimeMillis(),
-                    finishedAt = null,
-                    refererOrigin = refererOrigin.takeIf { target is DownloadTarget.Web },
-                    userAgent = userAgent?.takeIf { it.isNotBlank() },
-                    saveTo = savesTo?.toString(),
-                    saveToCreated = savesTo != null && saveTo?.created == true,
-                )
-            val cookies = if (session != null) {
-                session.cookies
-            } else {
-                runCatching { CookieManager.getInstance() }.getOrNull()
-            }
-            transitions.withLock {
-                val id = if (session != null) {
-                    privateRows.withLock {
-                        // Its session ended meanwhile: nothing to list it in.
-                        val id = privateSessions.allocate(session.generation) ?: run {
-                            blob?.release()
-                            return@launch
-                        }
-                        memoryDao.insert(row.copy(id = id))
+        }
+    }
+
+    private suspend fun enqueueRow(
+        target: DownloadTarget,
+        url: String,
+        userAgent: String?,
+        contentDisposition: String?,
+        guessedMime: String?,
+        contentLength: Long,
+        refererOrigin: String?,
+        session: PrivateSession?,
+        saveTo: PickedDocument?,
+        blob: BlobSource?,
+        onRow: (Long) -> Unit,
+    ) {
+        staleSweep.join()
+        val picked = saveTo?.uri?.let(Uri::parse)
+        if (picked != null && saveTo != null && session != null) {
+            // Private downloads always go to Download/Freedom (#322).
+            DownloadSaveTo.discard(appContext, picked, saveTo.created)
+        }
+        val savesTo = picked?.takeIf { session == null }
+        // Listed under the name the user gave it in the picker (or
+        // the one the provider settled on).
+        val initialName = savesTo?.let(::queryDisplayName)
+            ?: downloadFileName(contentDisposition, url, guessedMime, ::extensionForMime)
+        val row = DownloadEntry(
+                fileName = initialName,
+                // Spelled the same whenever it is saved (#490 R1-M2).
+                displayUrl = storedDisplayUrl(DisplayUrl.settledName(target.displayUrl)),
+                // A data: URI *is* the file — possibly megabytes — and
+                // doesn't belong in a history row (Room's cursor window
+                // is 2 MB); nor does any other address over 8 KiB
+                // (#461 R1-M3). A blob: URL means nothing once its page
+                // is gone (and nothing can read it but that page).
+                // Blank means "can't be retried" (and can't be paused).
+                sourceUrl = storedSourceUrl(target, url),
+                mimeType = guessedMime ?: "application/octet-stream",
+                contentUri = null,
+                status = DownloadStatus.RUNNING,
+                totalBytes = contentLength.coerceAtLeast(-1),
+                receivedBytes = 0,
+                error = null,
+                startedAt = System.currentTimeMillis(),
+                finishedAt = null,
+                refererOrigin = refererOrigin.takeIf { target is DownloadTarget.Web },
+                userAgent = userAgent?.takeIf { it.isNotBlank() },
+                saveTo = savesTo?.toString(),
+                saveToCreated = savesTo != null && saveTo?.created == true,
+            )
+        val cookies = if (session != null) {
+            session.cookies
+        } else {
+            runCatching { CookieManager.getInstance() }.getOrNull()
+        }
+        transitions.withLock {
+            val id = if (session != null) {
+                privateRows.withLock {
+                    // Its session ended meanwhile: nothing to list it in.
+                    val id = privateSessions.allocate(session.generation) ?: run {
+                        blob?.release()
+                        return
                     }
-                } else {
-                    dao.insert(row)
+                    memoryDao.insert(row.copy(id = id))
                 }
-                _events.tryEmit(DownloadEvent.Started(id, initialName))
-                launchJob(id, resuming = false, abandoned = { blob?.release() }) {
-                    run(id, target, userAgent, contentDisposition, refererOrigin, cookies, resuming = false)
-                }
+            } else {
+                dao.insert(row)
+            }
+            _events.tryEmit(DownloadEvent.Started(id, initialName))
+            onRow(id)
+            launchJob(id, resuming = false, abandoned = { blob?.release() }) {
+                run(id, target, userAgent, contentDisposition, refererOrigin, cookies, resuming = false)
             }
         }
     }

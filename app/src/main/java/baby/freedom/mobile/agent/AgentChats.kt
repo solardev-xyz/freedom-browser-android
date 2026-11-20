@@ -319,6 +319,8 @@ internal class AgentChats(
             // Only once the chat is gone: a chat that stays keeps its receipts.
             forgetOperations(sessionId)
             forgetPublications(sessionId)
+            // Its download receipts (#600); the files themselves stay in Downloads.
+            AgentFiles.port?.records?.forget(sessionId)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting a chat failed (${e.javaClass.simpleName})")
@@ -335,6 +337,7 @@ internal class AgentChats(
             dao.deleteAll()
             forgetOperations(null)
             forgetPublications(null)
+            AgentFiles.port?.records?.forget(null)
             true
         } catch (e: Exception) {
             Log.w(TAG, "deleting chats failed (${e.javaClass.simpleName})")
@@ -404,6 +407,7 @@ internal class AgentChats(
         fun get(context: Context): AgentChats = instance ?: synchronized(this) {
             instance ?: run {
                 val app = context.applicationContext
+                AgentFiles.install(app)
                 val skills = AgentSkills.load { path -> app.assets.open(path).use { it.readBytes() } }
                 // Desktop's catalog of built-in skills follows the prompt, for the `read` tool (#599).
                 val prompt = app.assets.open(PROMPT_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }.trim() +
