@@ -361,16 +361,23 @@ class PublicationScanTest {
 
     @Test
     fun `the walked rules match what the original unbounded patterns matched`() {
-        // Desktop's originals, in Java syntax with JavaScript's \s spelled out.
-        val s = "[\\t\\n\\x0B\\f\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF]"
+        // Desktop's originals, in Java syntax with JavaScript's \s spelled out, with the
+        // credential names widened to prefixed and suffixed keys (DB_PASSWORD, SECRET_KEY)
+        // and unquoted values to any punctuation but quotes and code brackets.
+        val sIn = "\\t\\n\\x0B\\f\\r \\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF"
+        val s = "[$sIn]"
+        val names = "password|passwd|api[_-]?key|secret|token|access[_-]?token|auth[_-]?token|private[_-]?key"
+        val suffix = "(?:[_.-]?(?:key|value))?"
+        val bareValue = "[^$sIn\"'`()\\[\\]{},;#]"
         val original = mapOf(
             "credential-assignment" to listOf(
                 Regex(
-                    "[\"']?(?:password|passwd|api[_-]?key|secret|token|access[_-]?token|auth[_-]?token|authorization|private[_-]?key|credential)[\"']?$s*[:=]$s*[\"'](?<v>[^\"'\\r\\n]{8}[^\"'\\r\\n]*)[\"']",
+                    "[\"']?(?:$names|authorization|credential)$suffix[\"']?$s*[:=]$s*[\"'](?<v>[^\"'\\r\\n]{8}[^\"'\\r\\n]*)[\"']",
                     RegexOption.IGNORE_CASE,
                 ) to Regex("^(?:\\$\\{|process\\.env\\.|your[_ -]|example|placeholder|changeme|test|dummy|<)", RegexOption.IGNORE_CASE),
                 Regex(
-                    "^$s*(?:password|passwd|api[_-]?key|secret|token|access[_-]?token|auth[_-]?token|private[_-]?key)$s*[:=]$s*(?<v>[A-Za-z0-9_+/.=-]{8}[A-Za-z0-9_+/.=-]*)$s*(?:#.*)?$",
+                    "^$s*(?:export$s+)?(?:[A-Za-z0-9_.-]*(?:[_.-]|(?-i:[a-z0-9](?=[A-Z]))))?(?:$names)$suffix" +
+                        "$s*[:=]$s*(?<v>(?!\\$)$bareValue{8}$bareValue*)$s*(?:#.*)?$",
                     setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE),
                 ) to Regex("^(?:your[_-]|example|placeholder|changeme|test|dummy)", RegexOption.IGNORE_CASE),
             ),
@@ -385,6 +392,7 @@ class PublicationScanTest {
             "RSA", "1", "secret", "password = ", "\npassword: ", " = \"", "='", "bob@", "q@", "a.", "mail.", "b-c.", "..",
             "Qz9kLm2PwXr4\"", "\n# c", " ", "\u000b", "PRIVATE KEY-----", "-----BEGIN RSA ",
             " ".repeat(70), "\n﻿password", "http://", "eyJ", "u:p@", "/", "test1234 ", "a.b.c.d.e.f.g.h.i.", "A".repeat(45),
+            "SECRET_KEY", "DB_", "export ", "&", "dbPassword", "Token", "\$", "(", "]", "_value", "Key", "_count", "no", "Tr0ub4dor&3",
         )
         val comparable = Regex("your|example|placeholder|changeme|dummy|test|\\.\\.\\.|[<>]|(.)\\1{7}|x{6}", RegexOption.IGNORE_CASE)
         var seed = 7L
@@ -404,6 +412,48 @@ class PublicationScanTest {
                 assertEquals("$id in ${text.replace("\n", "\\n")}", expected, actual)
             }
         }
+    }
+
+    @Test
+    fun `prefixed and suffixed keys and punctuated unquoted values are found`() {
+        val secret = "Tr0ub4dor3horseBattery"
+        for (line in listOf(
+            "SECRET_KEY=$secret",
+            "DB_PASSWORD=$secret",
+            "export GITHUB_TOKEN=$secret",
+            "  dbPassword: $secret",
+            "app.secret: $secret  # prod",
+            "PASSWORD=Tr0ub4dor!@#comment",
+            "password: Tr0ub4dor&3horse",
+            "STRIPE_SECRET_KEY=sk~Tr0ub4dor!@#",
+            "SECRET_KEY = \"$secret\"",
+            "\"client_secret\": \"$secret\"",
+            "jwtSecretValue: '$secret'",
+        )) {
+            assertEquals(line, listOf("credential-assignment"), rulesIn(line))
+            assertTrue(line, SecretBackstop.containsSecret(line))
+        }
+        // Other names that merely contain a keyword, values read from elsewhere and code stay quiet.
+        for (line in listOf(
+            "nopassword=$secret",
+            "tokenizer_path: some/model/dir",
+            "token_count: 1234567890",
+            "secret_name: my-app-secret-v2",
+            "DB_PASSWORD=\$DB_PASSWORD_FROM_VAULT",
+            "SECRET_KEY = os.environ[\"SECRET_KEY\"]",
+            "password = getpass(\"Password: \")",
+            "x DB_PASSWORD=$secret",
+            "password: \${DB_PASSWORD}",
+        )) {
+            assertEquals(line, emptyList<String>(), rulesIn(line))
+            assertFalse(line, SecretBackstop.containsSecret(line))
+        }
+        // A key prefix is walked a bounded distance: a long run of keywords stays linear.
+        val keywords = "tokentoken".repeat(30_000) + "_password=$secret"
+        val started = System.currentTimeMillis()
+        rulesIn(keywords)
+        SecretBackstop.containsSecret(keywords)
+        assertTrue("linear, not quadratic", System.currentTimeMillis() - started < 10_000)
     }
 
     @Test
