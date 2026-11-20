@@ -358,9 +358,23 @@ class EthereumProvider(
      * Answer one request from a page on [origin]. [ask] puts an approval
      * sheet up on the page's tab and returns the user's answer
      * ([EthAnswer.Rejected] too for a sheet that couldn't be shown).
+     *
+     * [agentHeld]: whether Freedom Agent holds the page's tab right now
+     * (#577, desktop's `agent-tab-custody.js`). While it does, nothing
+     * goes through without a sheet: no auto-approve rule answers a send,
+     * none is offered on its sheet, and a connected site's switch to a
+     * built-in chain gets the Switch network sheet instead of a notice.
+     * Read again at each of those decisions, so a tab the user takes back
+     * mid-request is theirs again from the next one.
      */
-    suspend fun request(origin: String, method: String, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply = try {
-        dispatch(origin, method, params, ask)
+    suspend fun request(
+        origin: String,
+        method: String,
+        params: JSONArray,
+        agentHeld: () -> Boolean = { false },
+        ask: suspend (EthAsk) -> EthAnswer,
+    ): Reply = try {
+        dispatch(origin, method, params, agentHeld, ask)
     } catch (e: CancellationException) {
         throw e
     } catch (e: BadParams) {
@@ -373,7 +387,7 @@ class EthereumProvider(
         Reply.Err(INTERNAL, "Couldn't read the wallet's connected sites; try again")
     }
 
-    private suspend fun dispatch(origin: String, method: String, params: JSONArray, ask0: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun dispatch(origin: String, method: String, params: JSONArray, agentHeld: () -> Boolean, ask0: suspend (EthAsk) -> EthAnswer): Reply {
         val connected = connectedAccount(origin)
         // Only the user's own yes on a sheet is wallet activity (#236): a page polling
         // eth_chainId or eth_blockNumber mustn't hold the idle lock off for hours, and with
@@ -396,9 +410,9 @@ class EthereumProvider(
             "wallet_revokePermissions" -> if (disconnect(origin)) Reply.Ok(JSONObject.NULL) else Reply.Err(INTERNAL, "Couldn't save the change")
             "personal_sign" -> personalSign(origin, connected ?: return notConnected(), params, ask)
             "eth_signTypedData_v4" -> signTypedData(origin, connected ?: return notConnected(), params, ask)
-            "eth_sendTransaction" -> sendTransaction(origin, connected ?: return notConnected(), params, ask)
-            "wallet_switchEthereumChain" -> switchChain(origin, connected != null, params, ask)
-            "wallet_addEthereumChain" -> addChain(origin, connected != null, params, ask)
+            "eth_sendTransaction" -> sendTransaction(origin, connected ?: return notConnected(), params, agentHeld, ask)
+            "wallet_switchEthereumChain" -> switchChain(origin, connected != null, params, agentHeld, ask)
+            "wallet_addEthereumChain" -> addChain(origin, connected != null, params, agentHeld, ask)
             "eth_sign", "eth_signTransaction", "eth_sendRawTransaction", "eth_signTypedData", "eth_signTypedData_v1",
             "eth_signTypedData_v3",
             -> Reply.Err(UNSUPPORTED, "Method not supported: $method")
@@ -674,7 +688,7 @@ class EthereumProvider(
         Chain(id = e.id, name = Strings.get(R.string.send_eth_custom_network), symbol = "", rpcUrls = emptyList())
     }
 
-    private suspend fun switchChain(origin: String, connected: Boolean, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun switchChain(origin: String, connected: Boolean, params: JSONArray, agentHeld: () -> Boolean, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val id = chainIdParam(params)
         val current = switchingFrom(origin)
         if (current.id == id) return Reply.Ok(JSONObject.NULL)
@@ -683,17 +697,25 @@ class EthereumProvider(
         val target = (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }
             // Unreadable list: the chain may well be set up, so 4902 ("add it first") would be a lie.
             ?: return if (list == null) chainListUnreadable() else Reply.Err(UNRECOGNIZED_CHAIN, "Unrecognized chain ID ${hex(id)}. Try adding the chain using wallet_addEthereumChain first.")
-        return switchTo(origin, connected, current, target, ask)
+        return switchTo(origin, connected, current, target, agentHeld, ask)
     }
 
     /**
      * Move [origin] from [current] to [target], a chain the wallet has: with
      * the Switch network sheet, or — for a connected site going to a
      * built-in chain ([switchesWithoutSheet]) — with a notice and Undo
-     * instead ([switchWithNotice]).
+     * instead ([switchWithNotice]) — never for a tab Freedom Agent holds
+     * ([agentHeld], #577).
      */
-    private suspend fun switchTo(origin: String, connected: Boolean, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
-        if (switchesWithoutSheet(connected, target)) return switchWithNotice(origin, current, target, ask)
+    private suspend fun switchTo(
+        origin: String,
+        connected: Boolean,
+        current: Chain,
+        target: Chain,
+        agentHeld: () -> Boolean,
+        ask: suspend (EthAsk) -> EthAnswer,
+    ): Reply {
+        if (!agentHeld() && switchesWithoutSheet(connected, target)) return switchWithNotice(origin, current, target, agentHeld, ask)
         ask(EthAsk.SwitchChain(origin, current, target)).let { if (it !is EthAnswer.Approved) return refused(it) }
         // Under [chainMoves], as [undoSwitch] and [moveOffRemoved]: a check-then-write of
         // theirs can't straddle this write (#446 R1-M1).
@@ -718,12 +740,20 @@ class EthereumProvider(
      * and the turn can be a long wait: it's checked again under
      * [siteLinks], as [disconnect] holds, at the write (#446 R2-F1). A site
      * disconnected meanwhile gets the Switch network sheet instead, as any
-     * site that isn't connected does.
+     * site that isn't connected does; so does one whose tab Freedom Agent
+     * took during the wait ([agentHeld], #577).
      */
-    private suspend fun switchWithNotice(origin: String, current: Chain, target: Chain, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun switchWithNotice(
+        origin: String,
+        current: Chain,
+        target: Chain,
+        agentHeld: () -> Boolean,
+        ask: suspend (EthAsk) -> EthAnswer,
+    ): Reply {
         val turn = EthAsk.SwitchNotice(origin, current, target)
         var made: ChainSwitched? = null
         var disconnected = false
+        var held = false
         val saved = try {
             ask(turn).let { if (it !is EthAnswer.Approved) return refused(it) }
             withContext(NonCancellable) {
@@ -732,6 +762,11 @@ class EthereumProvider(
                     // Still connected now that it's the tab's turn (R2-F1)?
                     if (connectedAccount(origin) == null) {
                         disconnected = true
+                        return@withLock true
+                    }
+                    // Still the user's tab, not the agent's (#577)?
+                    if (agentHeld()) {
+                        held = true
                         return@withLock true
                     }
                     // Where it is now, not where it was before the wait: another tab of the site
@@ -758,7 +793,13 @@ class EthereumProvider(
             // from wherever the site is by now.
             val now = switchingFrom(origin)
             if (now.id == target.id) return Reply.Ok(JSONObject.NULL)
-            return switchTo(origin, connected = false, now, target, ask)
+            return switchTo(origin, connected = false, now, target, agentHeld, ask)
+        }
+        if (held) {
+            // Likewise: the Switch network sheet, as for any request from a held tab.
+            val now = switchingFrom(origin)
+            if (now.id == target.id) return Reply.Ok(JSONObject.NULL)
+            return switchTo(origin, connected = true, now, target, { true }, ask)
         }
         return if (saved) Reply.Ok(JSONObject.NULL) else Reply.Err(INTERNAL, "Couldn't save the change")
     }
@@ -807,7 +848,7 @@ class EthereumProvider(
         FAILED,
     }
 
-    private suspend fun addChain(origin: String, connected: Boolean, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun addChain(origin: String, connected: Boolean, params: JSONArray, agentHeld: () -> Boolean, ask: suspend (EthAsk) -> EthAnswer): Reply {
         val p = params.opt(0) as? JSONObject ?: throw BadParams("Expected [{chainId, chainName, nativeCurrency, rpcUrls}]")
         val id = chainIdOf(p.opt("chainId"))
         val current = switchingFrom(origin)
@@ -815,7 +856,7 @@ class EthereumProvider(
         pinnedChain(origin)?.let { return pinnedRefusal(current) }
         // A chain the wallet has keeps its own settings: this only switches to it.
         val list = runCatching { chains() }.getOrNull()
-        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return switchTo(origin, connected, current, it, ask) }
+        (list ?: BuiltInChains.ALL).firstOrNull { it.id == id }?.let { return switchTo(origin, connected, current, it, agentHeld, ask) }
         // Unreadable list: whether the wallet already has this chain is unknown, and if it
         // does, approving an Add sheet showing the site's name and RPCs would keep the stored
         // ones instead (#215 R5-M1). Refuse rather than show a sheet that may not be true.
@@ -1007,7 +1048,13 @@ class EthereumProvider(
 
     // ---- Transactions ----
 
-    private suspend fun sendTransaction(origin: String, account: WalletAccount, params: JSONArray, ask: suspend (EthAsk) -> EthAnswer): Reply {
+    private suspend fun sendTransaction(
+        origin: String,
+        account: WalletAccount,
+        params: JSONArray,
+        agentHeld: () -> Boolean,
+        ask: suspend (EthAsk) -> EthAnswer,
+    ): Reply {
         val tx = params.opt(0) as? JSONObject ?: throw BadParams("Expected [transaction]")
         (tx.opt("from") as? String)?.let { requireSameAccount(it, account) }
         val toRaw = (tx.opt("to") as? String)?.trim()
@@ -1039,14 +1086,21 @@ class EthereumProvider(
         val rule = if (account.isLedger) null else AutoApproveRule.eligible(origin, to, value, data, chain.id)
         // Turned on from a sheet only for a function the wallet can name (#423, audit W25): a rule
         // granted earlier for another still covers its calls ([ruled]), but none is offered anew.
-        val offered = rule?.takeIf { it.offerable }
+        val offerable = rule?.takeIf { it.offerable }
         var repriced = false
         // Turned on in the last sheet confirmed; written only once its send has gone out (R2-M1).
         var turnedOn = false
         repeat(MAX_REPRICES) {
             // Before the sheet, not after the user confirmed one that can't go.
             if (sends.busy()) return busy()
-            val ruled = rule != null && autoApprove.matches(rule)
+            val matched = rule != null && autoApprove.matches(rule)
+            // A tab Freedom Agent holds (#577): its sends are asked as any other, and no rule
+            // answers or is turned on there — the page the agent drove to this call must not
+            // spend without a sheet, nor leave a rule behind that would. Read after the match,
+            // at the decision, so a tab taken back meanwhile has its rules again.
+            val held = agentHeld()
+            val ruled = matched && !held
+            val offered = offerable.takeIf { !held }
             // No sheet only with the wallet open (else the sheet's button asks to unlock), never
             // for a send that takes the place of one the user stopped tracking: that warning is theirs
             // to read, and never at a fee above what one RPC's word may set (#233).
@@ -1061,7 +1115,7 @@ class EthereumProvider(
                     // Only together with the send it was confirmed with: one that was busy,
                     // failed or ran out of reprices leaves no rule behind. A rule that couldn't
                     // be saved doesn't undo the send.
-                    if (turnedOn && offered != null) grantRule(origin, account, offered)
+                    if (turnedOn && offerable != null) grantRule(origin, account, offerable)
                     return Reply.Ok(s.hash)
                 }
                 Submitted.Busy -> return busy()

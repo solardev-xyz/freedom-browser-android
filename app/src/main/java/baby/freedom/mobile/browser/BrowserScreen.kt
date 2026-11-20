@@ -93,6 +93,8 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import baby.freedom.mobile.R
+import baby.freedom.mobile.agent.AgentNodes
+import baby.freedom.mobile.agent.NodeSnapshot
 import baby.freedom.mobile.data.BrowsingRepository
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.ui.PrivateTheme
@@ -738,6 +740,29 @@ fun BrowserScreen(
                 ),
             ),
         )
+    }
+    // What the agent's node_status reads (#577): plain values, never [tor]'s callbacks,
+    // which hold the Activity; gone with the screen.
+    val agentNodes by rememberUpdatedState(
+        NodeSnapshot(
+            swarm = nodeInfo,
+            runNode = runNodeEnabled,
+            externalSwarm = externalSwarmBase.isNotEmpty(),
+            ipfs = ipfsInfo,
+            externalIpfs = externalIpfsBase.isNotEmpty(),
+            radicle = radicle.info,
+            radicleEnabled = radicle.enabled,
+            tor = torShownInfo(tor),
+            torEnabled = tor.enabled,
+            torProxy = tor.proxy != null,
+            myotis = myotisInfo,
+            myotisRunning = myotisRunning.orEmpty(),
+        ),
+    )
+    DisposableEffect(Unit) {
+        val source = { agentNodes }
+        AgentNodes.source = source
+        onDispose { if (AgentNodes.source === source) AgentNodes.source = null }
     }
     val downloads = remember(context) { DownloadManager.get(context) }
 

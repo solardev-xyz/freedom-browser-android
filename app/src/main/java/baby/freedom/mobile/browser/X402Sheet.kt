@@ -95,6 +95,9 @@ internal class X402SheetState(val ask: X402Ask) {
     /** The paying account's key is on a Ledger (#142): no allowance is offered. */
     val ledger: Boolean get() = ask.account?.isLedger == true
 
+    /** An allowance can be granted here: not from a Ledger's account, nor in a tab Freedom Agent holds (#577). */
+    val allowanceOffered: Boolean get() = !ledger && ask.allowanceOffered
+
     fun select(index: Int) {
         if (index == selected) return
         selected = index
@@ -106,7 +109,7 @@ internal class X402SheetState(val ask: X402Ask) {
 
     /** Why the allowance can't be granted as typed, or null if it can (or none is asked for). */
     fun capProblem(): String? {
-        if (!auto || ledger) return null
+        if (!auto || !allowanceOffered) return null
         val o = option ?: return null
         val cap = cap() ?: return ambiguousAmountNote(capText) ?: Strings.get(R.string.signing_x402_cap_enter_amount, o.symbol)
         if (cap < o.offer.amount) return Strings.get(R.string.signing_x402_cap_at_least, SendAmounts.exact(o.offer.amount, o.decimals), o.symbol)
@@ -118,7 +121,7 @@ internal class X402SheetState(val ask: X402Ask) {
         val o = option ?: return null
         if (!o.fundable || capProblem() != null) return null
         // A Ledger account never pays without asking: the Ledger confirms every payment (#142).
-        val grant = if (auto && !ledger) X402Grant(cap() ?: return null, window.ms) else null
+        val grant = if (auto && allowanceOffered) X402Grant(cap() ?: return null, window.ms) else null
         return X402Choice(selected, grant)
     }
 
@@ -212,7 +215,7 @@ internal fun X402PaymentBody(
     }
     if (warnings.isNotEmpty()) Spacer(Modifier.height(8.dp))
     warnings.forEach { Warning(it) }
-    if (!state.ledger) {
+    if (state.allowanceOffered) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -225,7 +228,7 @@ internal fun X402PaymentBody(
             Text(stringResource(R.string.signing_x402_pay_automatically), modifier = Modifier.padding(start = 8.dp))
         }
     }
-    if (state.auto && !state.ledger) {
+    if (state.auto && state.allowanceOffered) {
         OutlinedTextField(
             value = state.capText,
             onValueChange = { state.capText = it },

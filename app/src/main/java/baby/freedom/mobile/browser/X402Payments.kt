@@ -7,6 +7,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import baby.freedom.mobile.R
+import baby.freedom.mobile.agent.AgentTabs
 import baby.freedom.mobile.chains.Chain
 import baby.freedom.mobile.chains.rpc.ChainAccessPolicy
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
@@ -80,6 +81,12 @@ class X402Ask internal constructor(
     val unusable: List<String>,
     /** An allowance of the site's covers this, but it was left to the user: the wallet was locked. */
     val allowanceWaitingOnUnlock: Boolean,
+    /**
+     * Whether the sheet may offer to grant an allowance: not in a tab
+     * Freedom Agent holds (#577), where nothing may pay without a sheet
+     * and nothing is set up that later would.
+     */
+    val allowanceOffered: Boolean = true,
 )
 
 /** The user's yes on an x402 sheet: which offer ([X402Option]'s index in [X402Ask.options]), and an allowance to grant. */
@@ -351,7 +358,10 @@ object X402Payments {
             // site's may have been Refused, in another tab, since (#237 R2-M1) — once the
             // holds an earlier run kept are known (#347).
             if (allowanceMayPay) holdsRestored.await()
-            val covered = silentPayOption(allowanceMayPay && !flow.holds(d.origin), switched, payer, account?.isLedger == true, options) { o ->
+            // Read here, by tab, every time round: a tab the user took back from the agent pays
+            // from its allowances again (#577).
+            val agentHeld = AgentTabs.isHeld(tab.id)
+            val covered = silentPayOption(allowanceMayPay && !flow.holds(d.origin), switched, payer, account?.isLedger == true, agentHeld, options) { o ->
                 store.covering(allowances, d.origin, o.chainId, o.asset, payer!!, o.payTo, o.amount) != null
             }
             // Switched while the figures were read: read them again for the account now active.
@@ -379,6 +389,7 @@ object X402Payments {
                     options = options,
                     unusable = unusable,
                     allowanceWaitingOnUnlock = covered != null && account != null,
+                    allowanceOffered = !agentHeld,
                 ),
             )
             val answer = askWhileActive(walletAccounts, payer) { EthereumProviders.askOnDocument(tab, doc, ask) }
@@ -434,16 +445,20 @@ object X402Payments {
      * account's allowance and on the old navigation's terms; the sheet
      * goes up for it instead (#218 R5-M2). Never from a [ledger]
      * account (#142): the Ledger confirms every payment, as it does every
-     * transaction an auto-approve rule would otherwise cover.
+     * transaction an auto-approve rule would otherwise cover. Never in a
+     * tab Freedom Agent holds ([agentHeld], #577; desktop's
+     * `isUserPageId` in `x402/intercept.js`): the user sees every payment
+     * a page the agent drives asks for.
      */
     internal fun silentPayOption(
         allowanceMayPay: Boolean,
         switched: Boolean,
         payer: String?,
         ledger: Boolean,
+        agentHeld: Boolean,
         options: List<X402Option>,
         covered: (X402.Offer) -> Boolean,
-    ): X402Option? = if (!allowanceMayPay || switched || payer == null || ledger) null else autoPayOption(options, covered)
+    ): X402Option? = if (!allowanceMayPay || switched || payer == null || ledger || agentHeld) null else autoPayOption(options, covered)
 
     /**
      * The offer an allowance pays without asking: the first one [covered]
