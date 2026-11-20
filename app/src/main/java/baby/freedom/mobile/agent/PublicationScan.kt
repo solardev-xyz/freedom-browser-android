@@ -901,7 +901,9 @@ internal object SecretBackstop {
         Pattern.CASE_INSENSITIVE,
     )
     private val QUOTED_PLACEHOLDER = Regex("^(?:\\$\\{|process\\.env\\.|your[_ -]|example|placeholder|changeme|test|dummy|<)", RegexOption.IGNORE_CASE)
-    private val BARE_PLACEHOLDER = Regex("^(?:your[_-]|example|placeholder|changeme|test|dummy)", RegexOption.IGNORE_CASE)
+    // Desktop's prefixes, plus what the wider unquoted value now lets in: a
+    // <placeholder> and a value of one repeated character (********).
+    private val BARE_PLACEHOLDER = Regex("^(?:your[_-]|example|placeholder|changeme|test|dummy|<)|^(.)\\1*$", RegexOption.IGNORE_CASE)
 
     private fun isSpace(c: Char) = PublicationScan.isJsSpace(c)
     private fun isLineEnd(c: Char) = c == '\n' || c == '\r' || c == ' ' || c == ' '
@@ -965,8 +967,9 @@ internal object SecretBackstop {
             if (!QUOTED_PLACEHOLDER.containsMatchIn(text.substring(quote + 1, minOf(text.length, quote + 41)))) return true
         }
         // ^\s* (-\s+)? (export\s+)? prefix? key suffix* \s* [:=] \s* value{8,} \s* (#.*)? $, multiline.
-        // A placeholder (<your-password>, ********) or code (self.token) is no value,
-        // the same as in the credential-assignment rule.
+        // A <placeholder>, a ******** mask or code (self.token) is no value. The
+        // rest of the rule's broader placeholder check isn't applied, so a
+        // password it took for one (Sample1234pass) is still reported here.
         val bare = BARE.matcher(text)
         from = 0
         while (from <= text.length && bare.find(from)) {
@@ -983,7 +986,7 @@ internal object SecretBackstop {
             val after = runEnd(text, end) { isSpace(it) && !isLineEnd(it) }
             if (end - start < 8 || !(after == text.length || text[after] == '#' || isLineEnd(text[after]))) continue
             val value = text.substring(start, end)
-            if (!BARE_PLACEHOLDER.containsMatchIn(value) && !PublicationScan.placeholderValue(value) && !PublicationScan.codeReference(value)) {
+            if (!BARE_PLACEHOLDER.containsMatchIn(value) && !PublicationScan.codeReference(value)) {
                 return true
             }
         }

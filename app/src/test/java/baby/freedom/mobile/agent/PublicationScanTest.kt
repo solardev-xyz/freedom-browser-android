@@ -472,6 +472,17 @@ class PublicationScanTest {
             assertEquals(line, emptyList<String>(), rulesIn(line))
             assertFalse(line, SecretBackstop.containsSecret(line))
         }
+        // A member access with a digit, or not of a code object or credential, is still a value;
+        // a quoted value is never code.
+        for (line in listOf("password: Tr0ub4dor.3horse", "password: correct.horse.battery", "token = \"self.token.data\"")) {
+            assertEquals(line, listOf("credential-assignment"), rulesIn(line))
+            assertTrue(line, SecretBackstop.containsSecret(line))
+        }
+        // A value the rule takes for a placeholder but that isn't one of the backstop's is still
+        // reported by the backstop.
+        for (line in listOf("password: Sample1234pass", "token: abcinsert12345", "DB_PASSWORD=Tr0ub4dor>3horse")) {
+            assertEquals(line, listOf("possible-credential"), rulesIn(line))
+        }
         // A key prefix is walked a bounded distance: a long run of keywords stays linear.
         val keywords = "tokentoken".repeat(30_000) + "_password=$secret"
         val started = System.currentTimeMillis()
