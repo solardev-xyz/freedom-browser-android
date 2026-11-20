@@ -853,8 +853,8 @@ class BrowserToolsTest {
         downloadLink()
         files.rows[42] = files.entry(42, "report.pdf", "completed")
         host.duringTap = {
-            // What DownloadManager.start asks as the page's download comes: a same-origin redirect.
-            val claim = AgentDownloads.claim(1, "https://example.com/dl/report.pdf?token=1")!!
+            // What DownloadManager.start asks as the page's download comes: the link itself.
+            val claim = AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!
             assertTrue(claim.direct)
             claim.started(42)
         }
@@ -892,6 +892,20 @@ class BrowserToolsTest {
         assertTrue(out.output.contains("unapproved download"))
         // Said once, not again with the next step.
         assertFalse(AgentDownloads.takeHeld(1))
+    }
+
+    @Test
+    fun `a download the approved link redirects to, even on its own origin, is held for the user`() = runBlocking {
+        downloadLink()
+        host.duringTap = {
+            // A page on a shared host swaps in another tenant's file on the link's origin.
+            assertNull(AgentDownloads.claim(1, "https://example.com/other-user/payload.apk"))
+        }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("APPROVAL_REQUIRED", out.code())
+        assertTrue(out.output.contains("Do not retry"))
+        assertTrue(files.records.of("chat").isEmpty())
     }
 
     @Test
@@ -970,6 +984,17 @@ class BrowserToolsTest {
         }
         assertEquals("CAPABILITY_UNAVAILABLE", tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools))).code())
 
+        // Chosen, but nothing chosen may be attached (Freedom's own files): not the user's cancel.
+        host.duringTap = {
+            val intent = AgentUploads.take(1)!!
+            intent.opened.complete(true)
+            intent.result.complete(UploadIntent.Result.Refused)
+        }
+        val refused = tools.call("browser_upload", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("CAPABILITY_UNAVAILABLE", refused.code())
+        assertFalse(refused.output.contains("\"action\":\"stop\""))
+        assertTrue(refused.output.contains("different file"))
+
         // A page that says its input holds nothing afterwards isn't reported as attached.
         host.attachedFiles = 0
         host.duringTap = {
@@ -1035,5 +1060,40 @@ class BrowserToolsTest {
         job.cancel()
         job.join()
         assertEquals(listOf(42L), files.cancelled)
+    }
+
+    @Test
+    fun `stopping the turn while the started download is being recorded stops it too`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "running")
+        files.running = kotlinx.coroutines.CompletableDeferred()
+        val inRow = kotlinx.coroutines.CompletableDeferred<Unit>()
+        files.rowGate = kotlinx.coroutines.CompletableDeferred()
+        files.onRow = { inRow.complete(Unit) }
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(42) }
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        val job = launch { tools.call("browser_download", JSONObject().put("ref", ref)) }
+        // Stopped while the started download's row is still being read, before it's recorded.
+        inRow.await()
+        job.cancel()
+        job.join()
+        assertEquals(listOf(42L), files.cancelled)
+    }
+
+    @Test
+    fun `stopping the turn leaves a download the user accepted in their own prompt running`() = runBlocking {
+        downloadLink()
+        files.askWhere = true
+        files.rows[42] = files.entry(42, "report.pdf", "running")
+        files.running = kotlinx.coroutines.CompletableDeferred()
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.started(42) }
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        val job = launch { tools.call("browser_download", JSONObject().put("ref", ref)) }
+        while (files.records.of("chat").isEmpty()) kotlinx.coroutines.yield()
+        job.cancel()
+        job.join()
+        assertTrue(files.cancelled.isEmpty())
     }
 }

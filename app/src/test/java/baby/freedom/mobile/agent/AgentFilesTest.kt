@@ -27,7 +27,15 @@ internal class FakeFiles(dir: File) : AgentFilesPort {
     )
 
     override suspend fun askWhereToSave() = askWhere
-    override suspend fun row(rowId: Long) = rows[rowId]
+    /** Called as [row] starts; then [row] waits for [rowGate] while it's set. */
+    var onRow: () -> Unit = {}
+    var rowGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    override suspend fun row(rowId: Long): DownloadEntry? {
+        onRow()
+        rowGate?.await()
+        return rows[rowId]
+    }
     /** Held open while set: the download is still running. */
     var running: kotlinx.coroutines.CompletableDeferred<Unit>? = null
     val cancelled = ArrayList<Long>()
@@ -76,11 +84,22 @@ class AgentFilesTest {
     }
 
     @Test
-    fun `a download that ends on the link's origin matches, as a same-origin redirect does on desktop`() {
+    fun `nothing else on the link's origin matches, not even a same-origin redirect`() {
         val link = "https://example.com/download?id=7"
-        assertTrue(DownloadIntentMatch.matches(link, "https://example.com/files/report-7.pdf"))
-        assertTrue(DownloadIntentMatch.matches(link, "https://EXAMPLE.com:443/x"))
-        assertTrue(DownloadIntentMatch.matches("bzz://site.eth/a.zip", "bzz://site.eth/b.zip"))
+        // A same-origin redirect: WebView reports only where it ended, which proves nothing about the chain.
+        assertFalse(DownloadIntentMatch.matches(link, "https://example.com/files/report-7.pdf"))
+        assertFalse(DownloadIntentMatch.matches(link, "https://example.com/download?id=8"))
+        assertFalse(DownloadIntentMatch.matches(link, "https://example.com/download?id=7&x=1"))
+        assertFalse(DownloadIntentMatch.matches("https://example.com/a", "https://example.com/a/"))
+        // A shared host: another tenant's file on the same origin is never the approved one.
+        assertFalse(
+            DownloadIntentMatch.matches(
+                "https://github.com/good/project/releases/download/v1/app.zip",
+                "https://github.com/evil/x/raw/main/payload.apk",
+            ),
+        )
+        assertFalse(DownloadIntentMatch.matches("http://127.0.0.1:1633/bzz/aaaa/app.zip", "http://127.0.0.1:1633/bzz/bbbb/app.zip"))
+        assertFalse(DownloadIntentMatch.matches("bzz://site.eth/a.zip", "bzz://site.eth/b.zip"))
     }
 
     @Test
@@ -93,7 +112,6 @@ class AgentFilesTest {
         assertFalse(DownloadIntentMatch.matches(link, "data:text/plain,hi"))
         assertFalse(DownloadIntentMatch.matches(link, ""))
         assertFalse(DownloadIntentMatch.matches("", link))
-        // Credentials in the address are no origin to match.
         assertFalse(DownloadIntentMatch.matches("https://user@example.com/a", "https://user@example.com/b"))
     }
 
@@ -117,6 +135,25 @@ class AgentFilesTest {
         assertNull(DownloadIntentMatch.originOf("blob:https://example.com/1"))
         assertNull(DownloadIntentMatch.originOf("file:///sdcard/x"))
         assertNull(DownloadIntentMatch.originOf("not a url"))
+    }
+
+    @Test
+    fun `a pick Freedom refuses is not the user's cancel, and an app-side close is neither`() {
+        val resolver = object : android.content.ContentResolver(null) {}
+        val page = android.webkit.ValueCallback<Array<android.net.Uri>> {}
+        fun answer(mark: (UploadIntent.Callback) -> Unit): UploadIntent.Result {
+            val intent = UploadIntent("chat", 1)
+            val callback = intent.Callback(page, resolver)
+            mark(callback)
+            callback.onReceiveValue(null)
+            return intent.result.getCompleted()
+        }
+        assertEquals(UploadIntent.Result.Cancelled, answer {})
+        // What FileChooser does when the picker said OK but every URI was filtered out.
+        assertEquals(UploadIntent.Result.Refused, answer { AgentUploads.refusing(it) })
+        assertEquals(UploadIntent.Result.Withdrawn, answer { AgentUploads.withdrawing(it) })
+        // A page's own callback (no agent upload armed) is left alone.
+        AgentUploads.refusing(page)
     }
 
     private fun intent(url: String = "https://example.com/a.zip", tab: Long = 1, direct: Boolean = true) =

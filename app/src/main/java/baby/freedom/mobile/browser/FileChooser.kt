@@ -282,6 +282,10 @@ internal class FileChooser(
         } else {
             null
         }
+        // The user chose, but nothing chosen may be uploaded: not their cancel (#600).
+        if (uris == null && result.resultCode == android.app.Activity.RESULT_OK) {
+            baby.freedom.mobile.agent.AgentUploads.refusing(p.callback)
+        }
         // The requesting tab may have been closed (its WebView destroyed)
         // while the activity was open.
         runCatching { p.callback.onReceiveValue(uris) }

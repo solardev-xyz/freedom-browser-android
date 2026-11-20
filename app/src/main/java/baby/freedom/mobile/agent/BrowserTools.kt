@@ -641,6 +641,11 @@ internal class BrowserToolset(
                     "The file chooser closed before the user chose (another page opened one, or the screen went " +
                         "away). Nothing was attached.",
                 )
+                UploadIntent.Result.Refused -> throw ToolError(
+                    ToolError.CAPABILITY_UNAVAILABLE,
+                    "The user chose a file, but Freedom can't attach that file to a page. Nothing was attached. Ask " +
+                        "the user to choose a different file.",
+                )
                 is UploadIntent.Result.Picked -> {
                     // The pick reached the page either way; the agent hears of it only
                     // if the chat still holds the tab, on the page the card named.
@@ -678,7 +683,7 @@ internal class BrowserToolset(
     /**
      * `browser_download` (#600): desktop's controlled download. Always
      * asks; the approved tap on the link arms a one-time intent on the tab,
-     * and only a download that matches it ([DownloadIntentMatch]) is saved
+     * and only a download of that exact link ([DownloadIntentMatch]) is saved
      * without the usual prompt (or offered, when the user asks where to save
      * each file). Any other download the page starts waits for the user.
      */
@@ -746,9 +751,9 @@ internal class BrowserToolset(
             is DownloadIntent.Start.Started -> start
             DownloadIntent.Start.Unapproved -> throw ToolError(
                 ToolError.APPROVAL_REQUIRED,
-                "The page attempted an unapproved download (not the approved link). It waits for the user in Freedom's " +
-                    "download prompt. Inspect the intended file and use browser_download to request approval; do not " +
-                    "retry the click.",
+                "The page attempted an unapproved download (not the approved link itself: another address, or the " +
+                    "link redirected elsewhere). It waits for the user in Freedom's download prompt. Do not retry the " +
+                    "click or the download; tell the user it is waiting for their answer.",
             )
             DownloadIntent.Start.Declined -> throw ToolError(
                 ToolError.DOWNLOAD_CANCELLED_BY_USER,
@@ -761,13 +766,15 @@ internal class BrowserToolset(
             )
             DownloadIntent.Start.TakenBack -> throw ToolError(ToolError.POLICY_DENIED, "The user took the tab back; the download is theirs now.")
         }
-        val fileName = port.row(started.rowId)?.fileName.orEmpty()
-        val record = port.records.add(sessionId, started.rowId, fileName, DownloadIntentMatch.originOf(started.url).orEmpty())
-        // Stopping the turn stops its download too (desktop's cancelAgentDownloads).
-        val row = try {
-            port.settled(started.rowId)
+        // Stopping the turn from here on stops its download too (desktop's
+        // cancelAgentDownloads), wherever the Stop lands: one that started on
+        // the approval alone. One the user accepted in the offer prompt is theirs.
+        val (record, row) = try {
+            val fileName = port.row(started.rowId)?.fileName.orEmpty()
+            val record = port.records.add(sessionId, started.rowId, fileName, DownloadIntentMatch.originOf(started.url).orEmpty())
+            record to port.settled(started.rowId)
         } catch (e: kotlinx.coroutines.CancellationException) {
-            port.cancel(started.rowId)
+            if (direct) port.cancel(started.rowId)
             throw e
         }
         val receipt = withContext(Dispatchers.IO) { DownloadReceipt.of(record, row, port::present) }

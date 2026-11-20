@@ -33,16 +33,13 @@ import org.json.JSONObject
  *
  * Desktop accepts a download whose redirect chain contains the approved
  * link and that ends on the link's origin. WebView reports only where
- * the download ended, not the chain, so here a download matches when it
- * is the approved link itself (fragment aside), or ends on the link's
- * origin: a same-origin redirect desktop also accepts. A download from
- * anywhere else is never covered (desktop's rule too), so a page can't
- * swap in another site's file. Within the one origin it covers nothing
- * a site couldn't already do: it decides what bytes the approved address
- * serves anyway.
- *
- * A `blob:` or `data:` link has no origin of its own here and must match
- * exactly.
+ * the download ended, not the chain, so "ends on the link's origin"
+ * alone would let the page pick any file on that origin: on a shared
+ * host (github.com, an S3 bucket, an IPFS or Swarm gateway) that's
+ * another tenant's file, never the one the card named. So here only the
+ * approved link itself matches, character for character (fragment
+ * aside). A download that redirects elsewhere, even on the same origin,
+ * isn't covered and waits for the user like any other.
  */
 internal object DownloadIntentMatch {
     private val WEB_SCHEMES = setOf("http", "https", "bzz", "ipfs", "ipns")
@@ -50,10 +47,7 @@ internal object DownloadIntentMatch {
     fun matches(expected: String, actual: String): Boolean {
         val e = expected.trim().substringBefore('#')
         val a = actual.trim().substringBefore('#')
-        if (e.isEmpty() || a.isEmpty()) return false
-        if (e == a) return true
-        val origin = originOf(e) ?: return false
-        return origin == originOf(a)
+        return e.isNotEmpty() && e == a
     }
 
     /** `scheme://host[:port]` of a web or dweb address, lower case, without a default port; null otherwise. */
@@ -231,6 +225,9 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
 
         /** The chooser was closed by the app, not the user (another chooser, the screen going away). */
         data object Withdrawn : Result
+
+        /** The user chose, but nothing they chose could be attached (Freedom refuses it: see `isUploadableUri`). */
+        data object Refused : Result
     }
 
     /** Whether the page's chooser opened (true) or couldn't (false). */
@@ -240,7 +237,8 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
     /**
      * The page's callback, answered as the picker answers it, with the
      * answer reported to this intent too. [withdraw]: the app is about to
-     * answer it with nothing, which isn't the user's cancel.
+     * answer it with nothing, which isn't the user's cancel. [refuse]: the
+     * user did choose, but Freedom passes nothing of it on.
      */
     inner class Callback(
         private val inner: ValueCallback<Array<Uri>>,
@@ -249,8 +247,15 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
         @Volatile
         private var withdrawn = false
 
+        @Volatile
+        private var refused = false
+
         fun withdraw() {
             withdrawn = true
+        }
+
+        fun refuse() {
+            refused = true
         }
 
         override fun onReceiveValue(value: Array<Uri>?) {
@@ -260,6 +265,7 @@ internal class UploadIntent(val sessionId: String, val tabId: Long) {
                 result.complete(
                     when {
                         withdrawn -> Result.Withdrawn
+                        value.isNullOrEmpty() && refused -> Result.Refused
                         value.isNullOrEmpty() -> Result.Cancelled
                         else -> Result.Picked(value.toList(), resolver)
                     },
@@ -307,6 +313,11 @@ internal object AgentUploads {
     /** The app answers [callback] with nothing (not the user's cancel). */
     fun withdrawing(callback: ValueCallback<Array<Uri>>) {
         (callback as? UploadIntent.Callback)?.withdraw()
+    }
+
+    /** The user chose in the picker, but nothing chosen may be attached, so the app answers [callback] with nothing. */
+    fun refusing(callback: ValueCallback<Array<Uri>>) {
+        (callback as? UploadIntent.Callback)?.refuse()
     }
 }
 
