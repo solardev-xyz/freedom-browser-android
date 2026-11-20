@@ -19,6 +19,9 @@ internal enum class ChatError {
 
     /** A subscription's sign-in has ended (#576): the provider refused to renew it. */
     SignInAgain,
+
+    /** A subscription's request was refused (#576, a 403): the account, not a key, e.g. a plan without it. */
+    AccountRefused,
     ModelNotFound,
     RateLimited,
     ServerError,

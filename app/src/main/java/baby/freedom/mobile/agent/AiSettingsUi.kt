@@ -311,7 +311,8 @@ private fun testLine(result: TestResult, model: String, keyed: Boolean, subscrip
     TestResult.Ok -> Strings.get(R.string.agent_test_ok, model)
     TestResult.NoKey -> Strings.get(if (subscription) R.string.agent_test_sign_in_first else R.string.agent_test_no_key)
     TestResult.SignInAgain -> Strings.get(R.string.agent_test_sign_in_again)
-    TestResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
+    TestResult.Unauthorized ->
+        Strings.get(if (subscription) R.string.agent_test_account_refused else R.string.agent_test_unauthorized)
     TestResult.ModelNotFound ->
         Strings.get(if (keyed) R.string.agent_test_model_not_found else R.string.agent_test_model_not_found_server, model)
     TestResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
@@ -338,7 +339,9 @@ private fun refreshLine(result: RefreshResult, definition: ProviderDefinition): 
         if (definition.kind == ProviderKind.Subscription) R.string.agent_test_sign_in_first else R.string.agent_test_no_key,
     )
     RefreshResult.SignInAgain -> Strings.get(R.string.agent_test_sign_in_again)
-    RefreshResult.Unauthorized -> Strings.get(R.string.agent_test_unauthorized)
+    RefreshResult.Unauthorized -> Strings.get(
+        if (definition.kind == ProviderKind.Subscription) R.string.agent_test_account_refused else R.string.agent_test_unauthorized,
+    )
     RefreshResult.NotFound -> Strings.get(refreshNotFoundText(definition))
     RefreshResult.RateLimited -> Strings.get(R.string.agent_test_rate_limited)
     RefreshResult.ServerError -> Strings.get(R.string.agent_test_server_error)
@@ -714,6 +717,8 @@ private fun SubscriptionSignIn(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    // Start and Cancel wait for a save under way (see cancelLogin); they only change state in memory.
+    val scope = rememberCoroutineScope()
     val login by providers.login.collectAsState()
     val mine = login?.takeIf { it.providerId == definition.id }
     var note by remember(definition.id) { mutableStateOf<String?>(null) }
@@ -762,7 +767,7 @@ private fun SubscriptionSignIn(
                     TextButton(
                         onClick = {
                             note = null
-                            providers.cancelLogin(definition.id)
+                            scope.launch { providers.cancelLogin(definition.id) }
                         },
                         modifier = Modifier.heightIn(min = 48.dp),
                     ) { Text(stringResource(R.string.agent_sign_in_cancel)) }
@@ -789,7 +794,7 @@ private fun SubscriptionSignIn(
                     Button(
                         onClick = {
                             note = null
-                            providers.startLogin(definition.id)
+                            scope.launch { providers.startLogin(definition.id) }
                         },
                         enabled = enabled && !starting,
                         modifier = Modifier.heightIn(min = 48.dp),
@@ -801,7 +806,7 @@ private fun SubscriptionSignIn(
                         )
                     }
                     if (starting) TextButton(
-                        onClick = { providers.cancelLogin(definition.id) },
+                        onClick = { scope.launch { providers.cancelLogin(definition.id) } },
                         modifier = Modifier.heightIn(min = 48.dp),
                     ) { Text(stringResource(R.string.agent_sign_in_cancel)) }
                 }

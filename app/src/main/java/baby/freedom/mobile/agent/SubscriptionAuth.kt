@@ -351,8 +351,9 @@ internal class SubscriptionAuth(
         // Pi's choice: the page with the code filled in, else the plain one;
         // then desktop's check on it. A page that fails isn't swapped for
         // another: the sign-in stops.
-        val offered = (body.opt("verification_uri_complete") as? String)
-            ?.takeIf { it.startsWith("https:", true) || it.startsWith("http:", true) }
+        // A page with the code that's there at all (not missing or empty)
+        // is the one checked, whatever its scheme.
+        val offered = (body.opt("verification_uri_complete") as? String)?.takeIf { it.isNotEmpty() }
             ?: (body.opt("verification_uri") as? String)
         val url = offered?.let { verificationUrl(META, it) }
         if (deviceCode.isNullOrEmpty() || userCode == null || !isUserCode(userCode) || url == null) {

@@ -294,6 +294,11 @@ class SubscriptionAuthTest {
         // A bad page with the code isn't swapped for a good plain one.
         metaStart(complete = "https://auth.meta.com.evil.test/device", plain = "https://auth.meta.com/device")
         assertEquals(SubscriptionAuth.Started.Failed(LoginFailure.BadReply), auth.start(SubscriptionAuth.META))
+        // Whatever its scheme: not even a javascript: one.
+        for (bad in listOf("javascript:alert(1)", "intent://auth.meta.com/device", "auth.meta.com/device")) {
+            metaStart(complete = bad, plain = "https://auth.meta.com/device")
+            assertEquals(bad, SubscriptionAuth.Started.Failed(LoginFailure.BadReply), auth.start(SubscriptionAuth.META))
+        }
         // Without the page with the code, the plain one.
         metaStart(complete = null, plain = "https://auth.meta.com/device")
         val code = (auth.start(SubscriptionAuth.META) as SubscriptionAuth.Started.Code).code

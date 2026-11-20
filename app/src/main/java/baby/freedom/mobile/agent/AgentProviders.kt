@@ -113,7 +113,7 @@ internal class AgentProviders(
     suspend fun setEnabled(on: Boolean): Boolean = locked { s ->
         if (!on) {
             gate.disable()
-            cancelLogin()
+            endLogin(null)
         }
         val ok = store.edit { it.copy(enabled = on) }
         if (on && ok) gate.enable(s.connections.associate { it.id to it.revision })
@@ -225,7 +225,7 @@ internal class AgentProviders(
     /** Disconnects [connectionId]: its key, models, favourites and default go, and its requests are cancelled. */
     suspend fun remove(connectionId: String): Boolean = locked { s ->
         // Signing out also ends a sign-in to the same provider under way.
-        cancelLogin(connectionId)
+        endLogin(connectionId)
         val old = s.connection(connectionId) ?: return@locked true
         gate.bump(connectionId, null)
         val ok = store.edit { cur ->
@@ -446,7 +446,12 @@ internal class AgentProviders(
                 // The server answered: never "couldn't reach" it.
                 is StreamEnd.Status -> StepOutcome.Failed(
                     when (end.code) {
-                        401, 403 -> ChatError.Unauthorized
+                        // A subscription has no key: the account itself was refused.
+                        401, 403 -> if (target.definition.kind == ProviderKind.Subscription) {
+                            ChatError.AccountRefused
+                        } else {
+                            ChatError.Unauthorized
+                        }
                         404 -> ChatError.ModelNotFound
                         413 -> ChatError.ContextTooLong
                         429, 529 -> ChatError.RateLimited
@@ -523,13 +528,83 @@ internal class AgentProviders(
             return Called.Done(reply)
         }
         return when (val again = authOf(store.state.first(), connection, definition, refused = first.key)) {
-            is Auth.Ready -> if (again.key == first.key) {
+            is Auth.Ready -> if (again.key == first.key || again.key == null) {
+                markSignedOut(connection.id, first.key)
                 Called.Failed(ChatError.SignInAgain)
             } else {
                 val second = call(again.key, again.accountId)
-                if (unauthorized(second)) Called.Failed(ChatError.SignInAgain) else Called.Done(second)
+                if (unauthorized(second)) {
+                    // The renewed token is refused too: this sign-in is over.
+                    markSignedOut(connection.id, again.key)
+                    Called.Failed(ChatError.SignInAgain)
+                } else {
+                    Called.Done(second)
+                }
             }
             is Auth.Unavailable -> Called.Failed(again.error)
+        }
+    }
+
+    /**
+     * Marks [connectionId] signed out ([signedOut]) if [access] is still
+     * the token in effect for it, not one renewed or signed in to since.
+     */
+    private suspend fun markSignedOut(connectionId: String, access: String) = refreshLock.withLock {
+        locked { cur -> if (inEffect(cur, connectionId)?.access == access) _signedOut.update { it + connectionId } }
+    }
+
+    /**
+     * A renewed credential the phone couldn't save ([AgentStore.edit]
+     * failed): the connection's [revision] and the stored blob it
+     * [replaces]. It's the one used, and saved again on the next look-up,
+     * as long as the connection is still that sign-in: the refresh token
+     * the stored one holds was used up by the renewal. In memory only.
+     * Guarded by [refreshLock].
+     */
+    private class Unsaved(val revision: Long, val replaces: String?, val credential: SubscriptionCredential)
+
+    private val unsaved = HashMap<String, Unsaved>()
+
+    /** [connectionId]'s credential in [s]: one renewed but not saved yet, else the stored one. Under [refreshLock]. */
+    private fun inEffect(s: AgentState, connectionId: String): SubscriptionCredential? {
+        val saved = s.keys[connectionId]
+        val held = unsaved[connectionId]
+        if (held != null && held.revision == s.connection(connectionId)?.revision && held.replaces == saved) {
+            return held.credential
+        }
+        return SubscriptionCredential.decode(saved)
+    }
+
+    /**
+     * Saves [fresh] as [connection]'s credential in place of [replaces],
+     * if it's still that sign-in (under [lock], with [refreshLock] held).
+     * `null`: it isn't any more, and [fresh] is dropped. `false`: the
+     * write failed, and [fresh] is held ([unsaved]) to use and save later.
+     */
+    private suspend fun keepLocked(
+        cur: AgentState,
+        connection: AgentConnection,
+        replaces: String?,
+        fresh: SubscriptionCredential,
+    ): Boolean? {
+        val id = connection.id
+        fun AgentState.unchanged() = connection(id)?.revision == connection.revision && keys[id] == replaces
+        if (!cur.unchanged()) {
+            unsaved.remove(id)
+            return null
+        }
+        var wrote = false
+        val ok = store.edit { now ->
+            if (!now.unchanged()) return@edit null
+            wrote = true
+            now.copy(keys = now.keys + (id to fresh.encode()))
+        }
+        // The new token works, whether or not it's on flash yet.
+        if (ok || wrote) _signedOut.update { it - id }
+        return when {
+            ok && wrote -> true.also { unsaved.remove(id) }
+            ok -> null.also { unsaved.remove(id) }
+            else -> false.also { unsaved[id] = Unsaved(connection.revision, replaces, fresh) }
         }
     }
 
@@ -551,11 +626,18 @@ internal class AgentProviders(
      * with the old token isn't cancelled.
      */
     private suspend fun credentialOf(connectionId: String, refused: String? = null): Credential = refreshLock.withLock {
+        // A renewal the phone couldn't save: saved now, if it can be.
+        unsaved[connectionId]?.let { held ->
+            locked { cur ->
+                val c = cur.connection(connectionId)
+                if (c == null || c.revision != held.revision) unsaved.remove(connectionId) else keepLocked(cur, c, held.replaces, held.credential)
+            }
+        }
         val s = locked { it }
         if (!s.enabled) return@withLock Credential.Unavailable(ChatError.AiOff)
         val connection = s.connection(connectionId) ?: return@withLock Credential.Unavailable(ChatError.KeyChanged)
         val saved = s.keys[connectionId]
-        val credential = SubscriptionCredential.decode(saved) ?: return@withLock Credential.Unavailable(ChatError.NoKey)
+        val credential = inEffect(s, connectionId) ?: return@withLock Credential.Unavailable(ChatError.NoKey)
         // Renewed meanwhile by another caller: that one's token is the answer.
         val wasRefused = refused != null && refused == credential.access
         if (!wasRefused && !credential.due(wallClock())) return@withLock Credential.Ready(credential)
@@ -579,22 +661,16 @@ internal class AgentProviders(
         fun AgentState.unchanged() = connection(connectionId)?.revision == connection.revision && keys[connectionId] == saved
         return when (val r = auth.refresh(connection.providerId, credential)) {
             is RefreshOutcome.Fresh -> locked { cur ->
-                if (!cur.unchanged()) return@locked Credential.Unavailable(ChatError.KeyChanged)
                 // Kept even if AI went off meanwhile: a ChatGPT refresh token
                 // is used up by the refresh, so dropping the new one would
-                // leave nothing to renew with once AI is back on.
-                val ok = store.edit { now ->
-                    if (!now.unchanged()) return@edit null
-                    now.copy(keys = now.keys + (connectionId to r.credential.encode()))
-                }
-                if (ok) _signedOut.update { it - connectionId }
-                when {
-                    !gate.allows(connectionId, connection.revision) -> Credential.Unavailable(
-                        if (cur.enabled) ChatError.KeyChanged else ChatError.AiOff,
-                    )
-                    // Not kept: it's still good until it runs out.
-                    !ok -> Credential.Unavailable(ChatError.ServerError)
-                    else -> Credential.Ready(r.credential)
+                // leave nothing to renew with once AI is back on. A save
+                // that fails holds it in memory instead ([unsaved]).
+                keepLocked(cur, connection, saved, r.credential)
+                    ?: return@locked Credential.Unavailable(ChatError.KeyChanged)
+                if (!gate.allows(connectionId, connection.revision)) {
+                    Credential.Unavailable(if (cur.enabled) ChatError.KeyChanged else ChatError.AiOff)
+                } else {
+                    Credential.Ready(r.credential)
                 }
             }
             RefreshOutcome.SignInAgain -> locked { cur ->
@@ -607,6 +683,13 @@ internal class AgentProviders(
             // (unless the provider has just refused it).
             is RefreshOutcome.Failed -> if (!wasRefused && wallClock() < credential.expiresAt) {
                 Credential.Ready(credential)
+            } else if (r.failure == LoginFailure.NoAccess) {
+                // Meta minted no key: as over as a refused renewal.
+                locked { cur ->
+                    if (!cur.unchanged()) return@locked Credential.Unavailable(ChatError.KeyChanged)
+                    _signedOut.update { it + connectionId }
+                    Credential.Unavailable(ChatError.SignInAgain)
+                }
             } else {
                 Credential.Unavailable(
                     when (r.failure) {
@@ -614,7 +697,6 @@ internal class AgentProviders(
                         LoginFailure.TimedOut -> ChatError.TimedOut
                         LoginFailure.RateLimited -> ChatError.RateLimited
                         LoginFailure.ServerError -> ChatError.ServerError
-                        LoginFailure.NoAccess -> ChatError.SignInAgain
                         else -> ChatError.BadReply
                     },
                 )
@@ -626,16 +708,19 @@ internal class AgentProviders(
      * Starts signing in to subscription [providerId] by device code,
      * ending any other sign-in under way. Its progress is [login]; it
      * runs on its own, so the user can go to the browser and back. Only
-     * while AI is on.
+     * while AI is on. Under [lock], like every other end of a sign-in
+     * ([cancelLogin]), so it can't land between a save's check and its write.
      */
-    fun startLogin(providerId: String): Boolean {
+    suspend fun startLogin(providerId: String): Boolean {
         val definition = ProviderCatalog.definition(providerId) ?: return false
         if (definition.kind != ProviderKind.Subscription) return false
-        synchronized(loginLock) {
-            loginJob?.cancel()
-            val generation = ++loginGeneration
-            _login.value = LoginState.Starting(providerId)
-            loginJob = loginScope.launch { runLogin(definition, generation) }
+        locked {
+            synchronized(loginLock) {
+                loginJob?.cancel()
+                val generation = ++loginGeneration
+                _login.value = LoginState.Starting(providerId)
+                loginJob = loginScope.launch { runLogin(definition, generation) }
+            }
         }
         return true
     }
@@ -656,8 +741,16 @@ internal class AgentProviders(
      * Ends the sign-in under way (or the result of one that just ended),
      * or only [providerId]'s, if given. Its requests are cancelled and
      * whatever it might still get is never saved.
+     *
+     * Under [lock], as the save is ([saveSubscription]): a Cancel tapped
+     * while a finished sign-in is being saved waits for that save, and so
+     * lands either before it (nothing is saved) or after it (the sign-in
+     * is saved, [LoginState.Done] was shown, and this only clears that).
      */
-    fun cancelLogin(providerId: String? = null) {
+    suspend fun cancelLogin(providerId: String? = null) = locked { endLogin(providerId) }
+
+    /** [cancelLogin], for a caller that already holds [lock]. */
+    private fun endLogin(providerId: String?) {
         synchronized(loginLock) {
             if (providerId != null && _login.value?.providerId != providerId) return
             loginJob?.cancel()
@@ -687,10 +780,10 @@ internal class AgentProviders(
                     return publish(generation, LoginState.Failed(providerId, finished.failure))
                 is SubscriptionAuth.Finished.Done -> finished.credential
             }
+            // Done is shown by the save itself, under the same lock.
             if (!saveSubscription(definition, credential, generation)) {
                 return publish(generation, if (isCurrent(generation)) LoginState.Failed(providerId, LoginFailure.SaveFailed) else null)
             }
-            publish(generation, LoginState.Done(providerId))
             // The account's own model list, where the provider has one.
             if (definition.catalogPath != null) refreshModels(providerId)
         } catch (e: CancellationException) {
@@ -704,8 +797,10 @@ internal class AgentProviders(
      * Saves a finished sign-in as [definition]'s connection: a new
      * revision, so requests made with an earlier sign-in's token are
      * cancelled. Only if AI is still on and the sign-in wasn't cancelled
-     * (by the user, signing out, AI off): both of those happen under
-     * [lock] too, so none can slip between the check and the write.
+     * (by the user, signing out, AI off, another sign-in): all of those
+     * happen under [lock] too, so none can slip between the check and the
+     * write. [LoginState.Done] is published under it as well, so whatever
+     * runs next sees the save and its Done together.
      */
     private suspend fun saveSubscription(
         definition: ProviderDefinition,
@@ -733,7 +828,13 @@ internal class AgentProviders(
                 defaultModel = cur.defaultModel ?: definition.defaultModelId?.let { ModelRef(id, it) },
             )
         }
-        if (ok) _signedOut.update { it - id } else gate.bump(id, old?.revision)
+        if (ok) {
+            // A renewal held from the earlier sign-in ([unsaved]) no longer matches its revision.
+            _signedOut.update { it - id }
+            publish(generation, LoginState.Done(id))
+        } else {
+            gate.bump(id, old?.revision)
+        }
         ok
     }
 

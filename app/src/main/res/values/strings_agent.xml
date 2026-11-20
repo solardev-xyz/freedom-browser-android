@@ -110,6 +110,7 @@
     <string name="agent_test_ok">%1$s replied. The connection works.</string>
     <string name="agent_test_no_key">Save a key first.</string>
     <string name="agent_test_unauthorized">The provider didn\'t accept the key.</string>
+    <string name="agent_test_account_refused">The provider refused this account. Your plan may not include it.</string>
     <string name="agent_test_sign_in_again">Your sign-in has ended. Sign in again.</string>
     <string name="agent_test_model_not_found">The provider doesn\'t offer %1$s to this key.</string>
     <string name="agent_test_model_not_found_server">The server doesn\'t offer %1$s.</string>
@@ -173,6 +174,7 @@
     <string name="agent_error_no_key">The provider\'s API key can\'t be read. Enter it again in Settings → AI.</string>
     <string name="agent_error_bad_url">The server\'s address isn\'t allowed. Check it in Settings → AI.</string>
     <string name="agent_error_unauthorized">The provider didn\'t accept the API key.</string>
+    <string name="agent_error_account_refused">The provider refused this account. Your plan may not include it.</string>
     <string name="agent_error_sign_in_again">Your sign-in has ended. Sign in again under Settings → AI → Models &amp; providers.</string>
     <string name="agent_error_model_not_found">The provider doesn\'t have this model.</string>
     <string name="agent_error_rate_limited">The provider is busy or this key has reached its limit. Try again later.</string>

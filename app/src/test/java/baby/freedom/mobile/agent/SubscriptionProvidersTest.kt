@@ -1,5 +1,6 @@
 package baby.freedom.mobile.agent
 
+import baby.freedom.mobile.R
 import baby.freedom.mobile.agent.SubscriptionAuthTest.Companion.jwt
 import baby.freedom.mobile.data.AesGcmCipher
 import baby.freedom.mobile.data.NodeSettingsEnsRpcTest.MemoryStore
@@ -7,6 +8,9 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.crypto.KeyGenerator
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,9 +41,22 @@ import org.junit.Test
  * renewed once, kept only for the sign-in it was renewed for.
  */
 class SubscriptionProvidersTest {
+    /** The settings file, with a hook run before each write: to hold one, or fail it. */
+    private class HookedStore : DataStore<Preferences> {
+        private val inner = MemoryStore()
+
+        @Volatile
+        var beforeWrite: (suspend () -> Unit)? = null
+        override val data = inner.data
+        override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+            beforeWrite?.invoke()
+            return inner.updateData(transform)
+        }
+    }
+
     private val server = MockWebServer()
     private val aes = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
-    private val file = MemoryStore()
+    private val file = HookedStore()
     private val modelFile = MemoryStore()
     private val gate = RequestGate()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -338,19 +355,137 @@ class SubscriptionProvidersTest {
         val sent = requests("/openai-codex/codex/responses")
         assertEquals(listOf("Bearer ${jwt("acct-1")}", "Bearer ${jwt("acct-1", "second")}"), sent.map { it.getHeader("Authorization") })
         assertEquals("rt-2", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
-        // The renewed token refused too: sign in again.
+        // A 403 doesn't say the token's dead: no renewal for it, and not
+        // signed out. The account was refused, not a key (it has none).
+        val renewals = requests("/openai/oauth/token").size
+        routes["/openai-codex/codex/responses"] = { MockResponse().setResponseCode(403) }
+        assertEquals(StepOutcome.Failed(ChatError.AccountRefused), providers.streamStep(target, request) {})
+        assertEquals(TestResult.Unauthorized, providers.testConnection(SubscriptionAuth.CODEX, "gpt-6-astra"))
+        assertEquals(renewals, requests("/openai/oauth/token").size)
+        assertFalse(SubscriptionAuth.CODEX in providers.signedOut.value)
+        // The renewed token refused too: sign in again, and the row says so.
         routes["/openai-codex/codex/responses"] = { MockResponse().setResponseCode(401) }
         routes["/openai/oauth/token"] = { renewed("third", "rt-3") }
         assertEquals(StepOutcome.Failed(ChatError.SignInAgain), providers.streamStep(target, request) {})
+        assertTrue(SubscriptionAuth.CODEX in providers.signedOut.value)
         // The renewal refused: sign in again.
         routes["/openai/oauth/token"] = { json(JSONObject().put("error", "invalid_grant"), 401) }
         assertEquals(StepOutcome.Failed(ChatError.SignInAgain), providers.streamStep(target, request) {})
         assertEquals(TestResult.SignInAgain, providers.testConnection(SubscriptionAuth.CODEX, "gpt-6-astra"))
-        // A 403 doesn't say the token's dead: no renewal for it.
-        val renewals = requests("/openai/oauth/token").size
-        routes["/openai-codex/codex/responses"] = { MockResponse().setResponseCode(403) }
-        assertEquals(StepOutcome.Failed(ChatError.Unauthorized), providers.streamStep(target, request) {})
-        assertEquals(renewals, requests("/openai/oauth/token").size)
+        assertTrue(SubscriptionAuth.CODEX in providers.signedOut.value)
+        // An API key's 403 is still the key's.
+        assertEquals(R.string.agent_error_unauthorized, errorText(ChatError.Unauthorized))
+        assertEquals(R.string.agent_error_account_refused, errorText(ChatError.AccountRefused))
+    }
+
+    @Test
+    fun `a cancel tapped while a finished sign-in is saved waits for the save`() = runBlocking {
+        codexServer(pending = true)
+        assertTrue(providers.setEnabled(true))
+        assertTrue(providers.startLogin(SubscriptionAuth.CODEX))
+        withTimeout(5_000) { providers.login.first { it is LoginState.Waiting } }
+        // Hold the save's write: past its check that the sign-in is current.
+        val saving = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        file.beforeWrite = {
+            file.beforeWrite = null
+            saving.complete(Unit)
+            release.await()
+        }
+        codexServer(pending = false)
+        withTimeout(5_000) { saving.await() }
+        val cancel = async(Dispatchers.IO) { providers.cancelLogin(SubscriptionAuth.CODEX) }
+        delay(300)
+        // Cancel waits for the save rather than landing in its middle.
+        assertFalse(cancel.isCompleted)
+        assertTrue(providers.login.value is LoginState.Waiting)
+        release.complete(Unit)
+        withTimeout(5_000) { cancel.await() }
+        // It landed after the save: signed in, and nothing on the page
+        // claims otherwise (its Done is cleared, as for a finished one).
+        assertTrue(state.connection(SubscriptionAuth.CODEX)!!.hasKey)
+        assertNull(providers.login.value)
+        // The same for starting the other provider's sign-in.
+        assertTrue(providers.remove(SubscriptionAuth.CODEX))
+        codexServer(pending = true)
+        assertTrue(providers.startLogin(SubscriptionAuth.CODEX))
+        withTimeout(5_000) { providers.login.first { it is LoginState.Waiting } }
+        val saving2 = CompletableDeferred<Unit>()
+        val release2 = CompletableDeferred<Unit>()
+        file.beforeWrite = {
+            file.beforeWrite = null
+            saving2.complete(Unit)
+            release2.await()
+        }
+        routes["/meta/oidc/device/authorization/"] = { MockResponse().setResponseCode(503) }
+        codexServer(pending = false)
+        withTimeout(5_000) { saving2.await() }
+        val other = async(Dispatchers.IO) { providers.startLogin(SubscriptionAuth.META) }
+        delay(300)
+        assertFalse(other.isCompleted)
+        release2.complete(Unit)
+        assertTrue(withTimeout(5_000) { other.await() })
+        assertTrue(state.connection(SubscriptionAuth.CODEX)!!.hasKey)
+    }
+
+    @Test
+    fun `a renewed token the phone couldn't save is used, and saved on the next look-up`() = runBlocking {
+        codexServer(expiresIn = 60)
+        assertTrue(providers.setEnabled(true))
+        signIn(SubscriptionAuth.CODEX)
+        val ref = ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")
+        routes["/openai/oauth/token"] = { renewed("second") }
+        file.beforeWrite = { throw java.io.IOException("disk full") }
+        // rt-1 is used up by this refresh: its answer is the sign-in now.
+        assertEquals(jwt("acct-1", "second"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        assertEquals("rt-1", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
+        val refreshes = requests("/openai/oauth/token").size
+        // Still not saved: the held one is used, never the spent rt-1 again.
+        assertEquals(jwt("acct-1", "second"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        assertEquals(refreshes, requests("/openai/oauth/token").size)
+        file.beforeWrite = null
+        assertEquals(jwt("acct-1", "second"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        assertEquals("rt-2", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
+        assertEquals(refreshes, requests("/openai/oauth/token").size)
+    }
+
+    @Test
+    fun `a held renewal never outlives signing out`() = runBlocking {
+        codexServer(expiresIn = 60)
+        assertTrue(providers.setEnabled(true))
+        signIn(SubscriptionAuth.CODEX)
+        val ref = ModelRef(SubscriptionAuth.CODEX, "gpt-6-astra")
+        routes["/openai/oauth/token"] = { renewed("second") }
+        file.beforeWrite = { throw java.io.IOException("disk full") }
+        assertEquals(jwt("acct-1", "second"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        file.beforeWrite = null
+        assertTrue(providers.remove(SubscriptionAuth.CODEX))
+        assertTrue(providers.chatTarget(ref) is ChatTarget.Unavailable)
+        assertTrue(state.keys.isEmpty())
+        // A new sign-in is its own, not the held renewal of the old one.
+        codexServer(expiresIn = 3600)
+        signIn(SubscriptionAuth.CODEX)
+        assertEquals(jwt("acct-1"), (providers.chatTarget(ref) as ChatTarget.Ready).key)
+        assertEquals("rt-1", SubscriptionCredential.decode(state.keys[SubscriptionAuth.CODEX])!!.refresh)
+    }
+
+    @Test
+    fun `meta minting no key any more signs it out`() = runBlocking {
+        routes["/meta/oidc/device/authorization/"] = {
+            json(
+                JSONObject().put("device_code", "dc").put("user_code", "WXYZ-9876").put("interval", 1)
+                    .put("verification_uri", "https://auth.meta.com/device"),
+            )
+        }
+        routes["/meta/oidc/device/token/"] = { json(JSONObject().put("access_token", "identity-1")) }
+        routes["/mint"] = { json(JSONObject().put("api_key", "mk-1")) }
+        assertTrue(providers.setEnabled(true))
+        assertEquals(LoginState.Done(SubscriptionAuth.META), signIn(SubscriptionAuth.META))
+        routes["/mint"] = { json(JSONObject()) }
+        now += 2 * 24 * 3_600_000L
+        val ref = ModelRef(SubscriptionAuth.META, "muse-spark-1.3")
+        assertEquals(ChatTarget.Unavailable(ChatError.SignInAgain), providers.chatTarget(ref))
+        assertTrue(SubscriptionAuth.META in providers.signedOut.value)
     }
 
     @Test
