@@ -5,10 +5,11 @@ import baby.freedom.swarm.IpfsStatus
 import baby.freedom.swarm.NodeStatus
 import baby.freedom.swarm.SwarmNode
 import java.io.ByteArrayOutputStream
-import java.net.HttpURLConnection
 import java.net.Proxy
-import java.net.URL
 import java.security.MessageDigest
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 
 /**
@@ -78,7 +79,8 @@ internal data class NodeRequestArgs(
                         throw invalid("request header is not allowed: $rawName")
                     }
                     val value = h.opt(rawName) as? String ?: throw invalid("request.headers.$rawName must be a string")
-                    if (value.length > MAX_HEADER_VALUE || value.any { it == '\r' || it == '\n' || it == '\u0000' }) {
+                    // Printable ASCII and tab: what goes on the wire as it was shown (no line breaks, no bytes an HTTP stack would refuse).
+                    if (value.length > MAX_HEADER_VALUE || value.any { it != '\t' && (it < ' ' || it > '~') }) {
                         throw invalid("request header value is invalid: $rawName")
                     }
                     headers[name] = value
@@ -248,61 +250,68 @@ internal data class NodeResponse(
 internal class NodeResponseTooLarge : Exception("Node response exceeds the ${NodeResponse.MAX_BYTES}-byte limit")
 
 /**
- * Sends one request to a node on this phone and reads its answer: no
- * proxy, no redirect followed, a fresh connection that's closed after
- * (never a pooled one the platform might send a write on twice), the
- * body sent with its exact length, and at most [NodeResponse.MAX_BYTES]
- * read back whatever `Content-Length` says. [connection] is handed the
- * open connection first, so whoever runs this can close it from another
- * thread to end a blocked read.
+ * Sends one request to a node on this phone and reads its answer, on
+ * OkHttp with nothing it would do on its own: no proxy, no redirect
+ * followed, no retry after a failed connection, no pooled connection
+ * (each request gets a fresh one, closed after, so a write can never go
+ * out twice on a stale socket), no transparent gzip, and at most
+ * [NodeResponse.MAX_BYTES] read back whatever `Content-Length` says
+ * (a HEAD reads no body, so its length isn't bounded). [onCall] is handed
+ * the call first, so whoever runs this can cancel it from another thread
+ * to end a blocked read.
  */
 internal object NodeHttp {
-    fun send(base: String, args: NodeRequestArgs, connection: (HttpURLConnection) -> Unit = {}): NodeResponse {
-        val url = URL(base.trimEnd('/') + args.path)
-        val conn = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
-        connection(conn)
-        try {
-            conn.instanceFollowRedirects = false
-            conn.useCaches = false
-            conn.connectTimeout = 5_000
-            conn.readTimeout = 0
-            conn.requestMethod = args.method
-            conn.setRequestProperty("Connection", "close")
-            conn.setRequestProperty("Accept-Encoding", "identity")
-            args.headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
-            val body = args.body?.toByteArray(Charsets.UTF_8)
-            if (body != null) {
-                conn.doOutput = true
-                conn.setFixedLengthStreamingMode(body.size)
-                conn.outputStream.use { it.write(body) }
-            }
-            val status = conn.responseCode
+    private val client: okhttp3.OkHttpClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .proxy(Proxy.NO_PROXY)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .retryOnConnectionFailure(false)
+            .connectionPool(okhttp3.ConnectionPool(0, 1, java.util.concurrent.TimeUnit.SECONDS))
+            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
+            .cache(null)
+            .cookieJar(okhttp3.CookieJar.NO_COOKIES)
+            .build()
+    }
+
+    fun send(base: String, args: NodeRequestArgs, onCall: (okhttp3.Call) -> Unit = {}): NodeResponse {
+        val url = (base.trimEnd('/') + args.path).toHttpUrlOrNull() ?: throw java.io.IOException("bad node URL")
+        val body = args.body?.toByteArray(Charsets.UTF_8)?.toRequestBody(args.headers["content-type"]?.toMediaTypeOrNull())
+            ?: if (args.method in setOf("POST", "PUT", "PATCH")) ByteArray(0).toRequestBody(null) else null
+        val request = okhttp3.Request.Builder()
+            .url(url)
+            .method(args.method, body)
+            .header("Connection", "close")
+            .header("Accept-Encoding", "identity")
+            .apply { args.headers.forEach { (k, v) -> header(k, v) } }
+            .build()
+        val call = client.newCall(request)
+        onCall(call)
+        call.execute().use { response ->
             val headers = LinkedHashMap<String, String>()
-            conn.headerFields.forEach { (k, v) ->
-                val name = k?.lowercase(java.util.Locale.ROOT) ?: return@forEach
-                if (name in NodeResponse.HEADERS && !v.isNullOrEmpty()) headers[name] = v.joinToString(", ")
+            for (name in response.headers.names()) {
+                val lower = name.lowercase(java.util.Locale.ROOT)
+                if (lower in NodeResponse.HEADERS) headers[lower] = response.headers.values(name).joinToString(", ")
             }
+            if (args.method == "HEAD") return NodeResponse(response.code, response.message, headers, "", 0)
             headers["content-length"]?.toLongOrNull()?.let { if (it > NodeResponse.MAX_BYTES) throw NodeResponseTooLarge() }
-            val text = if (args.method == "HEAD") "" else read(conn)
-            return NodeResponse(status, conn.responseMessage.orEmpty(), headers, text, text.toByteArray(Charsets.UTF_8).size)
-        } finally {
-            conn.disconnect()
+            val text = response.body?.let { read(it.byteStream()) }.orEmpty()
+            return NodeResponse(response.code, response.message, headers, text, text.toByteArray(Charsets.UTF_8).size)
         }
     }
 
-    private fun read(conn: HttpURLConnection): String {
-        val stream = (if (conn.responseCode >= 400) conn.errorStream else conn.inputStream) ?: return ""
-        stream.use { input ->
-            val out = ByteArrayOutputStream()
-            val buf = ByteArray(8192)
-            while (true) {
-                val n = input.read(buf)
-                if (n < 0) break
-                if (out.size() + n > NodeResponse.MAX_BYTES) throw NodeResponseTooLarge()
-                out.write(buf, 0, n)
-            }
-            return out.toString(Charsets.UTF_8.name())
+    private fun read(input: java.io.InputStream): String {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            if (out.size() + n > NodeResponse.MAX_BYTES) throw NodeResponseTooLarge()
+            out.write(buf, 0, n)
         }
+        return out.toString(Charsets.UTF_8.name())
     }
 
     /** The embedded Swarm node's gateway: the only Bee API the agent may reach. */
@@ -311,6 +320,20 @@ internal object NodeHttp {
 
 /** Where a node request may go, from the live node state; a [ToolError] when it can't go anywhere. */
 internal object NodeEndpoints {
+    /**
+     * A read that may run without a sheet in a relaxed mode (when the
+     * classifier also calls it a read): IPFS content, and the Swarm
+     * node's content surface and liveness probes ([NodeApiGuard.DAPP_PATHS])
+     * — never its account, wallet, peers or anything else about the user,
+     * which `node_status` doesn't share and diagnostics ask about.
+     */
+    fun publicRead(args: NodeRequestArgs): Boolean {
+        if (args.write) return false
+        if (args.service == "ipfs") return true
+        val first = args.path.substringBefore('?').split('/').firstOrNull { it.isNotEmpty() }
+        return args.service == "ant" && first != null && first in NodeApiGuard.DAPP_PATHS
+    }
+
     fun baseFor(service: String, s: NodeSnapshot?): String {
         if (service == "radicle") {
             throw ToolError(

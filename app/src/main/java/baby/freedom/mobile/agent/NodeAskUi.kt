@@ -63,10 +63,9 @@ import baby.freedom.mobile.browser.restartsTapGuard
 @Composable
 internal fun NodeAskHost() {
     DisposableEffect(Unit) {
-        AgentNodeAsks.hostUp = true
+        AgentNodeAsks.hostShown()
         onDispose {
-            AgentNodeAsks.hostUp = false
-            AgentNodeAsks.withdrawAll()
+            if (AgentNodeAsks.hostGone()) AgentNodeAsks.withdrawAll()
         }
     }
     val ask by AgentNodeAsks.shown.collectAsState()
@@ -204,14 +203,14 @@ private fun NodeAskBody(ask: NodeAsk) {
             if (args.headers.isNotEmpty()) {
                 Field(
                     stringResource(R.string.agent_node_request_headers),
-                    args.headers.entries.joinToString("\n") { (k, v) -> "$k: ${ApprovalText.flatten(v, 200)}" },
+                    args.headers.entries.joinToString("\n") { (k, v) -> "$k: $v" },
                     mono = true,
                 )
             }
             args.body?.let { body ->
                 Field(
                     stringResource(R.string.agent_node_request_body),
-                    when (val typed = ApprovalText.typed(body, BODY_SHOWN_CHARS)) {
+                    when (val typed = ApprovalText.typed(body, NodeRequestArgs.MAX_BODY_BYTES)) {
                         ApprovalText.Typed.Empty -> stringResource(R.string.agent_node_request_body_empty)
                         is ApprovalText.Typed.Blank -> stringResource(R.string.agent_node_request_body_blank, typed.count)
                         is ApprovalText.Typed.Shown -> typed.text
@@ -293,6 +292,3 @@ private fun Field(label: String, value: String, mono: Boolean = false) {
         Text(value, style = MaterialTheme.typography.bodyMedium, fontFamily = if (mono) FontFamily.Monospace else null)
     }
 }
-
-/** A request body is shown in full up to this many characters. */
-private const val BODY_SHOWN_CHARS = 4_000

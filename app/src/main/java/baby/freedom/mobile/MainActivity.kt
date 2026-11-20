@@ -116,6 +116,7 @@ import baby.freedom.swarm.TorInfo
 import baby.freedom.swarm.TorStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
@@ -1085,6 +1086,12 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
         super.startIntentSender(intent, fillInIntent, flagsMask, flagsValues, extraFlags, options)
     }
 
+    /** The Activity in front takes the agent's node switches back (a second one, opened for an App Link, may have gone). */
+    override fun onResume() {
+        super.onResume()
+        AgentNodes.controls.set(agentNodeControls)
+    }
+
     override fun onDestroy() {
         AgentNodes.clearControls(agentNodeControls)
         NodeIdentitySync.get(this).clearOnChanged(identityChanged)
@@ -1102,13 +1109,15 @@ class MainActivity : ComponentActivity(), PageKeyEvents {
      * Set while this Activity lives ([AgentNodes.clearControls] in [onDestroy]).
      */
     private val agentNodeControls = object : NodeControls {
-        override suspend fun runNode(on: Boolean): Boolean {
+        // The setting and the service move together, whatever cancels the caller.
+        override suspend fun runNode(on: Boolean): Boolean = withContext(NonCancellable + Dispatchers.Main) {
             settings.setRunNodeEnabled(on)
             if (on) {
                 startAndBindService()
-                return false
+                false
+            } else {
+                stopAndUnbindService()
             }
-            return stopAndUnbindService()
         }
 
         override fun ipfs(on: Boolean) = onIpfsToggle(on)

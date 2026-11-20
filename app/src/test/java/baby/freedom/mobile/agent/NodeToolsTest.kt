@@ -204,6 +204,8 @@ class NodeToolsTest {
             parseError(request(method = "POST") { it.put("headers", JSONObject().put(h, "1")) })
         }
         parseError(request(method = "POST") { it.put("headers", JSONObject().put("x-a", "1\r\nHost: evil")) })
+        parseError(request(method = "POST") { it.put("headers", JSONObject().put("x-a", "café")) })
+        parseError(request(method = "POST") { it.put("headers", JSONObject().put("x-a", "a\u0000b")) })
         parseError(request(method = "POST") { it.put("body", "é".repeat(NodeRequestArgs.MAX_BODY_BYTES / 2 + 1)) })
         parseError(request().put("extra", 1))
         parseError(request(path = "/a/../stamps"))
@@ -255,7 +257,7 @@ class NodeToolsTest {
     private val sent = mutableListOf<Pair<String, NodeRequestArgs>>()
 
     private fun answering(response: NodeResponse = NodeResponse(200, "OK", mapOf("content-type" to "application/json"), "{}", 2)) =
-        { base: String, args: NodeRequestArgs, _: (java.net.HttpURLConnection) -> Unit ->
+        { base: String, args: NodeRequestArgs, _: (okhttp3.Call) -> Unit ->
             sent += base to args
             response
         }
@@ -311,6 +313,19 @@ class NodeToolsTest {
             assertTrue(asks.asked.isEmpty())
             assertEquals("safe", json(out).getJSONObject("result").getJSONObject("operation").getString("retrySafety"))
             assertEquals("/health", sent.last().second.path)
+        }
+        // Relaxed and confident, but about the node's own account, wallet or peers: asks.
+        for (path in listOf("/wallet", "/addresses", "/peers", "/stamps", "/HEALTH")) {
+            val asks = Asks()
+            NodeRequestTool(deps(Approvals(ApprovalMode.AllowWebsiteInteractions, confident), asks), NodeOperations(MemoryNodeOperationStore()), answering())
+                .run(request(path = path))
+            assertEquals(path, 1, asks.asked.size)
+        }
+        // IPFS content is public too.
+        Asks().let { asks ->
+            NodeRequestTool(deps(Approvals(ApprovalMode.AllowWebsiteInteractions, confident), asks), NodeOperations(MemoryNodeOperationStore()), answering())
+                .run(request(service = "ipfs", path = "/ipfs/bafkqaaa"))
+            assertTrue(asks.asked.isEmpty())
         }
         // Relaxed, but unsure (or no model): asks.
         for (c in listOf(confident.copy(confidence = 0.5), confident.copy(uncertainties = listOf("?")), EffectClassifier.unknown())) {
@@ -371,7 +386,7 @@ class NodeToolsTest {
         val ops = NodeOperations(MemoryNodeOperationStore())
         val release = CountDownLatch(1)
         var calls = 0
-        val slow = { _: String, _: NodeRequestArgs, _: (java.net.HttpURLConnection) -> Unit ->
+        val slow = { _: String, _: NodeRequestArgs, _: (okhttp3.Call) -> Unit ->
             calls++
             release.await(5, TimeUnit.SECONDS)
             NodeResponse(201, "Created", emptyMap(), "{\"ok\":true}", 11)
@@ -398,7 +413,7 @@ class NodeToolsTest {
     fun `a write whose answer never came is delivery uncertain, unsafe to retry, and not sent again`() = runBlocking {
         val ops = NodeOperations(MemoryNodeOperationStore())
         var calls = 0
-        val broken = { _: String, _: NodeRequestArgs, _: (java.net.HttpURLConnection) -> Unit ->
+        val broken = { _: String, _: NodeRequestArgs, _: (okhttp3.Call) -> Unit ->
             calls++
             throw java.io.IOException("reset")
         }
@@ -444,6 +459,86 @@ class NodeToolsTest {
             assertEquals(1, FileNodeOperationStore(dir).listRecent("chat-2", 20).size)
         } finally {
             dir.deleteRecursively()
+        }
+    }
+
+    // ---- the transport ---------------------------------------------------
+
+    /**
+     * A node that takes each request and hangs up without answering, as
+     * one crashing mid-write would: [accepted] counts the connections.
+     */
+    private class HangUp : AutoCloseable {
+        val server = java.net.ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+        val accepted = java.util.concurrent.atomic.AtomicInteger()
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        private val thread = Thread {
+            while (!server.isClosed) {
+                val s = try {
+                    server.accept()
+                } catch (e: Exception) {
+                    break
+                }
+                accepted.incrementAndGet()
+                s.use {
+                    val head = StringBuilder()
+                    val input = it.getInputStream()
+                    while (!head.endsWith("\r\n\r\n")) {
+                        val c = input.read()
+                        if (c < 0) break
+                        head.append(c.toChar())
+                    }
+                    requests += head.toString()
+                }
+            }
+        }.apply { isDaemon = true; start() }
+        val base get() = "http://127.0.0.1:${server.localPort}"
+        override fun close() = server.close()
+    }
+
+    @Test
+    fun `a write the node hung up on was sent exactly once, on its own connection, with nothing added`() {
+        for (method in listOf("DELETE", "POST", "PUT", "PATCH")) {
+            HangUp().use { node ->
+                val args = NodeRequestArgs("ant", "http", method, "/pins/abc", mapOf("x-test" to "1"))
+                try {
+                    NodeHttp.send(node.base, args)
+                    fail("$method answered")
+                } catch (e: java.io.IOException) {
+                    // Expected: the node hung up.
+                }
+                Thread.sleep(200)
+                assertEquals(method, 1, node.accepted.get())
+                val head = node.requests.single()
+                assertTrue(head, head.startsWith("$method /pins/abc HTTP/1.1\r\n"))
+                assertTrue(head, head.contains("x-test: 1\r\n"))
+                assertTrue(head, head.contains("Connection: close\r\n"))
+                assertFalse(head, head.contains("Cookie"))
+            }
+        }
+    }
+
+    @Test
+    fun `answers are bounded, a HEAD isn't, and a redirect comes back as it is`() {
+        okhttp3.mockwebserver.MockWebServer().use { server ->
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setBody("x".repeat(NodeResponse.MAX_BYTES + 1)))
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setHeader("Content-Length", "1000000").setHeader("ETag", "\"e\""))
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(307).setHeader("Location", "http://evil.example/").setHeader("Set-Cookie", "a=b"))
+            val base = server.url("/").toString()
+            try {
+                NodeHttp.send(base, NodeRequestArgs("ant", "http", "GET", "/bytes/x"))
+                fail("read past the bound")
+            } catch (e: NodeResponseTooLarge) {
+                // Expected.
+            }
+            val head = NodeHttp.send(base, NodeRequestArgs("ant", "http", "HEAD", "/bzz/x"))
+            assertEquals(200, head.status)
+            assertEquals("\"e\"", head.headers["etag"])
+            val redirect = NodeHttp.send(base, NodeRequestArgs("ant", "http", "GET", "/bzz/y"))
+            assertEquals(307, redirect.status)
+            assertEquals("http://evil.example/", redirect.headers["location"])
+            assertNull(redirect.headers["set-cookie"])
+            assertEquals(3, server.requestCount)
         }
     }
 

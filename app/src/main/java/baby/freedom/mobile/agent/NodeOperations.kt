@@ -215,7 +215,15 @@ internal class FileNodeOperationStore(private val dir: File, private val now: ()
             tmp.delete()
             throw java.io.IOException("rename failed")
         }
-        runCatching { FileOutputStream(dir).use { it.fd.sync() } }
+        // The rename survives a power loss only once the directory is synced too.
+        runCatching {
+            val fd = android.system.Os.open(dir.path, android.system.OsConstants.O_RDONLY, 0)
+            try {
+                android.system.Os.fsync(fd)
+            } finally {
+                android.system.Os.close(fd)
+            }
+        }
     }
 
     companion object {

@@ -88,9 +88,9 @@ internal data class NodeAsk(
  * The node actions Freedom Agent is waiting on the user for: the same
  * shape as [AgentTransfers] (one sheet at a time, oldest first, each
  * answer settling exactly its ask, a withdrawal never read as the
- * user's no), ids from [AgentApprovals.nextId]. [hostUp] is set by the
- * browser screen's [NodeAskHost] while it can show one; with no host,
- * nothing is asked.
+ * user's no), ids from [AgentApprovals.nextId]. [hostUp] while at least
+ * one browser screen's [NodeAskHost] can show one; with no host, nothing
+ * is asked.
  */
 internal object AgentNodeAsks {
     private class Pending(val ask: NodeAsk, val result: CompletableDeferred<ApprovalOutcome>)
@@ -100,8 +100,17 @@ internal object AgentNodeAsks {
     private val _shown = MutableStateFlow<NodeAsk?>(null)
     val shown: StateFlow<NodeAsk?> = _shown.asStateFlow()
 
-    @Volatile
-    var hostUp: Boolean = false
+    /** How many hosts are up: a second browser Activity's host going leaves the first one's. */
+    private val hosts = java.util.concurrent.atomic.AtomicInteger()
+
+    val hostUp: Boolean get() = hosts.get() > 0
+
+    fun hostShown() {
+        hosts.incrementAndGet()
+    }
+
+    /** True when it was the last. */
+    fun hostGone(): Boolean = hosts.decrementAndGet() <= 0
 
     suspend fun ask(ask: NodeAsk): ApprovalOutcome {
         val entry = Pending(ask, CompletableDeferred())
@@ -192,9 +201,13 @@ private fun ok(result: JSONObject) = ToolOutcome(JSONObject().put("ok", true).pu
  * The path is made canonical first ([NodePaths]), and that one string is
  * shown, classified, journaled and sent. Every write asks the user, in
  * every mode; so does every read in "every interaction". In the relaxed
- * modes a read runs without asking only when the effect classifier calls
- * it a read, confidently and with no doubt ([EffectPolicy]); the mode is
- * read again once the classifier answers.
+ * modes a read runs without asking only when it's a public read
+ * ([NodeEndpoints.publicRead]: IPFS content, the Swarm node's content and
+ * liveness routes) and the effect classifier calls it a read, confidently
+ * and with no doubt ([EffectPolicy]); the mode is read again once the
+ * classifier answers. Desktop lets any confident read run; here the Swarm
+ * node's account, wallet, peer and other private reads always ask, as
+ * `node_status` never shares them and diagnostics ask every time.
  *
  * Spending routes carry desktop's money floor ([NodeSpending]: at least
  * financial, so never without the user). On this phone they're refused
@@ -212,7 +225,7 @@ private fun ok(result: JSONObject) = ToolOutcome(JSONObject().put("ok", true).pu
 internal class NodeRequestTool(
     private val deps: NodeToolDeps,
     private val ops: NodeOperations,
-    private val send: (String, NodeRequestArgs, (java.net.HttpURLConnection) -> Unit) -> NodeResponse = NodeHttp::send,
+    private val send: (String, NodeRequestArgs, (okhttp3.Call) -> Unit) -> NodeResponse = NodeHttp::send,
     private val observeMs: Long = OBSERVE_MS,
     private val writeDeadlineMs: Long = WRITE_DEADLINE_MS,
 ) : AgentTool {
@@ -268,7 +281,8 @@ internal class NodeRequestTool(
                 .put("wireProtocol", if (args.service == "ipfs") "Freedom IPFS native gateway" else "Bee HTTP API"),
         )
         val policy = EffectPolicy.decide(classification, minimum)
-        val runs = policy.proceed && deps.approvals.mode != ApprovalMode.EveryInteraction
+        // The mode as it is now, after the classifier's answer.
+        val runs = policy.proceed && NodeEndpoints.publicRead(args) && deps.approvals.mode != ApprovalMode.EveryInteraction
         if (!runs) {
             askUser(
                 deps,
@@ -298,19 +312,19 @@ internal class NodeRequestTool(
             createdAt = now,
             updatedAt = now,
         )
-        try {
-            ops.store.put(created)
-            ops.store.put(created.copy(state = NodeOperation.IN_FLIGHT, updatedAt = ops.now()))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // Not sent: there'd be no receipt to follow it by.
-            throw unavailable("Freedom couldn't record the node request, so it didn't send it. Try again shortly.")
-        }
         val write = effect != Effect.READ
         val id = created.operationId
-        val job = ops.scope.async(start = CoroutineStart.ATOMIC) { exchange(id, base, args, write) }
-        ops.track(id, job)
+        // Recorded and handed off as one step: a Stop can't leave a receipt for a request never sent.
+        val job = withContext(kotlinx.coroutines.NonCancellable) {
+            try {
+                ops.store.put(created)
+                ops.store.put(created.copy(state = NodeOperation.IN_FLIGHT, updatedAt = ops.now()))
+            } catch (e: Exception) {
+                // Not sent: there'd be no receipt to follow it by.
+                throw unavailable("Freedom couldn't record the node request, so it didn't send it. Try again shortly.")
+            }
+            ops.scope.async(start = CoroutineStart.ATOMIC) { exchange(id, base, args, write) }.also { ops.track(id, it) }
+        }
         if (!write) {
             // A read is this turn's own: Stop or its deadline ends it.
             return try {
@@ -441,26 +455,26 @@ internal class NodeRequestTool(
 }
 
 /**
- * Runs [block] on an IO thread; cancelling the caller closes the
- * connection [block] hands over, from the cancelling thread, so a read
- * blocked on the node ends at once instead of when it times out.
+ * Runs [block] on an IO thread; cancelling the caller cancels the call
+ * [block] hands over, from another thread, so a read blocked on the
+ * node ends at once instead of when it times out.
  */
-private suspend fun <T> blocking(block: ((java.net.HttpURLConnection) -> Unit) -> T): T = kotlinx.coroutines.coroutineScope {
-    val conn = java.util.concurrent.atomic.AtomicReference<java.net.HttpURLConnection?>()
+private suspend fun <T> blocking(block: ((okhttp3.Call) -> Unit) -> T): T = kotlinx.coroutines.coroutineScope {
+    val call = java.util.concurrent.atomic.AtomicReference<okhttp3.Call?>()
     // Parked on its own thread: cancelling the caller runs its finally at once.
     val closer = launch(Dispatchers.IO) {
         try {
             kotlinx.coroutines.awaitCancellation()
         } finally {
-            conn.get()?.let { runCatching { it.disconnect() } }
+            call.get()?.cancel()
         }
     }
     try {
         withContext(Dispatchers.IO) {
             val job = coroutineContext[kotlinx.coroutines.Job]
             block { c ->
-                conn.set(c)
-                if (job?.isActive == false) runCatching { c.disconnect() }
+                call.set(c)
+                if (job?.isActive == false) c.cancel()
             }
         }
     } finally {
