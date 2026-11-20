@@ -539,4 +539,26 @@ class NameRegistrarTest {
         assertEquals(emptyList<NameOperation>(), r.operations.value)
         assertEquals(emptyList<NameOperation>(), journal.saved)
     }
+
+    @Test
+    fun `an unreadable journal is set aside, not overwritten, and removing the wallet deletes it too`() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("names").toFile()
+        try {
+            val file = java.io.File(dir, "operations.json")
+            file.writeText("{ not json")
+            val disk = NameJournal.FileBacked(file)
+            val r = registrar(disk)
+            assertEquals(emptyList<NameOperation>(), r.operations.value)
+            val aside = dir.listFiles()!!.filter { it.name.startsWith("operations.json.unreadable-") }
+            assertEquals(1, aside.size)
+            assertEquals("{ not json", aside.single().readText())
+            r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+            assertEquals(1, NameJournal.FileBacked(file).load().size)
+            r.wipe()
+            assertEquals(emptyList<NameOperation>(), NameJournal.FileBacked(file).load())
+            assertTrue(dir.listFiles()!!.none { it.name.contains("unreadable") })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

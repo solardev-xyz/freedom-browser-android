@@ -133,7 +133,8 @@ interface NameSecrets {
 
         private fun load(): SecretKey {
             val ks = KeyStore.getInstance(PROVIDER).apply { load(null) }
-            (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+            val existing = (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+            if (existing != null) return existing
             val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
             gen.init(
                 KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
@@ -175,6 +176,9 @@ interface NameJournal {
 
     /** False when the write didn't reach flash; the caller acts as if nothing was saved. */
     fun save(operations: List<NameOperation>): Boolean
+
+    /** Deletes any unreadable journal set aside by [load] (Remove wallet: it names the wallet's addresses too). */
+    fun forgetSetAside() {}
 
     /** In memory, for tests. */
     class Memory(initial: List<NameOperation> = emptyList(), var failSaves: Boolean = false) : NameJournal {
@@ -218,6 +222,10 @@ interface NameJournal {
         } catch (e: Exception) {
             Log.w(TAG, "couldn't save the name journal: ${e.javaClass.simpleName}")
             false
+        }
+
+        override fun forgetSetAside() {
+            file.parentFile?.listFiles { f -> f.name.startsWith("${file.name}.unreadable-") }?.forEach { it.delete() }
         }
 
         private companion object {

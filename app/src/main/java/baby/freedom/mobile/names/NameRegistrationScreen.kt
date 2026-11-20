@@ -42,7 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.pluralStringResource
+import baby.freedom.mobile.l10n.pluralText
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -260,17 +260,6 @@ fun NameRegistrationScreen(
             val r = reviewing
             val shown = r?.let { nameReview(it.op, it.plan, it.quote) }
             when {
-                status != null && r == null -> item("send") {
-                    SendStatusSection(
-                        status = status,
-                        onOpenUrl = onOpenUrl,
-                        onRetry = sender::retry,
-                        onCheckAgain = sender::checkAgain,
-                        onStopTracking = sender::discard,
-                        onReviewAgain = {},
-                        onDone = { if (!status.unresolved) sender.acknowledge() },
-                    )
-                }
                 r != null -> item("review") {
                     if (shown == null) {
                         MutedText(stringResource(R.string.namereg_review_mismatch))
@@ -322,6 +311,21 @@ fun NameRegistrationScreen(
                     }
                 }
                 else -> {
+                    // The wallet's own status of a name transaction on top (Try again, Keep waiting,
+                    // the explorer), with the operations and the check still below it.
+                    if (status != null) {
+                        item("send") {
+                            SendStatusSection(
+                                status = status,
+                                onOpenUrl = onOpenUrl,
+                                onRetry = sender::retry,
+                                onCheckAgain = sender::checkAgain,
+                                onStopTracking = sender::discard,
+                                onReviewAgain = {},
+                                onDone = { if (!status.unresolved) sender.acknowledge() },
+                            )
+                        }
+                    }
                     item("intro") {
                         SectionCard(title = stringResource(R.string.namereg_title)) {
                             MutedText(stringResource(R.string.namereg_intro))
@@ -454,12 +458,12 @@ private fun CheckCard(
                     IconButton(onClick = { onYears(years - 1) }, enabled = years > 1) {
                         Icon(Icons.Filled.Remove, contentDescription = stringResource(R.string.namereg_fewer_years))
                     }
-                    Text(pluralStringResource(R.plurals.namereg_years, years, years))
+                    Text(pluralText(R.plurals.namereg_years, years, years))
                     IconButton(onClick = { onYears(years + 1) }, enabled = years < NameContracts.MAX_YEARS) {
                         Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.namereg_more_years))
                     }
                 } else {
-                    Text(pluralStringResource(R.plurals.namereg_years, 1, 1))
+                    Text(pluralText(R.plurals.namereg_years, 1, 1))
                 }
             }
             if (space != null && space.nft) MutedText(stringResource(R.string.namereg_term_one_year_only))

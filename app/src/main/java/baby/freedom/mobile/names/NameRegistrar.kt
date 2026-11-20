@@ -566,7 +566,9 @@ class NameRegistrar internal constructor(
     suspend fun wipe() {
         loaded.await()
         writing.withLock {
-            if (!withContext(io) { journal.save(emptyList()) }) refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
+            if (!withContext(io) { journal.save(emptyList()).also { journal.forgetSetAside() } }) {
+                refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
+            }
             _operations.value = emptyList()
         }
     }
