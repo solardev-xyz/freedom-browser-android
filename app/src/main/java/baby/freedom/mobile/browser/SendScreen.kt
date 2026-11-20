@@ -1446,7 +1446,7 @@ private fun SendReviewSection(
  * answered keeps its warning in full, since it's the user's call.
  */
 @Composable
-private fun NameTrustLine(trust: NameTrust) {
+internal fun NameTrustLine(trust: NameTrust) {
     if (trust.tier == TrustTier.Unverified) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
             Icon(trust.tier.icon, contentDescription = null, tint = trust.tier.color, modifier = Modifier.size(16.dp))
