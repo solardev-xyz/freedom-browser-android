@@ -8,8 +8,12 @@ import java.time.format.TextStyle
 import java.util.Locale
 import org.json.JSONObject
 
-/** What a tool returned: [output] goes back to the model as the call's result. */
-internal data class ToolOutcome(val output: String, val isError: Boolean = false)
+/**
+ * What a tool returned: [output] goes back to the model as the call's
+ * result. [declined]: the user said no on an approval card; the turn
+ * ends there ([AgentLoop]), so nothing else is asked of them in it.
+ */
+internal data class ToolOutcome(val output: String, val isError: Boolean = false, val declined: Boolean = false)
 
 /** A tool the agent can run. [run] gets the call's arguments as an object. */
 internal interface AgentTool {
@@ -19,9 +23,9 @@ internal interface AgentTool {
 }
 
 /**
- * The tools a chat offers the model (#574). Phase one's only one is the
- * harmless [CurrentTimeTool]; the browser tools come with #575, under
- * per-interaction approval.
+ * The tools a chat offers the model (#574): the harmless
+ * [CurrentTimeTool] and the browser tools ([BrowserToolset], #575),
+ * which ask the user to approve every interaction.
  */
 internal class ToolRegistry(tools: List<AgentTool>) {
     private val byName = tools.associateBy { it.spec.name }
@@ -55,6 +59,10 @@ internal class ToolRegistry(tools: List<AgentTool>) {
 
         fun default(clock: () -> Instant = Instant::now, zone: () -> ZoneId = ZoneId::systemDefault) =
             ToolRegistry(listOf(CurrentTimeTool(clock, zone)))
+
+        /** A chat's tools: the clock and its own browser tools (#575). */
+        fun forChat(sessionId: String) =
+            ToolRegistry(listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) + BrowserToolset(sessionId).tools)
     }
 }
 

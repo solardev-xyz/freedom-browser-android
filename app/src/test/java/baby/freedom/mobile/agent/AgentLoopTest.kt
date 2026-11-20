@@ -217,4 +217,64 @@ class AgentLoopTest {
         assertEquals(2, twice.requests.size)
         assertEquals(0, told)
     }
+
+    @Test
+    fun `the user's Don't allow ends the turn, with no other call of the step and no further step`() {
+        // browser_create_tab asks before it opens anything; Declined, it opens nothing.
+        val asks = ArrayList<AgentApproval>()
+        val registry = ToolRegistry(
+            BrowserToolset(
+                "chat",
+                browser = { NoBrowser },
+                ask = { asks += it; ApprovalOutcome.Declined },
+                pageScript = { "PAGE" },
+            ).tools,
+        )
+        val calls = (1..16).map { ToolCall("c$it", "browser_create_tab", "{\"url\":\"https://example.com/$it\"}") }.toTypedArray()
+        val model = Script(reply("Opening.", *calls), reply("should never be asked"))
+        val outcome = runBlocking {
+            AgentLoop(model, registry, ContextLimits(128_000, 1000), "m", { "system" }).run(emptyList(), null, "go", {}, {})
+        }
+        assertEquals(TurnOutcome("Opening.", ChatError.Declined), outcome)
+        assertEquals(1, asks.size)
+        assertEquals(1, model.requests.size)
+    }
+
+    @Test
+    fun `a withdrawn approval doesn't end the turn`() {
+        val asks = ArrayList<AgentApproval>()
+        val registry = ToolRegistry(
+            BrowserToolset(
+                "chat",
+                browser = { NoBrowser },
+                ask = { asks += it; ApprovalOutcome.Withdrawn },
+                pageScript = { "PAGE" },
+            ).tools,
+        )
+        val calls = (1..2).map { ToolCall("c$it", "browser_create_tab", "{\"url\":\"https://example.com/$it\"}") }.toTypedArray()
+        val model = Script(reply("", *calls), reply("It was taken down."))
+        val outcome = runBlocking {
+            AgentLoop(model, registry, ContextLimits(128_000, 1000), "m", { "system" }).run(emptyList(), null, "go", {}, {})
+        }
+        assertEquals(TurnOutcome("It was taken down."), outcome)
+        assertEquals(2, asks.size)
+        assertEquals(2, model.requests.size)
+    }
+
+    /** A browser that's there, for a tool that asks before it touches it. */
+    private object NoBrowser : AgentBrowserHost {
+        override fun tabs() = emptyList<AgentTab>()
+        override fun tab(id: Long): AgentTab? = null
+        override fun openTab(url: String): Long = error("never opened")
+        override fun navigate(id: Long, url: String) = Unit
+        override fun close(id: Long) = Unit
+        override fun stop(id: Long) = Unit
+        override suspend fun evaluate(id: Long, script: String, timeoutMs: Long): String? = null
+        override suspend fun bringToFront(id: Long, chat: String?) = false
+        override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean) = AgentTap.NotTouched
+        override fun key(id: Long, keyCode: Int) = false
+        override suspend fun commitText(id: Long, text: String) = false
+        override fun dialog(id: Long): AgentDialog? = null
+        override fun answerDialog(id: Long, dialog: AgentDialog, accept: Boolean, promptText: String?) = false
+    }
 }

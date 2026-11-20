@@ -45,6 +45,12 @@ internal enum class ChatError {
 
     /** Not a failure: the answer stopped at its token limit. */
     CutShort,
+
+    /**
+     * Not a failure: the user said Don't allow on an approval card, and
+     * the turn ended there (desktop's recovery for `USER_DECLINED`: stop).
+     */
+    Declined,
 }
 
 /** A finished turn of a chat, as the model is given it again. */
@@ -187,6 +193,10 @@ internal class AgentLoop(
             for (call in result.toolCalls) {
                 val out = tools.run(call)
                 turn += ChatItem.ToolResult(call.id, call.name, out.output, out.isError)
+                // The user's Don't allow ends the turn: the step's other
+                // calls aren't run and no further step is asked for, so
+                // one no isn't followed by another card, and another.
+                if (out.declined) return TurnOutcome(text.toString(), ChatError.Declined)
             }
         }
         return TurnOutcome(text.toString(), ChatError.TooManySteps)

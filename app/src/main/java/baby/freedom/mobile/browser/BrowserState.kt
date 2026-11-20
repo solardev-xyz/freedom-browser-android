@@ -326,7 +326,16 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     internal fun documentCommitted() {
         synchronized(documentLock) { replacedDocument = null }
+        committedDocuments++
     }
+
+    /**
+     * How many documents this tab has committed (`onPageStarted`):
+     * Freedom Agent binds an approval and a snapshot's references to one
+     * (#575), and reports it as the tab's `navigationId`. Main thread.
+     */
+    internal var committedDocuments: Int = 0
+        private set
 
     /**
      * The last main-frame answer, taken for a new document, went to the

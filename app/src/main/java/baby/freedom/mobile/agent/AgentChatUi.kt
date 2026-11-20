@@ -140,7 +140,8 @@ internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings
     val providers = remember(context) { AgentProviders.get(context) }
     val state by providers.state.collectAsState(initial = null)
     val discovered by providers.models.collectAsState(initial = emptyMap())
-    var sessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The chat whose approved input closed this page (#575), else a new one.
+    var sessionId by rememberSaveable { mutableStateOf(AgentBrowser.takeChatToReopen()) }
     var showList by rememberSaveable { mutableStateOf(false) }
     // The page's own scope, for sends and deletes: it outlives the chat
     // and list views, so leaving either mid-call still hears the answer.
@@ -563,6 +564,7 @@ private fun turnNote(turn: ChatTurn): Pair<String, Boolean>? {
     return when {
         turn.status == ChatStatus.INTERRUPTED -> stringResource(R.string.agent_note_interrupted) to false
         error == ChatError.CutShort -> stringResource(R.string.agent_note_cut_short) to false
+        error == ChatError.Declined -> stringResource(R.string.agent_note_declined) to false
         error != null -> stringResource(errorText(error)) to (turn.status == ChatStatus.FAILED)
         turn.status == ChatStatus.CANCELLED -> stringResource(R.string.agent_note_stopped) to false
         else -> null
@@ -590,6 +592,7 @@ internal fun errorText(error: ChatError): Int = when (error) {
     ChatError.AiOff -> R.string.agent_error_ai_off
     ChatError.KeyChanged -> R.string.agent_error_key_changed
     ChatError.CutShort -> R.string.agent_note_cut_short
+    ChatError.Declined -> R.string.agent_note_declined
 }
 
 @Composable

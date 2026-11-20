@@ -2570,13 +2570,18 @@ fun BrowserScreen(
                 }
             },
         ) {
-            BrowserWebViewHost(
-                tabs = tabs,
-                modifier = Modifier.fillMaxSize(),
-                covered = overlayShown,
-                // Closing the last private tab clears the nodes' logs (#276).
-                onPrivateSessionEnded = clearNodeLogs,
-            )
+            // A tab Freedom Agent holds (#575) has a strip above its page
+            // that says so and gives it back; it takes its own room.
+            Column(Modifier.fillMaxSize()) {
+                baby.freedom.mobile.agent.AgentTabStrip(state)
+                BrowserWebViewHost(
+                    tabs = tabs,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    covered = overlayShown,
+                    // Closing the last private tab clears the nodes' logs (#276).
+                    onPrivateSessionEnded = clearNodeLogs,
+                )
+            }
             // Home overlay. Rendered whenever the tab hasn't loaded
             // a real page (fresh tab, or user navigated home). The
             // WebView keeps `about:blank` under us — see
@@ -3716,6 +3721,32 @@ fun BrowserScreen(
     // Desktop Freedom's signing requests (#113): a dialog over whatever is up,
     // the scan page it was connected from included.
     RemoteSigningHost()
+
+    // Freedom Agent's approvals (#575): over everything, the chat included.
+    // Allowing an input brings its tab on screen through [AgentBrowser.showTab]:
+    // the agent's chat and the plain panels close; a wallet page stays.
+    baby.freedom.mobile.agent.AgentApprovalHost()
+    DisposableEffect(tabs) {
+        val show: (Long) -> Boolean = { id ->
+            val closedChat = showAgent
+            showAgent = false
+            showTabSwitcher = false
+            showHistory = false
+            showBookmarks = false
+            showDownloads = false
+            showSettings = false
+            showNodes = false
+            nodeDetail = null
+            showLogs = null
+            val index = tabs.tabs.indexOfFirst { it.id == id }
+            if (index >= 0) tabs.switchTo(index)
+            closedChat
+        }
+        baby.freedom.mobile.agent.AgentBrowser.showTab = show
+        onDispose {
+            if (baby.freedom.mobile.agent.AgentBrowser.showTab === show) baby.freedom.mobile.agent.AgentBrowser.showTab = null
+        }
+    }
 
     // Snackbars over a full-screen panel (Downloads' open() failures
     // and retry outcomes, a download finishing while Settings is up):

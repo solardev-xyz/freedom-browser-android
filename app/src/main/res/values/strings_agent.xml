@@ -171,6 +171,7 @@
     <string name="agent_note_stopped">Stopped.</string>
     <string name="agent_note_interrupted">Stopped when the app closed.</string>
     <string name="agent_note_cut_short">The reply hit the model\'s length limit and is cut short.</string>
+    <string name="agent_note_declined">Stopped: you didn\'t allow an action.</string>
     <string name="agent_error_no_model">That model isn\'t available any more. Pick another one.</string>
     <string name="agent_error_no_key">The provider\'s API key can\'t be read. Enter it again in Settings → AI.</string>
     <string name="agent_error_bad_url">The server\'s address isn\'t allowed. Check it in Settings → AI.</string>
@@ -189,6 +190,52 @@
     <string name="agent_error_too_many_steps">The agent took too many steps and was stopped.</string>
     <string name="agent_error_ai_off">Stopped: AI was turned off.</string>
     <string name="agent_error_key_changed">Stopped: the provider\'s key or address changed, or the provider was removed.</string>
+    <!-- Freedom Agent's browser tools (#575): approvals and held tabs. -->
+    <string name="agent_approve_title">Freedom Agent wants to</string>
+    <string name="agent_approve_open_tab">Open a new tab</string>
+    <string name="agent_approve_navigate">Go to an address</string>
+    <string name="agent_approve_click">Tap</string>
+    <string name="agent_approve_type_replace">Replace the text in</string>
+    <string name="agent_approve_type_append">Add text to</string>
+    <string name="agent_approve_select">Choose in</string>
+    <string name="agent_approve_press">Press %1$s in</string>
+    <string name="agent_approve_scroll_up">Scroll up</string>
+    <string name="agent_approve_scroll_down">Scroll down</string>
+    <string name="agent_approve_scroll_left">Scroll left</string>
+    <string name="agent_approve_scroll_right">Scroll right</string>
+    <string name="agent_approve_dialog_ok">Answer OK to the page\'s message</string>
+    <string name="agent_approve_dialog_cancel">Answer Cancel to the page\'s message</string>
+    <string name="agent_approve_site">On %1$s</string>
+    <string name="agent_approve_site_none">On a page with no address</string>
+    <string name="agent_approve_address">Address</string>
+    <string name="agent_approve_control">On the page</string>
+    <string name="agent_approve_control_value">%1$s “%2$s”</string>
+    <string name="agent_approve_control_unnamed">%1$s with no name</string>
+    <string name="agent_approve_text">Text</string>
+    <string name="agent_approve_text_empty">(nothing: the field is cleared)</string>
+    <string name="agent_approve_text_nothing">(nothing: no text is typed)</string>
+    <plurals name="agent_approve_text_blank">
+        <item quantity="one">(%1$d blank space, no visible text)</item>
+        <item quantity="other">(%1$d blank spaces, no visible text)</item>
+    </plurals>
+    <string name="agent_approve_options">Options</string>
+    <string name="agent_approve_options_none">(none: the choice is cleared)</string>
+    <string name="agent_approve_goes_to">Goes to</string>
+    <string name="agent_approve_submits">This sends a form.</string>
+    <string name="agent_approve_downloads">This downloads a file.</string>
+    <string name="agent_approve_uploads">This opens a file chooser.</string>
+    <string name="agent_approve_sensitive">This is a password or one-time-code field.</string>
+    <string name="agent_approve_message">The page says</string>
+    <string name="agent_approve_prompt_answer">Answer</string>
+    <string name="agent_approve_intent">The agent says: “%1$s”</string>
+    <string name="agent_approve_untrusted">Names and messages come from the website.</string>
+    <string name="agent_approve_shows_tab">Allowing shows the tab, and the agent acts in it.</string>
+    <string name="agent_approve_allow">Allow</string>
+    <string name="agent_approve_deny">Don\'t allow</string>
+
+    <string name="agent_tab_held">Freedom Agent is using this tab</string>
+    <string name="agent_tab_take_back">Take back</string>
+    <string name="agent_tab_take_back_description">Take this tab back from Freedom Agent</string>
 
     <!-- Subscription sign-in by device code (#576). -->
     <string name="agent_sign_in">Sign in</string>
