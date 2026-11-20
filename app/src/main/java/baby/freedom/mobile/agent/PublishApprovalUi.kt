@@ -110,7 +110,9 @@ internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction
         Spacer(Modifier.height(12.dp))
         HorizontalDivider()
         Spacer(Modifier.height(8.dp))
-        val total = action.text.codePointCount(0, action.text.length)
+        // Worked out once per text, not on every recomposition (each checkbox tick): the text can be ~256 KB.
+        val total = remember(action.text) { action.text.codePointCount(0, action.text.length) }
+        val preview = remember(action.text) { ApprovalText.typed(action.text, PUBLISH_PREVIEW_CHARS) }
         Text(
             stringResource(
                 R.string.agent_publish_text_label,
@@ -121,7 +123,7 @@ internal fun PublishApprovalContent(approval: AgentApproval, action: AgentAction
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            when (val shown = ApprovalText.typed(action.text, PUBLISH_PREVIEW_CHARS)) {
+            when (val shown = preview) {
                 is ApprovalText.Typed.Shown -> shown.text
                 is ApprovalText.Typed.Blank -> pluralBlank(shown.count)
                 ApprovalText.Typed.Empty -> ""

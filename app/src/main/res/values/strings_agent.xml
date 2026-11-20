@@ -383,8 +383,8 @@
         <item quantity="other">%1$s (%2$d characters)</item>
     </plurals>
     <plurals name="agent_publish_earlier_unknown">
-        <item quantity="one">An earlier publication from this chat may already be on Swarm: Freedom couldn\'t learn how it ended.</item>
-        <item quantity="other">%1$d earlier publications from this chat may already be on Swarm: Freedom couldn\'t learn how they ended.</item>
+        <item quantity="one">An earlier publication from this chat may already be on Swarm: it didn\'t finish, but some of it had already been sent.</item>
+        <item quantity="other">%1$d earlier publications from this chat may already be on Swarm: they didn\'t finish, but some of each had already been sent.</item>
     </plurals>
     <!-- Freedom Agent's wallet_transfer sheet (#596). -->
     <string name="agent_transfer_title">Freedom Agent wants to send funds</string>

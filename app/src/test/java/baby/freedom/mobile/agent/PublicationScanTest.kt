@@ -161,6 +161,18 @@ class PublicationScanTest {
         assertEquals("Value hidden", f.excerpt)
     }
 
+    @Test
+    fun `a credential only the backstop catches is listed next to a named secret`() {
+        val token = join("ghp_", "a8Fh2kL9mQ3rT6vW1yZ4bC7dE0gJ5n")
+        // Alone, the named rule takes "Resample" for a placeholder and only the backstop refuses it.
+        assertEquals(listOf("possible-credential"), rulesIn("password=\"Resample!2024\""))
+        assertEquals(setOf("github-token", "possible-credential"), rulesIn("$token\npassword=\"Resample!2024\"").toSet())
+        // The named secret's own value isn't reported a second time by the backstop.
+        assertEquals(listOf("github-token"), rulesIn("token = \"$token\""))
+        assertEquals(listOf("github-token"), rulesIn("$token\nnothing else here"))
+        assertEquals(listOf("ethereum-private-key"), rulesIn("const PRIVATE_KEY = '0x$hexKey';"))
+    }
+
     private fun phrase(count: Int, offset: Int = 0): List<String> =
         (0 until count).map { Bip39English.words[(offset + it * 97) % Bip39English.words.size] }
 
@@ -246,11 +258,17 @@ class PublicationScanTest {
     @Test
     fun `svg and xhtml published as text get the third-party check`() {
         val svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script src=\"https://tracker.example.net/t.js\"></script></svg>"
-        for (type in listOf("image/svg+xml", "application/xhtml+xml; charset=utf-8")) {
+        for (type in listOf("image/svg+xml", "application/xhtml+xml; charset=utf-8", "text/xml", "application/xml; charset=utf-8")) {
             val found = PublicationScan.scanPublication("Text", svg.toByteArray(), type).filter { it.kind == Kind.ThirdParty }
             assertEquals(type, listOf("third-party-script" to "https://tracker.example.net"), found.map { it.rule to it.excerpt })
         }
         assertTrue(PublicationScan.scanPublication("Text", svg.toByteArray(), "text/plain").none { it.kind == Kind.ThirdParty })
+        // A prefixed XHTML element in plain XML is as live as an unprefixed one.
+        val xml = "<doc xmlns:h=\"http://www.w3.org/1999/xhtml\"><h:script src=\"https://cdn.tracker.io/x.js\"/></doc>"
+        assertEquals(
+            listOf("third-party-script" to "https://cdn.tracker.io"),
+            PublicationScan.scanPublication("Text", xml.toByteArray(), "text/xml").filter { it.kind == Kind.ThirdParty }.map { it.rule to it.excerpt },
+        )
     }
 
     @Test

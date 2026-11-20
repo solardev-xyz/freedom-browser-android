@@ -74,15 +74,22 @@ internal data class AgentPublication(
 ) {
     val terminal: Boolean get() = state != UPLOADING
 
+    /**
+     * Ended without proof either way: an `outcome_unknown`, or a failure
+     * after chunks had gone out (a refusal the node gave mid-upload). The
+     * receipt's `possibly_applied` and the next card's warning both read this.
+     */
+    val endedPossiblyApplied: Boolean get() = state == OUTCOME_UNKNOWN || (state == FAILED && dispatched)
+
     /** Desktop's `publicReceipt`. */
     fun receipt(): JSONObject = JSONObject()
         .put("publicationId", publicationId)
         .put("state", state)
         .put(
             "applicationState",
-            when (state) {
-                COMPLETED -> "applied"
-                FAILED -> if (dispatched) "possibly_applied" else "not_applied"
+            when {
+                state == COMPLETED -> "applied"
+                state == FAILED && !dispatched -> "not_applied"
                 else -> "possibly_applied"
             },
         )
@@ -468,7 +475,7 @@ internal class SwarmPublishTools(
             contentType = contentType,
             findings = findings,
             postage = postage,
-            earlierUnknown = journal.forSession(sessionId, AgentPublications.MAX_RECORDS).count { it.state == AgentPublication.OUTCOME_UNKNOWN },
+            earlierUnknown = journal.forSession(sessionId, AgentPublications.MAX_RECORDS).count { it.endedPossiblyApplied },
         )
         val approval = AgentApproval(
             id = AgentApprovals.nextId(),

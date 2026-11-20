@@ -481,6 +481,19 @@ class SwarmPublishToolTest {
     }
 
     @Test
+    fun `a refusal after chunks went out also counts as possibly on Swarm on the next card`() {
+        backend.outcome = { r ->
+            r.dispatching()
+            r.finished(PublishOutcome.Refused("node refused"))
+        }
+        publish("first")
+        backend.outcome = { r -> r.finished(PublishOutcome.NotSent("nothing sent")) }
+        publish("second")
+        publish("third")
+        assertEquals(listOf(0, 1, 1), asked.map { (it.action as AgentAction.Publish).earlierUnknown })
+    }
+
+    @Test
     fun `the card says when an earlier publication in the chat may already be out`() {
         backend.outcome = { r ->
             r.dispatching()

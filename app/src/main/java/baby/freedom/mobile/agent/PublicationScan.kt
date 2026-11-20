@@ -588,10 +588,16 @@ internal object PublicationScan {
             f.rule == "credential-assignment" && spans[f]?.let { s -> specific.any { it.first <= s.last && s.first <= it.last } } == true
         }
         // The broader credential check stays the backstop: text it refuses is
-        // reported even when no named rule recognised the value.
-        if (findings.none { it.kind == Kind.Secret }) {
+        // reported even when no named rule recognised the value. It runs with
+        // every named secret's value cut out, so a credential only it knows
+        // (a password the named rule took for a placeholder) is still listed
+        // next to a token on another line, while the token itself isn't
+        // reported twice. A line break ends every value the backstop reads.
+        if (findings.none { it.rule == "scan-incomplete" }) {
+            val named = findings.filter { it.kind == Kind.Secret }.mapNotNull { spans[it] }
+            val rest = if (named.isEmpty()) text else StringBuilder(text).apply { for (s in named) for (i in s) setCharAt(i, '\n') }.toString()
             val possible = try {
-                SecretBackstop.containsSecret(text)
+                SecretBackstop.containsSecret(rest)
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -615,12 +621,16 @@ internal object PublicationScan {
     // goes away, and the host learns who opens it. A form that posts
     // elsewhere sends what visitors type to that host.
 
-    private val MARKUP_FILE = Regex("\\.(?:html?|xhtml|svg)$", RegexOption.IGNORE_CASE)
+    private val MARKUP_FILE = Regex("\\.(?:html?|xhtml|svg|xml)$", RegexOption.IGNORE_CASE)
 
-    /** The media types a browser renders as markup, loading what its tags name, as the file extensions above. */
-    private val MARKUP_TYPE = Regex("^(?:text/html|application/xhtml\\+xml|image/svg\\+xml)(?![A-Za-z0-9_])")
+    /**
+     * The media types a browser renders as markup, loading what its tags name,
+     * as the file extensions above. Plain XML counts: an element in the XHTML
+     * (or SVG) namespace inside it is a live `<script>` or `<img>`.
+     */
+    private val MARKUP_TYPE = Regex("^(?:text/html|application/xhtml\\+xml|image/svg\\+xml|text/xml|application/xml)(?![A-Za-z0-9_])")
     private val SCRIPT_FILE = Regex("\\.(?:m?js|cjs)$", RegexOption.IGNORE_CASE)
-    private val HYGIENE_TAG = p("<(script|link|img|form)(?=[$S/>])", ci = true)
+    private val HYGIENE_TAG = p("<(?:[A-Za-z_][A-Za-z0-9_.-]{0,64}:)?(script|link|img|form)(?=[$S/>])", ci = true)
     private val HYGIENE_FETCH = p("${B}fetch[ \\t]{0,16}\\([ \\t\\r\\n]{0,16}([\"'`])")
     private val HYGIENE_ATTRIBUTE = p(
         "(?:^|[$S])(src|href|action)[ \\t\\r\\n]{0,16}=[ \\t\\r\\n]{0,16}(?:\"([^\"]{0,2048})\"|'([^']{0,2048})'|([^$S\"'>]{1,2048}))",
