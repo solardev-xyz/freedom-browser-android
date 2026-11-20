@@ -3757,6 +3757,7 @@ fun BrowserScreen(
     // Allowing an input brings its tab on screen through [AgentBrowser.showTab]:
     // the agent's chat and the plain panels close; a wallet page stays.
     baby.freedom.mobile.agent.AgentApprovalHost()
+    baby.freedom.mobile.agent.AgentTransferHost()
     DisposableEffect(tabs) {
         val show: (Long) -> Boolean = { id ->
             val closedChat = showAgent

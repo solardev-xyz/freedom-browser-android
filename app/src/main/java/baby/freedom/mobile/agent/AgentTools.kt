@@ -26,7 +26,9 @@ internal interface AgentTool {
  * The tools a chat offers the model (#574): the harmless
  * [CurrentTimeTool], the browser tools ([BrowserToolset], #575),
  * whose interactions ask the user as the chat's approval mode says
- * (#595), and the read-only [NodeStatusTool] (#577).
+ * (#595), the read-only [NodeStatusTool] (#577) and [WalletTransferTool]
+ * (#596), whose every transfer goes to the user on its own review sheet
+ * whatever the mode.
  */
 internal class ToolRegistry(tools: List<AgentTool>) {
     private val byName = tools.associateBy { it.spec.name }
@@ -63,11 +65,12 @@ internal class ToolRegistry(tools: List<AgentTool>) {
 
         /**
          * A chat's tools: the clock, its own browser tools (#575), under
-         * the chat's [approvals] (#595), and the read-only node status (#577).
+         * the chat's [approvals] (#595), the read-only node status (#577)
+         * and wallet transfers (#596).
          */
         fun forChat(sessionId: String, approvals: ChatApprovals = ChatApprovals.AskEveryTime) = ToolRegistry(
             listOf(CurrentTimeTool(Instant::now, ZoneId::systemDefault)) +
-                BrowserToolset(sessionId, approvals = approvals).tools + NodeStatusTool(),
+                BrowserToolset(sessionId, approvals = approvals).tools + NodeStatusTool() + WalletTransferTool(sessionId),
         )
     }
 }

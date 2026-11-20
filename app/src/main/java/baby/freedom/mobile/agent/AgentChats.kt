@@ -333,6 +333,7 @@ internal class AgentChats(
         registries.remove(sessionId)
         modes.remove(sessionId)
         AgentApprovals.withdrawSession(sessionId)
+        AgentTransfers.withdrawSession(sessionId)
         AgentTabs.releaseChat(sessionId)
     }
 
