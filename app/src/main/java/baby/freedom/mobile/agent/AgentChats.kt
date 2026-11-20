@@ -278,6 +278,7 @@ internal class AgentChats(
     private fun forgetTools(sessionId: String) {
         registries.remove(sessionId)
         AgentApprovals.withdrawSession(sessionId)
+        AgentTransfers.withdrawSession(sessionId)
         AgentTabs.releaseChat(sessionId)
     }
 
