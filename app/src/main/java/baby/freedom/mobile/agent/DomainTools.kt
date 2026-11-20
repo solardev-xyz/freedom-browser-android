@@ -144,7 +144,8 @@ internal object AgentDomains {
 
 /**
  * Of the agent's sheets — a page-action card ([AgentApprovals]), a
- * transfer ([AgentTransfers]) and a name transaction ([AgentDomains]) —
+ * transfer ([AgentTransfers]), a node action ([AgentNodeAsks], #598) and
+ * a name transaction ([AgentDomains]) —
  * whether the one with [id] is the oldest waiting, so it's the one on
  * screen: never two at once.
  */
