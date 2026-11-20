@@ -265,8 +265,9 @@ private fun ChatView(
     }.collectAsState()
     val approval by AgentApprovals.shown.collectAsState()
     val transfer by AgentTransfers.shown.collectAsState()
-    // An approval card, a transfer sheet (#596) or another page over the chat: no dictating into the hidden draft.
-    val hidden = approval != null || transfer != null || covered
+    val nodeAsk by AgentNodeAsks.shown.collectAsState()
+    // An approval card, a transfer (#596) or node (#598) sheet, or another page over the chat: no dictating into the hidden draft.
+    val hidden = approval != null || transfer != null || nodeAsk != null || covered
     val hiddenNow by rememberUpdatedState(hidden)
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
