@@ -1362,12 +1362,6 @@ fun WalletScreen(
                     )
                 }
             }
-            if (walletOpen) item("names") {
-                NamesEntrySection(enabled = !busy) {
-                    error = null
-                    namesOpen = true
-                }
-            }
             if (walletOpen) item("publishing") {
                 WalletPublishingSection(publisherSites, enabled = !busy) {
                     error = null
@@ -1581,6 +1575,13 @@ fun WalletScreen(
                             }
                         },
                     )
+                }
+                // Register and renew .eth/.wei/.gwei names (#579).
+                item("names") {
+                    NamesEntrySection(enabled = !busy) {
+                        error = null
+                        namesOpen = true
+                    }
                 }
             }
         }

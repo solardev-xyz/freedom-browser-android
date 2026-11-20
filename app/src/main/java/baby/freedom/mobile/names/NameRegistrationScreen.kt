@@ -167,7 +167,8 @@ fun NameRegistrationScreen(
     // Opened on a name: check it at once.
     LaunchedEffect(Unit) { if (!start.isNullOrBlank()) runCheck() }
 
-    fun review(op: NameOperation) {
+    /** [fresh]: [op] was started just now, so if its first step can't be built it's dropped again — nothing was sent. */
+    fun review(op: NameOperation, fresh: Boolean = false) {
         val from = accountList?.accounts?.firstOrNull { it.address.equals(op.account, ignoreCase = true) } ?: run {
             error = Strings.get(R.string.namereg_op_account_missing)
             return
@@ -190,6 +191,7 @@ fun NameRegistrationScreen(
                 throw e
             } catch (e: NameException) {
                 error = e.message
+                if (fresh) runCatching { registrar.dismiss(op.id) }
             } catch (e: Exception) {
                 error = safeErrorMessage(e, Strings.get(R.string.namereg_action_price), phraseBackedUp)
             } finally {
@@ -215,7 +217,8 @@ fun NameRegistrationScreen(
             }
             if (op != null) {
                 checked = Checked.None
-                if (op.state == State.READY) review(op)
+                // A brand-new one (nothing sent yet) that can't be built is dropped again.
+                if (op.state == State.READY) review(op, fresh = op.transactionHash == null && op.step != Step.REVEAL && op.revision == 1)
             }
         }
     }
