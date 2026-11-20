@@ -14,7 +14,9 @@
     <string name="swarm_publish_request">wants to publish to Swarm</string>
     <string name="swarm_publish_warning">Anyone with its address can read what\'s published, and it can\'t be taken back. It uses your storage.</string>
     <string name="swarm_publish_approve">Publish</string>
-    <string name="swarm_publish_always">Always allow this site to publish without asking</string>
+    <string name="swarm_publish_always">Always allow this site to publish without asking (chunks it hands over already signed, by anyone, still ask)</string>
+    <!-- A single owner chunk the site sent, signed by one of the user's own keys: allowing refuses it, which the site sees -->
+    <string name="swarm_publish_own_identity_warning">This chunk is signed by one of your own identities: a wallet account, your Ant wallet or your node. Freedom won\'t publish it. Allowing only tells the site that this identity is yours, so don\'t allow unless you mean to share that.</string>
     <string name="swarm_manifest_title">App permissions</string>
     <string name="swarm_manifest_request">asks for Swarm permissions</string>
     <string name="swarm_allow_all">Allow all</string>
@@ -42,6 +44,7 @@
         <item quantity="other">%d files</item>
     </plurals>
     <string name="swarm_publish_chunk">Swarm chunk</string>
+    <string name="swarm_publish_signed_soc">Single owner chunk</string>
     <string name="swarm_publish_data">Data</string>
     <!-- The first three paths (%1$s, comma-separated), and how many more there are -->
     <plurals name="swarm_paths_preview_more">
@@ -63,12 +66,14 @@
     <string name="swarm_detail_request">Request</string>
     <string name="swarm_detail_feed_name">Feed name</string>
     <string name="swarm_detail_signs_as">Signs as</string>
+    <!-- A single owner chunk the site sent already signed: the address whose signature it carries -->
+    <string name="swarm_detail_signed_by">Signed by</string>
     <string name="swarm_detail_topic">Topic</string>
     <string name="swarm_detail_room_address">Room address</string>
 
     <!-- SwarmManifestSheet.kt: the permission-manifest sheet -->
     <string name="swarm_manifest_publish_label">Publish content</string>
-    <string name="swarm_manifest_publish_meaning">Upload to Swarm with your storage and data, without asking each time.</string>
+    <string name="swarm_manifest_publish_meaning">Upload to Swarm with your storage and data, without asking each time. Chunks it hands over already signed, by anyone, still ask.</string>
     <string name="swarm_manifest_feeds_label">Manage feeds</string>
     <string name="swarm_manifest_feeds_meaning">Create and update this app\'s feeds without asking each time.</string>
     <string name="swarm_manifest_signing_label">Sign Swarm content</string>

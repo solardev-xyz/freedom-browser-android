@@ -81,9 +81,13 @@ internal fun swarmPromptCopy(ask: SwarmAsk): SwarmPromptCopy = when (ask) {
     is SwarmAsk.Publish -> SwarmPromptCopy(
         Strings.get(R.string.swarm_publish_title),
         Strings.get(R.string.swarm_publish_request),
-        Strings.get(R.string.swarm_publish_warning),
-        Strings.get(R.string.swarm_publish_approve),
-        Strings.get(R.string.swarm_publish_always),
+        // A SOC signed by the user's own identity is refused once allowed (SwarmProvider.ownerCheck):
+        // say so, since that answer is what tells the site the identity is theirs.
+        if (ask.ownIdentity) Strings.get(R.string.swarm_publish_own_identity_warning) else Strings.get(R.string.swarm_publish_warning),
+        // Allow on that sheet publishes nothing, so its button mustn't say "Publish".
+        if (ask.ownIdentity) Strings.get(R.string.common_allow) else Strings.get(R.string.swarm_publish_approve),
+        // A page-signed SOC asks every time (SwarmProvider.publishSignedSoc): no switch.
+        if (ask.kind == SwarmAsk.Publish.Kind.SignedSoc) null else Strings.get(R.string.swarm_publish_always),
     )
     // Its own sheet (SwarmManifestSheet); this is only what it's called.
     is SwarmAsk.Manifest -> SwarmPromptCopy(
@@ -168,6 +172,7 @@ internal fun swarmShownTopic(topic: String): String = buildString {
 internal fun swarmPublishWhat(ask: SwarmAsk.Publish): String = when (ask.kind) {
     SwarmAsk.Publish.Kind.Files -> Strings.plural(R.plurals.swarm_publish_files, ask.paths.size, ask.paths.size)
     SwarmAsk.Publish.Kind.Chunk -> Strings.get(R.string.swarm_publish_chunk)
+    SwarmAsk.Publish.Kind.SignedSoc -> Strings.get(R.string.swarm_publish_signed_soc)
     SwarmAsk.Publish.Kind.Data -> ask.contentType?.let(::swarmShownTopic) ?: Strings.get(R.string.swarm_publish_data)
 }
 
@@ -334,6 +339,8 @@ fun SwarmPromptSheet(request: SwarmPromptRequest) {
                         DetailRow(stringResource(R.string.swarm_detail_size), formatStampBytes(ask.size))
                         ask.name?.let { DetailRow(stringResource(R.string.swarm_detail_name), swarmShownTopic(it)) }
                         if (ask.kind == SwarmAsk.Publish.Kind.Files) DetailRow(stringResource(R.string.swarm_detail_files), swarmPathsPreview(ask.paths), mono = true)
+                        // The page's own key signed it; Freedom signs nothing (desktop #647).
+                        ask.owner?.let { DetailRow(stringResource(R.string.swarm_detail_signed_by), it, mono = true) }
                     }
                     is SwarmAsk.Sign -> {
                         if (ask.kind == SwarmProvider.AutoApprove.Signing) {

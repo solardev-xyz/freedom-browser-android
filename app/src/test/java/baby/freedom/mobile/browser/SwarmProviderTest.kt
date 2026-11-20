@@ -91,6 +91,14 @@ class SwarmProviderTest {
         override fun noteActivity() {
             activity++
         }
+
+        /** The wallet's accounts and Ant wallet key; null: they can't be read. */
+        var own: SwarmProvider.OwnAddresses? = SwarmProvider.OwnAddresses(emptySet(), complete = true)
+        var ownReads = 0
+        override fun ownAddresses(): SwarmProvider.OwnAddresses {
+            ownReads++
+            return own ?: throw java.io.IOException("accounts.json unreadable")
+        }
     }
 
     /** ant's gateway, in memory: chunks by address, SOCs checked, feeds resolved by walking indexes. */
@@ -117,6 +125,8 @@ class SwarmProviderTest {
             return super.request(method, path, headers, body, timeoutMs, maxBytes)
         }
         var beeMode = "light"
+        /** The node's running key, as `/addresses` says it. */
+        var ethereum = "0x" + "11".repeat(20)
         var stamps = JSONArray().put(
             JSONObject().put("batchID", "ab".repeat(32)).put("usable", true).put("depth", 20).put("bucketDepth", 16)
                 .put("utilization", 0).put("immutableFlag", true).put("batchTTL", 86_400),
@@ -146,7 +156,7 @@ class SwarmProviderTest {
                 method == "GET" && bare == "/readiness" -> json(JSONObject())
                 method == "GET" && bare == "/addresses" -> json(
                     JSONObject().put("overlay", OVERLAY).put("pssPublicKey", PSS_KEY).put("publicKey", PSS_KEY)
-                        .put("ethereum", "0x" + "11".repeat(20)),
+                        .put("ethereum", ethereum),
                 )
                 method == "POST" && bare.startsWith("/pss/send/") -> SwarmProvider.Http.Answer(201, emptyMap(), ByteArray(0))
                 method == "GET" && bare == "/stamps" -> json(JSONObject().put("stamps", stamps))
@@ -475,6 +485,234 @@ class SwarmProviderTest {
         val r2 = okJson(call("swarm_publishChunk", JSONObject().put("data", "chunk").put("span", bigSpan))).getString("reference")
         assertEquals(SwarmChunks.cac("chunk".toByteArray(), ULong.MAX_VALUE).address.swarmHex(), r2)
     }
+
+    // -------------------------------------------------------------------
+    // Page-signed SOCs (swarm_publishSingleOwnerChunk, desktop #647)
+    // -------------------------------------------------------------------
+
+    /** The page's own key: never one of this device's. */
+    private val pageKey = ByteArray(32) { 0x5a }
+    private val pageOwner = PublisherKeys.address(pageKey)
+
+    /** What a page sends for a SOC it signed with [key] (`0x`-prefixed signature, as ethers gives it). */
+    private fun signedSoc(
+        key: ByteArray = pageKey,
+        identifier: String = "cd".repeat(32),
+        data: String = "hello",
+        span: ULong? = null,
+    ): JSONObject {
+        val soc = SwarmChunks.sign(identifier.hexToBytesOrNull()!!, SwarmChunks.cac(data.toByteArray(), span), key)
+        return JSONObject()
+            .put("owner", SwarmChunks.checksum(soc.owner))
+            .put("identifier", identifier)
+            .put("signature", "0x" + soc.signature.swarmHex())
+            .put("data", data)
+            .apply { if (span != null) put("span", span.toLong()) }
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk stamps a page-signed SOC on the connection grant alone, signing nothing`() {
+        assertEquals("not_connected", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
+        assertTrue(node.uploads().isEmpty())
+        connect()
+        val result = okJson(call("swarm_publishSingleOwnerChunk", signedSoc(span = 5uL)))
+        val expected = SwarmChunks.socAddress("cd".repeat(32).hexToBytesOrNull()!!, pageOwner.removePrefix("0x").hexToBytesOrNull()!!)
+        assertEquals(expected.swarmHex(), result.getString("reference"))
+        assertEquals(pageOwner, result.getString("owner"))
+        assertEquals("cd".repeat(32), result.getString("identifier"))
+        // The node holds the page's chunk as the page signed it, span and all.
+        val stored = SwarmChunks.parseSoc(expected, node.chunks.getValue(expected.swarmHex()))!!
+        assertEquals(5uL, stored.cac.spanValue)
+        assertEquals("hello", String(stored.cac.payload))
+        // Publish tier: its sheet names the signer, no feed access is given, no key is read.
+        val ask = asked.single() as SwarmAsk.Publish
+        assertEquals(SwarmAsk.Publish.Kind.SignedSoc, ask.kind)
+        assertEquals(pageOwner, ask.owner)
+        assertEquals(5L, ask.size)
+        assertEquals("Single owner chunk", swarmPublishWhat(ask))
+        assertFalse(feeds.granted(site))
+        assertTrue(publishers.keysHandedOut.isEmpty())
+        assertEquals(1, commits)
+        assertEquals(1, publishers.activity)
+        assertEquals("ab".repeat(32), node.uploads().last().third["swarm-postage-batch-id"])
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk checks the signature before anyone is asked`() {
+        connect()
+        val good = signedSoc()
+        fun tampered(key: String, value: Any) = JSONObject(good.toString()).put(key, value)
+        val sig = good.getString("signature").removePrefix("0x")
+        val cases = mapOf(
+            "another payload" to tampered("data", "hellp"),
+            "another identifier" to tampered("identifier", "ce" + "cd".repeat(31)),
+            "another span" to tampered("span", 6),
+            "another owner" to tampered("owner", PublisherKeys.address(ByteArray(32) { 0x5b })),
+            "a 0/1 recovery byte" to tampered("signature", sig.dropLast(2) + "%02x".format(sig.takeLast(2).toInt(16) - 27)),
+            "a junk recovery byte" to tampered("signature", sig.dropLast(2) + "1d"),
+            "a short signature" to tampered("signature", sig.dropLast(2)),
+            "a non-hex signature" to tampered("signature", "zz".repeat(65)),
+        )
+        for ((label, params) in cases) {
+            val e = err(call("swarm_publishSingleOwnerChunk", params))
+            assertEquals(label, -32602, e.code)
+            assertEquals(label, "invalid_signature", e.reason)
+        }
+        // The 0/1 form of the same signature does recover to the owner: refused for its byte alone.
+        val v01 = sig.dropLast(2) + "%02x".format(sig.takeLast(2).toInt(16) - 27)
+        val digest = baby.freedom.mobile.wallet.MessageSigning.personalDigest(
+            baby.freedom.mobile.ens.Keccak256.digest("cd".repeat(32).hexToBytesOrNull()!! + SwarmChunks.cac("hello".toByteArray()).address),
+        )
+        assertEquals(pageOwner.lowercase(), baby.freedom.mobile.ens.Secp256k1.recover(digest, v01))
+        // The rest of the parameters, as desktop checks them.
+        assertEquals("invalid_owner", err(call("swarm_publishSingleOwnerChunk", tampered("owner", "0x1234"))).reason)
+        assertEquals("invalid_identifier", err(call("swarm_publishSingleOwnerChunk", tampered("identifier", "0x" + "cd".repeat(32)))).reason)
+        assertEquals("invalid_params", err(call("swarm_publishSingleOwnerChunk", tampered("data", ""))).reason)
+        assertEquals("payload_too_large", err(call("swarm_publishSingleOwnerChunk", tampered("data", b64(ByteArray(4097))))).reason)
+        assertEquals("invalid_span", err(call("swarm_publishSingleOwnerChunk", tampered("span", -1))).reason)
+        assertEquals("unsupported_option", err(call("swarm_publishSingleOwnerChunk", tampered("options", JSONObject().put("pin", false)))).reason)
+        assertTrue(asked.isEmpty())
+        assertTrue(node.uploads().isEmpty())
+        assertEquals("a bad request never learns whose addresses are held", 0, publishers.ownReads)
+        // The owner may come lower-case or bare, the signature without 0x.
+        val bare = tampered("owner", pageOwner.removePrefix("0x").lowercase()).put("signature", sig)
+        assertEquals(pageOwner, okJson(call("swarm_publishSingleOwnerChunk", bare)).getString("owner"))
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk refuses a SOC owned by the node or a wallet account, only once the sheet is allowed`() {
+        connect()
+        // Always allow on: it doesn't cover this method, so every call is asked.
+        grants.auto += site to SwarmProvider.AutoApprove.Publish
+        val accountKey = ByteArray(32) { 0x33 }
+        val account = PublisherKeys.address(accountKey)
+        publishers.own = SwarmProvider.OwnAddresses(setOf(account.removePrefix("0x").lowercase()), complete = true)
+        val nodeKey = ByteArray(32) { 0x44 }
+        node.ethereum = PublisherKeys.address(nodeKey).uppercase().replace("0X", "0x")
+        for ((label, key) in listOf("a wallet account" to accountKey, "the node" to nodeKey)) {
+            asked.clear()
+            val e = err(call("swarm_publishSingleOwnerChunk", signedSoc(key)))
+            assertEquals(label, 4100, e.code)
+            assertEquals(label, "freedom_identity", e.reason)
+            // The sheet came first, naming the user's own address as the signer and warning that it's theirs.
+            val ask = asked.single() as SwarmAsk.Publish
+            assertEquals(label, SwarmChunks.checksum(PublisherKeys.address(key).removePrefix("0x").hexToBytesOrNull()!!), ask.owner)
+            assertTrue(label, ask.ownIdentity)
+            assertEquals(label, "This chunk is signed by one of your own identities: a wallet account, your Ant wallet or your node. Freedom won't publish it. Allowing only tells the site that this identity is yours, so don't allow unless you mean to share that.", swarmPromptCopy(ask).warning)
+            // Allow publishes nothing here, so the button says Allow, not Publish.
+            assertEquals(label, "Allow", swarmPromptCopy(ask).approve)
+        }
+        assertTrue(node.uploads().isEmpty())
+        // The site's own key still goes through, its sheet with the usual warning.
+        asked.clear()
+        ok(call("swarm_publishSingleOwnerChunk", signedSoc()))
+        assertEquals(1, node.uploads().size)
+        val theirs = asked.single() as SwarmAsk.Publish
+        assertFalse(theirs.ownIdentity)
+        assertEquals(swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).warning, swarmPromptCopy(theirs).warning)
+        assertEquals("Publish", swarmPromptCopy(theirs).approve)
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk tells a site nothing about whose SOC it is before the user taps`() {
+        connect()
+        val accountKey = ByteArray(32) { 0x33 }
+        publishers.own = SwarmProvider.OwnAddresses(setOf(PublisherKeys.address(accountKey).removePrefix("0x").lowercase()), complete = true)
+        answer = SwarmProvider.Answer.REJECTED
+        for (always in listOf(false, true)) {
+            if (always) grants.auto += site to SwarmProvider.AutoApprove.Publish
+            asked.clear()
+            // One of the user's and a stranger's: both wait on a sheet, and a refusal reads the same.
+            val mine = err(call("swarm_publishSingleOwnerChunk", signedSoc(accountKey)))
+            val theirs = err(call("swarm_publishSingleOwnerChunk", signedSoc()))
+            assertEquals("always=$always", 2, asked.size)
+            assertEquals("always=$always", theirs.code, mine.code)
+            assertEquals("always=$always", 4001, mine.code)
+            assertEquals("always=$always", theirs.reason, mine.reason)
+            assertEquals("always=$always", theirs.message, mine.message)
+            // Only the sheet, which the page never sees, tells the two apart.
+            assertEquals("always=$always", listOf(true, false), asked.map { (it as SwarmAsk.Publish).ownIdentity })
+        }
+        assertTrue(node.uploads().isEmpty())
+        assertEquals(0, commits)
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk fails closed when the device's identities can't all be told`() {
+        connect()
+        publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = false)
+        val locked = err(call("swarm_publishSingleOwnerChunk", signedSoc()))
+        assertEquals(-32603, locked.code)
+        assertEquals("vault_locked", locked.reason)
+        // ownAddresses throwing (an unreadable vault, say): a plain -32603, not "locked".
+        publishers.own = null
+        val unreadable = err(call("swarm_publishSingleOwnerChunk", signedSoc()))
+        assertEquals(-32603, unreadable.code)
+        assertEquals(null, unreadable.reason)
+        publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = true)
+        node.ethereum = ""
+        assertEquals(-32603, err(call("swarm_publishSingleOwnerChunk", signedSoc())).code)
+        // The node stopping right after preflight is the node's usual answer, not a failed check.
+        node.ethereum = "0x" + "11".repeat(20)
+        node.onRequest = { _, path -> if (path == "/addresses") throw java.io.IOException("connection refused") }
+        assertEquals("node-stopped", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
+        node.onRequest = { _, _ -> }
+        // None of these reached a sheet: they fail alike for every owner.
+        assertTrue(asked.isEmpty())
+        assertTrue(node.uploads().isEmpty())
+        // A node that isn't ready says so first, as for any publish.
+        node.ethereum = "0x" + "11".repeat(20)
+        node.stamps = JSONArray()
+        assertEquals("no-usable-stamps", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk reads the device's identities afresh once the sheet is answered`() {
+        connect()
+        // The page's key becomes a wallet account while its sheet is up (a Ledger added, say).
+        onApproved = { publishers.own = SwarmProvider.OwnAddresses(setOf(pageOwner.removePrefix("0x").lowercase()), complete = true) }
+        assertEquals("freedom_identity", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
+        assertEquals(1, asked.size)
+        assertTrue(node.uploads().isEmpty())
+        // The wallet locking while the sheet is up fails closed too.
+        asked.clear()
+        publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = true)
+        onApproved = { publishers.own = SwarmProvider.OwnAddresses(emptySet(), complete = false) }
+        assertEquals("vault_locked", err(call("swarm_publishSingleOwnerChunk", signedSoc())).reason)
+        assertEquals(1, asked.size)
+        assertTrue(node.uploads().isEmpty())
+    }
+
+    @Test
+    fun `publishSingleOwnerChunk asks every time, and neither reads nor sets the site's always-allow`() {
+        connect()
+        answer = SwarmProvider.Answer.REJECTED
+        assertEquals(4001, err(call("swarm_publishSingleOwnerChunk", signedSoc())).code)
+        assertTrue(node.uploads().isEmpty())
+        // An "always" coming back (no switch is shown for it) sets nothing.
+        answer = SwarmProvider.Answer(true, always = true)
+        ok(call("swarm_publishSingleOwnerChunk", signedSoc()))
+        assertFalse(grants.autoApprove(site))
+        // The site's publish always-allow, set another way, doesn't skip the sheet either.
+        grants.auto += site to SwarmProvider.AutoApprove.Publish
+        asked.clear()
+        ok(call("swarm_publishSingleOwnerChunk", signedSoc(identifier = "ef".repeat(32))))
+        assertEquals(1, asked.size)
+        assertEquals(2, node.uploads().count { it.second.startsWith("/soc/") })
+        // ...while publishData still rides on it.
+        asked.clear()
+        ok(call("swarm_publishData", JSONObject().put("data", "x").put("contentType", "text/plain")))
+        assertTrue(asked.isEmpty())
+        // Its sheet has no "always allow" switch; publishChunk's keeps one.
+        assertEquals(null, swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.SignedSoc, 5, null, null, emptyList(), owner = pageOwner)).always)
+        assertEquals(
+            "Always allow this site to publish without asking (chunks it hands over already signed, by anyone, still ask)",
+            swarmPromptCopy(SwarmAsk.Publish(site, SwarmAsk.Publish.Kind.Chunk, 5, null, null, emptyList())).always,
+        )
+        assertTrue(okJson(call("swarm_getCapabilities")).getJSONObject("extensions").getBoolean("pageSignedSingleOwnerChunks"))
+    }
+
+    private fun MemoryGrants.autoApprove(origin: String) = (origin to SwarmProvider.AutoApprove.Publish) in auto
 
     // -------------------------------------------------------------------
     // Reads
@@ -1566,8 +1804,8 @@ class SwarmProviderTest {
     fun `a Swarm site's line says what it may do without asking`() {
         fun grant(vararg auto: String) = baby.freedom.mobile.data.SwarmGrantStore.Grant(site, 1, auto.toSet())
         assertEquals("Asks before each upload and signature", swarmSiteSummary(grant()))
-        assertEquals("Publishes without asking", swarmSiteSummary(grant("publish")))
-        assertEquals("Publishes, manages feeds, signs without asking", swarmSiteSummary(grant("signing", "publish", "feeds")))
+        assertEquals("Publishes (except already-signed chunks) without asking", swarmSiteSummary(grant("publish")))
+        assertEquals("Publishes (except already-signed chunks), manages feeds, signs without asking", swarmSiteSummary(grant("signing", "publish", "feeds")))
         val messaging = baby.freedom.mobile.data.SwarmGrantStore.Grant(site, 1, setOf("messaging"), messaging = true)
         assertEquals("Sends messages without asking · Can send and receive messages", swarmSiteSummary(messaging))
         assertEquals("Asks before each upload and signature · Can send and receive messages", swarmSiteSummary(messaging.copy(autoApprove = emptySet())))
