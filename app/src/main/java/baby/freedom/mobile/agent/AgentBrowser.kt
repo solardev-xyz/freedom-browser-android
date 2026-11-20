@@ -117,6 +117,17 @@ internal object AgentBrowser {
     @Volatile
     var showTab: ((Long) -> Unit)? = null
 
+    /**
+     * The chat whose approved input last took the screen from the chat
+     * page ([BrowserToolset]): the page opens on it again next time,
+     * instead of on a new chat. Taken once.
+     */
+    private val reopen = java.util.concurrent.atomic.AtomicReference<String?>(null)
+
+    fun chatTookScreen(sessionId: String) = reopen.set(sessionId)
+
+    fun takeChatToReopen(): String? = reopen.getAndSet(null)
+
     /** The page script ([PAGE_SCRIPT_ASSET]), loaded once. */
     @Volatile
     var pageScript: String? = null

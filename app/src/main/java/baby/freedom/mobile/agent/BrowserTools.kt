@@ -283,6 +283,7 @@ internal class BrowserToolset(
         }
         val approval = approve(tab.id, tab.site, tab.document, action, args.intent)
         // On screen, then everything the card named checked again on the live tab.
+        AgentBrowser.chatTookScreen(sessionId)
         if (!onMain { host().bringToFront(tab.id) }) {
             throw ToolError(
                 ToolError.CAPABILITY_UNAVAILABLE,

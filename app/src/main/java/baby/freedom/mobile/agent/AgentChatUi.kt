@@ -140,7 +140,8 @@ internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings
     val providers = remember(context) { AgentProviders.get(context) }
     val state by providers.state.collectAsState(initial = null)
     val discovered by providers.models.collectAsState(initial = emptyMap())
-    var sessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The chat whose approved input closed this page (#575), else a new one.
+    var sessionId by rememberSaveable { mutableStateOf(AgentBrowser.takeChatToReopen()) }
     var showList by rememberSaveable { mutableStateOf(false) }
     // The page's own scope, for sends and deletes: it outlives the chat
     // and list views, so leaving either mid-call still hears the answer.

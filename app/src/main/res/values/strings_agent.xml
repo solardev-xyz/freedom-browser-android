@@ -192,8 +192,8 @@
     <string name="agent_approve_scroll_down">Scroll down</string>
     <string name="agent_approve_scroll_left">Scroll left</string>
     <string name="agent_approve_scroll_right">Scroll right</string>
-    <string name="agent_approve_dialog_ok">Answer OK to the page's message</string>
-    <string name="agent_approve_dialog_cancel">Answer Cancel to the page's message</string>
+    <string name="agent_approve_dialog_ok">Answer OK to the page\'s message</string>
+    <string name="agent_approve_dialog_cancel">Answer Cancel to the page\'s message</string>
     <string name="agent_approve_site">On %1$s</string>
     <string name="agent_approve_site_none">On a page with no address</string>
     <string name="agent_approve_address">Address</string>
@@ -215,7 +215,7 @@
     <string name="agent_approve_untrusted">Names and messages come from the website.</string>
     <string name="agent_approve_shows_tab">Allowing shows the tab, and the agent acts in it.</string>
     <string name="agent_approve_allow">Allow</string>
-    <string name="agent_approve_deny">Don't allow</string>
+    <string name="agent_approve_deny">Don\'t allow</string>
 
     <string name="agent_tab_held">Freedom Agent is using this tab</string>
     <string name="agent_tab_take_back">Take back</string>
