@@ -93,6 +93,7 @@ import androidx.compose.ui.unit.dp
 import baby.freedom.mobile.R
 import baby.freedom.mobile.agent.AgentProviders
 import baby.freedom.mobile.agent.AgentState
+import baby.freedom.mobile.agent.AiDictationPage
 import baby.freedom.mobile.agent.AiProvidersPage
 import baby.freedom.mobile.agent.AiSection
 import baby.freedom.mobile.agent.aiPageSummary
@@ -328,9 +329,11 @@ internal fun SettingsScreen(
     val defaultBrowser = rememberDefaultBrowserState()
     val isDefaultBrowser = defaultBrowser.isDefault
     val passkeys = remember(context) { Passkeys.availability(context) }
-    // Settings → AI (#573), and its Models & providers page standing in for the list.
+    // Settings → AI (#573), and its Models & providers or Voice dictation (#578) page standing in for the list.
     val agentState by remember(context) { AgentProviders.get(context).state }.collectAsState(initial = AgentState())
     var aiProvidersOpen by rememberSaveable { mutableStateOf(false) }
+    var aiDictationOpen by rememberSaveable { mutableStateOf(false) }
+    val aiPageOpen = aiProvidersOpen || aiDictationOpen
 
     // Each card's rows, as the page shows them right now (see [SettingsRow]).
     val sectionRows: Map<SettingsSection, List<SettingsRow>> = mapOf(
@@ -443,7 +446,10 @@ internal fun SettingsScreen(
     if (aiProvidersOpen && chainPage == null && site == null && !licencesOpen) {
         AiProvidersPage(onBack = { aiProvidersOpen = false })
     }
-    if (deleteDataOpen && chainPage == null && site == null && !licencesOpen && !aiProvidersOpen) {
+    if (aiDictationOpen && !aiProvidersOpen && chainPage == null && site == null && !licencesOpen) {
+        AiDictationPage(onBack = { aiDictationOpen = false })
+    }
+    if (deleteDataOpen && chainPage == null && site == null && !licencesOpen && !aiPageOpen) {
         DeleteBrowsingDataPage(
             repo = repo,
             onDelete = { choice ->
@@ -575,7 +581,11 @@ internal fun SettingsScreen(
             onOpenRelease = { onOpenUrl(it.url) },
             onOpenLicences = { licencesOpen = true },
         )
-        SettingsSection.Ai -> AiSection(visible = visible, onOpenProviders = { aiProvidersOpen = true })
+        SettingsSection.Ai -> AiSection(
+            visible = visible,
+            onOpenProviders = { aiProvidersOpen = true },
+            onOpenDictation = { aiDictationOpen = true },
+        )
         SettingsSection.Ipfs -> IpfsSection(
             visible = visible,
             settings = settings,
@@ -625,7 +635,7 @@ internal fun SettingsScreen(
     // same one opened again from the top level) starts at the top. Saveable,
     // so a recreated Activity keeps the position too.
     val pageState = rememberSaveable(openPage, saver = LazyListState.Saver) { LazyListState() }
-    if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen && !aiProvidersOpen) FullScreenScaffold(
+    if (chainPage == null && site == null && !licencesOpen && !deleteDataOpen && !aiPageOpen) FullScreenScaffold(
         title = openPage?.title ?: stringResource(R.string.settings_title),
         // On a sub-page the ← goes up to the top level, as Back does.
         onDismiss = { if (page != null) pageUp() else onDismiss() },

@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Tune
@@ -86,7 +87,8 @@ import kotlinx.coroutines.launch
  * Settings → AI (#573): the "Enable AI features" switch, and under it
  * Models & providers — connect a hosted provider with an API key or a
  * server on the network by URL, pick favourite models and the default
- * one, and Test connection. No chat yet (#574).
+ * one, and Test connection. Voice dictation's page (#578) is in
+ * DictationSettingsUi.kt.
  */
 
 private val AI_SECTION: String get() = Strings.get(R.string.agent_section_ai)
@@ -101,7 +103,7 @@ internal fun aiPageSummary(state: AgentState): String = when {
 private fun enableSubtitle(on: Boolean) =
     Strings.get(if (on) R.string.agent_enable_on else R.string.agent_enable_off)
 
-/** The AI card's rows, for settings search. Models & providers is a row only while AI is on. */
+/** The AI card's rows, for settings search. Models & providers and Voice dictation are rows only while AI is on. */
 internal fun aiSectionRows(state: AgentState): List<SettingsRow> = listOfNotNull(
     settingsRow(
         "ai-enabled", Strings.get(R.string.agent_enable), enableSubtitle(state.enabled),
@@ -111,6 +113,14 @@ internal fun aiSectionRows(state: AgentState): List<SettingsRow> = listOfNotNull
         settingsRow(
             "ai-providers", Strings.get(R.string.agent_providers),
             *searchKeywords(R.string.agent_providers_keywords),
+        )
+    } else {
+        null
+    },
+    if (state.enabled) {
+        settingsRow(
+            "ai-dictation", Strings.get(R.string.agent_dictation),
+            *searchKeywords(R.string.agent_dictation_keywords),
         )
     } else {
         null
@@ -135,6 +145,7 @@ private fun defaultLine(state: AgentState, discovered: Map<String, List<AgentMod
 internal fun AiSection(
     visible: Set<Any>,
     onOpenProviders: () -> Unit,
+    onOpenDictation: () -> Unit,
 ) {
     val context = LocalContext.current
     val providers = remember(context) { AgentProviders.get(context) }
@@ -171,6 +182,18 @@ internal fun AiSection(
             leadingIcon = Icons.Filled.Tune,
             onClick = onOpenProviders,
         )
+        if (state.enabled && "ai-dictation" in visible) {
+            val pick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
+            val recognizer = rememberDictationRecognizer()
+            PageRow(
+                title = stringResource(R.string.agent_dictation),
+                // Not before the user's recognizer pick is read: never the wrong destination.
+                subtitle = if (recognizer.ready) dictationSummary(recognizer.kind, pick) else "",
+                style = PageRowStyle.Inset,
+                leadingIcon = Icons.Filled.Mic,
+                onClick = onOpenDictation,
+            )
+        }
     }
 }
 

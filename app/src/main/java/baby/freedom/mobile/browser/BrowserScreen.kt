@@ -3696,8 +3696,13 @@ fun BrowserScreen(
     }
 
     if (showAgent) {
+        // Desktop Freedom's signing sheet, composed over the chat below.
+        val remoteSigning by remember(context) { OpenLvSession.get(context).approval }.collectAsState()
         baby.freedom.mobile.agent.AgentChatPage(
             aiOn = aiOn,
+            // A wallet page or a signing sheet over the chat: the
+            // microphone stops, as for an agent approval.
+            covered = showWallet || walletRequest != null || linkSend != null || remoteSigning != null,
             onDismiss = { showAgent = false },
             onOpenSettings = {
                 showAgent = false

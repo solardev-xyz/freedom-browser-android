@@ -12,7 +12,9 @@
   `datastore/freedom_agent.preferences_pb`, keys encrypted under their
   own Keystore key `freedom_agent_api_keys`, and the model lists beside
   it in `freedom_agent_models.preferences_pb`, which name the servers
-  on this phone's network). So are Freedom Agent's chats (#574,
+  on this phone's network), and the dictation picks in
+  `freedom_agent_dictation.preferences_pb` (#578: the language, and
+  whether the phone's speech service may hear the audio). So are Freedom Agent's chats (#574,
   `databases/freedom_agent.db` and its -wal/-shm/-journal): a chat can
   quote whatever was pasted into it, and its connections stay behind
   anyway.
@@ -69,6 +71,7 @@
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_agent.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_agent_models.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_agent_dictation.preferences_pb" />
         <exclude domain="database" path="freedom_agent.db" />
         <exclude domain="database" path="freedom_agent.db-wal" />
         <exclude domain="database" path="freedom_agent.db-shm" />
@@ -92,6 +95,7 @@
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_agent.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_agent_models.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_agent_dictation.preferences_pb" />
         <exclude domain="database" path="freedom_agent.db" />
         <exclude domain="database" path="freedom_agent.db-wal" />
         <exclude domain="database" path="freedom_agent.db-shm" />

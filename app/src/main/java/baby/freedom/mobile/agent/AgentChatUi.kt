@@ -1,9 +1,16 @@
 package baby.freedom.mobile.agent
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.os.SystemClock
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +31,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.EditNote
@@ -36,12 +45,14 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
@@ -50,6 +61,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -60,6 +72,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -70,11 +83,17 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.EmptyState
 import baby.freedom.mobile.browser.FullScreenScaffold
+import baby.freedom.mobile.browser.noteAndroidRefusal
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -127,10 +146,12 @@ private val ModelRefSaver = Saver<MutableState<ModelRef?>, String>(
  * Freedom Agent's chat (#574), from the main menu while AI is on: the
  * current chat, a model picker, a composer with Send (Stop while a reply
  * comes in), and the list of past chats. Closes itself if AI is turned
- * off while it's up.
+ * off while it's up. [covered]: a page or sheet of the browser's own is
+ * up over it (a wallet page, Desktop Freedom's signing sheet), which
+ * stops dictation the way an agent approval does.
  */
 @Composable
-internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
+internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings: () -> Unit, covered: Boolean = false) {
     // [aiOn] null: the switch isn't read yet (just after a rotation); only
     // a definite off closes the page.
     LaunchedEffect(aiOn) { if (aiOn == false) onDismiss() }
@@ -187,6 +208,7 @@ internal fun AgentChatPage(aiOn: Boolean?, onDismiss: () -> Unit, onOpenSettings
                 onOpenSettings = onOpenSettings,
                 scope = scope,
                 sending = sending,
+                covered = covered,
             )
         }
     }
@@ -202,6 +224,7 @@ private fun ChatView(
     onOpenSettings: () -> Unit,
     scope: kotlinx.coroutines.CoroutineScope,
     sending: MutableState<Boolean>,
+    covered: Boolean,
 ) {
     val session by remember(sessionId) { sessionId?.let { chats.session(it) } ?: flowOf(null) }.collectAsState(initial = null)
     val turns by remember(sessionId) { sessionId?.let { chats.turns(it) } ?: flowOf(emptyList()) }.collectAsState(initial = emptyList())
@@ -216,6 +239,64 @@ private fun ChatView(
     val sessionModel = session?.let { s -> s.connectionId?.let { c -> s.modelId?.let { ModelRef(c, it) } } }
     val model = listOfNotNull(picked, sessionModel, defaultModel).firstOrNull { ref -> choices.any { it.ref == ref } }
         ?: choices.firstOrNull()?.ref
+
+    // Voice dictation (#578): only when the phone has a recognizer.
+    val context = LocalContext.current
+    val recognizers = rememberDictationRecognizer()
+    val recognizer = recognizers.kind
+    val languagePick by remember(context) { DictationSettings.get(context).language }.collectAsState(initial = null)
+    val language = dictationLanguage(languagePick, LocalConfiguration.current.locales[0])
+    val dictation = remember(recognizer) {
+        recognizer?.let { kind -> Dictation(kind, { AndroidRecognizer(context, it) }, setDraft = { draft = it }) }
+    }
+    val dictationStatus by remember(dictation) {
+        dictation?.status ?: MutableStateFlow(DictationStatus.Idle)
+    }.collectAsState()
+    val approval by AgentApprovals.shown.collectAsState()
+    // An approval card or another page over the chat: no dictating into the hidden draft.
+    val hidden = approval != null || covered
+    val hiddenNow by rememberUpdatedState(hidden)
+    val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            // Not into a draft that's being sent (Send can't be tapped
+            // over the dialog, but its send may still be under way), nor
+            // one a page that opened meanwhile now covers.
+            if (!sending.value && !hiddenNow) dictation?.start(draft, language)
+        } else {
+            // The same refusal bookkeeping as a site's microphone: a
+            // refusal here still lets a site the user later allows the
+            // microphone point them at Android settings.
+            context.findHostActivity()?.let { noteAndroidRefusal(it, Manifest.permission.RECORD_AUDIO) }
+            dictation?.refused()
+        }
+    }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(dictation, lifecycle) {
+        // The microphone is let go of once the app is out of sight.
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> dictation?.cancel()
+                // Back from Android settings with the microphone turned on:
+                // the refusal's line no longer holds.
+                Lifecycle.Event.ON_RESUME -> if (
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    dictation?.permissionGranted()
+                }
+                else -> Unit
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            dictation?.destroy()
+        }
+    }
+    // Another chat, an approval card or another page over the chat, or a
+    // new language: dictation stops, keeping what the draft shows.
+    LaunchedEffect(sessionId, hidden, language) { dictation?.cancel() }
+    // A finished run's or a failure's line is about the chat it was in.
+    LaunchedEffect(sessionId) { dictation?.dismiss() }
 
     if (choices.isEmpty() && turns.isEmpty()) {
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -317,14 +398,41 @@ private fun ChatView(
                     modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
+            DictationLine(
+                dictationStatus,
+                language,
+                serviceOffered = RecognizerKind.Service in recognizers.available,
+                onOpenAndroidSettings = { openAppSettings(context) },
+            )
             Row(verticalAlignment = Alignment.Bottom) {
                 OutlinedTextField(
                     value = draft,
                     onValueChange = {
                         draft = it
                         sendFailed = false
+                        dictation?.edited(it)
                     },
                     placeholder = { Text(stringResource(R.string.agent_composer_hint)) },
+                    trailingIcon = dictation?.let { d ->
+                        {
+                            MicButton(d.kind, dictationStatus) {
+                                // The draft is on its way: dictating now would add
+                                // to text that's about to be cleared.
+                                if (sending.value) return@MicButton
+                                if (d.listening) {
+                                    d.finish()
+                                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                                    PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    d.start(draft, language)
+                                } else {
+                                    // Asked only now, on the first tap.
+                                    d.dismiss()
+                                    askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            }
+                        }
+                    },
                     modifier = Modifier.weight(1f),
                     maxLines = 6,
                 )
@@ -356,6 +464,9 @@ private fun ChatView(
                             // can land before the button redraws disabled.
                             if (sending.value) return@FilledIconButton
                             val m = model ?: return@FilledIconButton
+                            // What's shown is what's sent: a result still
+                            // to come mustn't change the draft mid-send.
+                            dictation?.cancel()
                             val text = draft
                             if (text.isBlank()) return@FilledIconButton
                             sending.value = true
@@ -366,7 +477,12 @@ private fun ChatView(
                                         sendFailed = true
                                     } else {
                                         // Only what was sent: anything typed meanwhile stays.
-                                        if (draft == text) draft = ""
+                                        // Through [Dictation.edited] like any other change,
+                                        // so a finished run's line goes with the text.
+                                        if (draft == text) {
+                                            draft = ""
+                                            dictation?.edited("")
+                                        }
                                         onStarted(id)
                                     }
                                 } finally {
@@ -384,6 +500,126 @@ private fun ChatView(
                 }
             }
         }
+    }
+}
+
+/**
+ * The composer's microphone (#578): starts dictating, or while listening
+ * finishes. Its label says where the audio goes before the first tap.
+ */
+@Composable
+internal fun MicButton(kind: RecognizerKind, status: DictationStatus, onClick: () -> Unit) {
+    val listening = status as? DictationStatus.Listening
+    // One button in both states, only its look and label changing: two
+    // buttons swapped on the tap would replace the node TalkBack has
+    // focus on, and a user exploring to find Stop would have every label
+    // on the way read aloud into the open microphone.
+    IconButton(
+        onClick = onClick,
+        // While finishing, a second tap has nothing more to do.
+        enabled = listening?.finishing != true,
+        colors = if (listening != null) IconButtonDefaults.filledIconButtonColors() else IconButtonDefaults.iconButtonColors(),
+    ) {
+        Icon(
+            if (listening != null) Icons.Filled.Mic else Icons.Outlined.Mic,
+            contentDescription = stringResource(
+                when {
+                    listening?.finishing == true -> R.string.agent_dictation_finishing
+                    listening != null -> R.string.agent_dictate_stop
+                    kind == RecognizerKind.OnDevice -> R.string.agent_dictate_on_device
+                    else -> R.string.agent_dictate_service
+                },
+            ),
+        )
+    }
+}
+
+/** The line over the composer while dictating, or after dictation failed. */
+@Composable
+private fun DictationLine(status: DictationStatus, language: String, serviceOffered: Boolean, onOpenAndroidSettings: () -> Unit) {
+    when (status) {
+        DictationStatus.Idle -> Unit
+        // Said once by TalkBack: the microphone is let go of by then.
+        DictationStatus.Done -> Text(
+            stringResource(R.string.agent_dictation_done),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+        )
+        is DictationStatus.Listening -> Text(
+            stringResource(
+                when {
+                    status.finishing -> R.string.agent_dictation_finishing
+                    !status.hearing -> R.string.agent_dictation_starting
+                    status.kind == RecognizerKind.OnDevice -> R.string.agent_dictation_listening_on_device
+                    else -> R.string.agent_dictation_listening_service
+                },
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            // Not a live region: TalkBack reading it out would be dictated.
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+        is DictationStatus.Failed -> Row(verticalAlignment = Alignment.CenterVertically) {
+            val locale = LocalConfiguration.current.locales[0]
+            // The language of the run that failed: the app's (or the pick)
+            // may have changed since, with this line still up.
+            val languageName = java.util.Locale.forLanguageTag(status.language ?: language).getDisplayName(locale)
+            val line = when (status.failure) {
+                DictationFailure.NoSpeech -> stringResource(R.string.agent_dictation_no_speech)
+                DictationFailure.Permission -> stringResource(R.string.agent_dictation_permission)
+                DictationFailure.RecognizerPermission -> stringResource(
+                    if (status.kind == RecognizerKind.OnDevice) {
+                        R.string.agent_dictation_recognizer_permission_on_device
+                    } else {
+                        R.string.agent_dictation_recognizer_permission_service
+                    },
+                )
+                DictationFailure.LanguageUnsupported -> stringResource(R.string.agent_dictation_language, languageName)
+                DictationFailure.LanguageUnavailable -> stringResource(R.string.agent_dictation_language_download, languageName)
+                DictationFailure.Network -> stringResource(
+                    if (status.kind == RecognizerKind.OnDevice) {
+                        R.string.agent_dictation_on_device_failed
+                    } else {
+                        R.string.agent_dictation_network
+                    },
+                )
+                DictationFailure.Busy -> stringResource(R.string.agent_dictation_busy)
+                DictationFailure.Audio -> stringResource(R.string.agent_dictation_audio)
+                DictationFailure.Other -> stringResource(R.string.agent_dictation_failed)
+            }
+            // The on-device recognizer failing for a reason of its own: the
+            // speech service is there to pick, by the user, in Settings.
+            val offerService = serviceOffered && status.kind == RecognizerKind.OnDevice && status.failure !in
+                setOf(DictationFailure.NoSpeech, DictationFailure.Permission, DictationFailure.Busy)
+            Text(
+                if (offerService) line + " " + stringResource(R.string.agent_dictation_try_service) else line,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status.failure == DictationFailure.NoSpeech) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+                modifier = Modifier.weight(1f).padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            )
+            if (status.failure == DictationFailure.Permission) {
+                TextButton(onClick = onOpenAndroidSettings, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text(stringResource(R.string.agent_dictation_android_settings))
+                }
+            }
+        }
+    }
+}
+
+/** Android's own page for this app, where a refused permission is turned on. */
+private fun openAppSettings(context: Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    } catch (e: android.content.ActivityNotFoundException) {
+        // No settings app to open: the line still says what to do.
     }
 }
 
@@ -667,4 +903,10 @@ private fun ChatList(
             },
         )
     }
+}
+
+private tailrec fun Context.findHostActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findHostActivity()
+    else -> null
 }
