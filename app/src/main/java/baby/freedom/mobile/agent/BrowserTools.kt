@@ -620,12 +620,12 @@ internal class BrowserToolset(
             kindOf(action),
             mode = { approvals.mode },
             classify = { approvals.classifyInteraction(interactionInput(action, site, intent)) },
-            formSummary = {
-                val name = ApprovalBinding.targetOf(action)?.name?.takeIf { it.isNotBlank() }
-                if (name != null) "Submit “$name”." else "Submit this form."
-            },
         )
-        val check = (decision as? PolicyDecision.Ask)?.check?.summary?.let { ApprovalText.flatten(it, 240) }?.ifEmpty { null }
+        val check = when (val c = (decision as? PolicyDecision.Ask)?.check) {
+            // The model read page and agent text: its words are flattened like the page's.
+            is ApprovalCheck.Judged -> ApprovalText.flatten(c.summary, 240).ifEmpty { null }?.let { ApprovalCheck.Judged(it) } ?: ApprovalCheck.NoAnswer
+            else -> c
+        }
         val approval = AgentApproval(
             id = AgentApprovals.nextId(),
             sessionId = sessionId,

@@ -695,7 +695,7 @@ class BrowserToolsTest {
         approvals.check = InteractionClassification(InteractionKind.CONSEQUENTIAL, 0.97, "Posts the comment.", emptyList())
         val ref2 = snapshotRef(tools)
         assertFalse(tools.call("browser_click", JSONObject().put("ref", ref2)).isError)
-        assertEquals("Posts the comment.", asked.single().check)
+        assertEquals(ApprovalCheck.Judged("Posts the comment."), asked.single().check)
         assertEquals(2, host.taps.size)
 
         // A form submission asks without the model.
@@ -706,9 +706,18 @@ class BrowserToolsTest {
         val ref3 = snapshotRef(tools)
         answer = { ApprovalOutcome.Declined }
         assertEquals("USER_DECLINED", tools.call("browser_click", JSONObject().put("ref", ref3)).code())
-        assertEquals("Submit “Search”.", asked.single().check)
+        assertEquals(ApprovalCheck.SendsForm, asked.single().check)
         assertTrue(approvals.inputs.isEmpty())
         assertEquals(2, host.taps.size)
+
+        // A check that gave no answer says so, not as the model's word.
+        asked.clear()
+        answer = { ApprovalOutcome.Approved }
+        host.control = JSONObject().put("role", "button").put("tag", "button").put("name", "Search")
+        approvals.check = InteractionIntentClassifier.uncertain(ClassifierReason.TIMEOUT)
+        val ref4 = snapshotRef(tools)
+        assertFalse(tools.call("browser_click", JSONObject().put("ref", ref4)).isError)
+        assertEquals(ApprovalCheck.NoAnswer, asked.single().check)
     }
 
     @Test

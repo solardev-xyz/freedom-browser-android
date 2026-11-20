@@ -534,8 +534,9 @@ Return exactly one JSON object and no markdown or surrounding prose:
         InteractionKind.UNCERTAIN, 0.0, "The intended consequence could not be classified reliably.", listOf(reason),
     )
 
-    /** Asked before it ran: a form submission, which desktop never leaves to the model. */
-    fun consequential(summary: String) = InteractionClassification(InteractionKind.CONSEQUENTIAL, 1.0, summary, emptyList())
+    /** One of [uncertain]'s fallbacks rather than the model's own judgment. */
+    fun isFallback(c: InteractionClassification): Boolean =
+        c.kind == InteractionKind.UNCERTAIN && c.confidence == 0.0 && c.summary == uncertain().summary
 
     fun parse(text: String?): InteractionClassification {
         val o = try {

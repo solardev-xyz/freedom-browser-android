@@ -180,10 +180,14 @@ private fun ApprovalBody(approval: AgentApproval) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    approval.check?.takeIf { it.isNotBlank() }?.let {
+    approval.check?.let { check ->
         Spacer(Modifier.height(8.dp))
         Text(
-            stringResource(R.string.agent_approve_check, it),
+            when (check) {
+                is ApprovalCheck.Judged -> stringResource(R.string.agent_approve_check, check.summary)
+                ApprovalCheck.SendsForm -> stringResource(R.string.agent_approve_check_form)
+                ApprovalCheck.NoAnswer -> stringResource(R.string.agent_approve_check_none)
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

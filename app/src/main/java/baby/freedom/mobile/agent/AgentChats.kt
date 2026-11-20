@@ -199,7 +199,8 @@ internal class AgentChats(
                 is ChatTarget.Unavailable -> TurnOutcome("", target.error)
                 is ChatTarget.Ready -> {
                     val session = dao.session(turn.sessionId)
-                    session?.let { modes[turn.sessionId] = ApprovalMode.of(it.approvalMode) }
+                    // Only if not set since: a mode picked while the row was read wins.
+                    session?.let { modes.putIfAbsent(turn.sessionId, ApprovalMode.of(it.approvalMode)) }
                     val stream = ModelStream { request, onText -> providers.streamStep(target, request, onText) }
                     check = TurnCheck(ClassifierRun(stream, model.modelId), turn.userText).also { checks[turn.sessionId] = it }
                     // Desktop's hydration: only whole turns go back to the model.

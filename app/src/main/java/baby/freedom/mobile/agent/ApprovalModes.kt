@@ -57,12 +57,24 @@ internal enum class ActionKind {
     Mcp,
 }
 
+/** Why "sensitive actions" put an action to the user, as its card says. */
+internal sealed interface ApprovalCheck {
+    /** The model judged it consequential or uncertain: its own [summary]. */
+    data class Judged(val summary: String) : ApprovalCheck
+
+    /** It sends a form, which isn't left to the model. */
+    data object SendsForm : ApprovalCheck
+
+    /** The check gave no usable answer (an error, a timeout, a reply in the wrong shape). */
+    data object NoAnswer : ApprovalCheck
+}
+
 /** The policy's answer: run without a card, or ask the user. */
 internal sealed interface PolicyDecision {
     data object Proceed : PolicyDecision
 
-    /** [check]: the classifier's view, when one was asked, for the card to show. */
-    data class Ask(val check: InteractionClassification? = null) : PolicyDecision
+    /** [check]: why "sensitive actions" asks, for the card; null in the other modes. */
+    data class Ask(val check: ApprovalCheck? = null) : PolicyDecision
 }
 
 /**
@@ -89,16 +101,13 @@ internal object ApprovalPolicy {
         kind: ActionKind,
         mode: () -> ApprovalMode,
         classify: suspend () -> InteractionClassification,
-        formSummary: () -> String = { "Submit this form." },
     ): PolicyDecision {
         if (alwaysAsks(kind)) return PolicyDecision.Ask()
         return when (mode()) {
             ApprovalMode.EveryInteraction -> PolicyDecision.Ask()
             ApprovalMode.AllowWebsiteInteractions -> PolicyDecision.Proceed
             ApprovalMode.SensitiveActions -> {
-                if (kind == ActionKind.FormSubmission) {
-                    return PolicyDecision.Ask(InteractionIntentClassifier.consequential(formSummary()))
-                }
+                if (kind == ActionKind.FormSubmission) return PolicyDecision.Ask(ApprovalCheck.SendsForm)
                 val check = try {
                     classify()
                 } catch (e: CancellationException) {
@@ -106,9 +115,10 @@ internal object ApprovalPolicy {
                 } catch (e: Exception) {
                     InteractionIntentClassifier.uncertain(ClassifierReason.PROVIDER_ERROR)
                 }
+                val why = if (InteractionIntentClassifier.isFallback(check)) ApprovalCheck.NoAnswer else ApprovalCheck.Judged(check.summary)
                 when {
-                    !InteractionIntentClassifier.mayProceed(check) -> PolicyDecision.Ask(check)
-                    mode() == ApprovalMode.EveryInteraction -> PolicyDecision.Ask(check)
+                    !InteractionIntentClassifier.mayProceed(check) -> PolicyDecision.Ask(why)
+                    mode() == ApprovalMode.EveryInteraction -> PolicyDecision.Ask(why)
                     else -> PolicyDecision.Proceed
                 }
             }

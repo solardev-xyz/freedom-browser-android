@@ -66,9 +66,10 @@ internal data class AgentApproval(
     /**
      * In "sensitive actions" (#595), why it's asked: the intent
      * classifier's summary (the chat's model judging page and agent
-     * text, so shown as its words), or that it sends a form.
+     * text, so shown as its words), that it sends a form, or that the
+     * check gave no answer. Null in the other modes.
      */
-    val check: String? = null,
+    val check: ApprovalCheck? = null,
 )
 
 /** How an approval ended. Only [Declined] is the user saying no. */

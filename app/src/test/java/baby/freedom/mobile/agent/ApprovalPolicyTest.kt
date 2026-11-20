@@ -61,32 +61,29 @@ class ApprovalPolicyTest {
         for (kind in listOf(ActionKind.Navigate, ActionKind.PageInteraction)) {
             assertEquals(PolicyDecision.Proceed, ApprovalPolicy.decide(kind, mode, Counting(ordinary)::classify))
             val low = ordinary.copy(confidence = 0.84)
-            assertEquals(PolicyDecision.Ask(low), ApprovalPolicy.decide(kind, mode, Counting(low)::classify))
+            assertEquals(PolicyDecision.Ask(ApprovalCheck.Judged(low.summary)), ApprovalPolicy.decide(kind, mode, Counting(low)::classify))
             val unsure = ordinary.copy(uncertainties = listOf("which account?"))
-            assertEquals(PolicyDecision.Ask(unsure), ApprovalPolicy.decide(kind, mode, Counting(unsure)::classify))
+            assertEquals(PolicyDecision.Ask(ApprovalCheck.Judged(unsure.summary)), ApprovalPolicy.decide(kind, mode, Counting(unsure)::classify))
             val sends = InteractionClassification(InteractionKind.CONSEQUENTIAL, 0.99, "Sends the message.", emptyList())
-            assertEquals(PolicyDecision.Ask(sends), ApprovalPolicy.decide(kind, mode, Counting(sends)::classify))
-            // Malformed output reaches the policy as the parser's fallback: uncertain.
+            assertEquals(PolicyDecision.Ask(ApprovalCheck.Judged(sends.summary)), ApprovalPolicy.decide(kind, mode, Counting(sends)::classify))
+            // Malformed output reaches the policy as the parser's fallback: no answer, never the model's word.
             val malformed = InteractionIntentClassifier.parse("""{"kind":"ordinary","confidence":"1"}""")
-            assertEquals(PolicyDecision.Ask(malformed), ApprovalPolicy.decide(kind, mode, Counting(malformed)::classify))
+            assertEquals(PolicyDecision.Ask(ApprovalCheck.NoAnswer), ApprovalPolicy.decide(kind, mode, Counting(malformed)::classify))
         }
     }
 
     @Test
     fun `a form submission asks in sensitive actions without asking the model`() = runBlocking {
         val check = Counting(ordinary)
-        val d = ApprovalPolicy.decide(ActionKind.FormSubmission, { ApprovalMode.SensitiveActions }, check::classify) { "Submit “Search”." }
+        val d = ApprovalPolicy.decide(ActionKind.FormSubmission, { ApprovalMode.SensitiveActions }, check::classify)
         assertEquals(0, check.calls)
-        val c = (d as PolicyDecision.Ask).check!!
-        assertEquals(InteractionKind.CONSEQUENTIAL, c.kind)
-        assertEquals("Submit “Search”.", c.summary)
+        assertEquals(PolicyDecision.Ask(ApprovalCheck.SendsForm), d)
     }
 
     @Test
     fun `a classifier that throws asks`() = runBlocking {
         val d = ApprovalPolicy.decide(ActionKind.PageInteraction, { ApprovalMode.SensitiveActions }, { throw IllegalStateException("boom") })
-        assertTrue(d is PolicyDecision.Ask)
-        assertEquals(InteractionKind.UNCERTAIN, (d as PolicyDecision.Ask).check!!.kind)
+        assertEquals(PolicyDecision.Ask(ApprovalCheck.NoAnswer), d)
     }
 
     @Test
@@ -96,7 +93,7 @@ class ApprovalPolicyTest {
             mode = ApprovalMode.EveryInteraction
             ordinary
         })
-        assertEquals(PolicyDecision.Ask(ordinary), d)
+        assertEquals(PolicyDecision.Ask(ApprovalCheck.Judged(ordinary.summary)), d)
     }
 
     @Test

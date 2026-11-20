@@ -240,6 +240,8 @@
     <string name="agent_approve_intent">The agent says: “%1$s”</string>
     <!-- "Ask when it matters" (#595): why this one asks, in the model's words. -->
     <string name="agent_approve_check">Your model\'s check: “%1$s”</string>
+    <string name="agent_approve_check_form">Asked because this sends a form.</string>
+    <string name="agent_approve_check_none">Asked because your model couldn\'t check this step.</string>
     <string name="agent_approve_untrusted">Names and messages come from the website.</string>
     <string name="agent_approve_shows_tab">Allowing shows the tab, and the agent acts in it.</string>
     <string name="agent_approve_allow">Allow</string>
