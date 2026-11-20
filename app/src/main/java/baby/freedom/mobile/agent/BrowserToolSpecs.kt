@@ -178,8 +178,8 @@ internal object BrowserToolSpecs {
             SCROLL,
             "Scroll using a reference from the latest snapshot: viewport.ref for the page, or an element with " +
                 "scrollable state for a nested container. Choose up/down/left/right and optionally 0.1–3 viewport " +
-                "pages (default 1). Uses touch input at a visible point; cannot scroll an occluded or offscreen " +
-                "container. Result reports actual movement, boundary, or no_movement. Do not repeat a " +
+                "pages (default 1). Scrolls the container itself, by script: no touch, swipe or click reaches the " +
+                "page. Result reports actual movement, boundary, or no_movement. Do not repeat a " +
                 "blocked/no-movement scroll blindly; read a fresh snapshot to check lazy-loaded content or choose " +
                 "another container. This does not click or focus a control." + APPROVAL_NOTE,
             obj(
