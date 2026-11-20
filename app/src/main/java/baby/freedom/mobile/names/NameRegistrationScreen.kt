@@ -278,7 +278,7 @@ fun NameRegistrationScreen(
         ) {
             val status = sendStatus?.takeIf { it.quote.request.dapp?.name != null }
             val r = reviewing
-            val shown = r?.let { nameReview(it.op, it.plan, it.quote) }
+            val shown = r?.let { nameReview(it.op, it.plan, it.quote, accountList?.accounts) }
             when {
                 r != null -> item("review") {
                     if (shown == null) {
@@ -588,7 +588,13 @@ private fun OperationCard(
     onCheckAgain: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val intent = stringResource(if (op.intent == Intent.REGISTER) R.string.namereg_intent_register else R.string.namereg_intent_renew)
+    val intent = stringResource(
+        when {
+            op.intent == Intent.REGISTER -> R.string.namereg_intent_register
+            op.intent.recordWrite -> R.string.namereg_intent_record
+            else -> R.string.namereg_intent_renew
+        },
+    )
     SectionCard(title = stringResource(R.string.namereg_operation_title, op.name, intent)) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(operationStatus(op, nowSeconds), style = MaterialTheme.typography.bodyMedium)

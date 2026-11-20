@@ -66,10 +66,40 @@ data class NameOperation(
     val message: String? = null,
     /** Bumped by every save: a copy read before a slow read can't overwrite a newer one. */
     val revision: Int = 0,
+    /** The agent chat that prepared it (#599); null when the name screen did. */
+    val chat: String? = null,
+    /**
+     * The user said no to the current step's review on the agent's sheet
+     * (or refused it on their Ledger): the agent shows it again only when
+     * the user asks it to resume. Cleared when the step goes to the wallet.
+     */
+    val declined: Boolean = false,
+    /** A record write's record and its new value (#599); null for a registration or renewal. */
+    val record: NameRecord? = null,
+    /** The record's value when it was prepared: it must still be this when sent ("" for none). */
+    val before: String? = null,
+    /**
+     * Who controlled the name and its records when a record write was
+     * prepared (owner, manager, resolver, record generation, fuses): a
+     * write is never sent once that changed.
+     */
+    val authority: String? = null,
+    /** A website write's Swarm publication and its manifest reference. */
+    val publicationId: String? = null,
+    val reference: String? = null,
 ) {
-    enum class Intent { REGISTER, RENEW }
+    /**
+     * Desktop's `INTENTS`: registering and renewing (the name screen's and
+     * the agent's), and the agent's record writes (#599) — the website
+     * (a Swarm contenthash) set or cleared, the ETH address, one text record.
+     */
+    enum class Intent {
+        REGISTER, RENEW, SET_WEBSITE, CLEAR_WEBSITE, SET_ADDRESS, SET_TEXT;
 
-    enum class Step { COMMIT, REVEAL, RENEW }
+        val recordWrite: Boolean get() = this != REGISTER && this != RENEW
+    }
+
+    enum class Step { COMMIT, REVEAL, RENEW, RECORD }
 
     enum class State {
         /** The current step can be reviewed and sent. */
@@ -110,6 +140,15 @@ data class NameOperation(
     }
 
     val registering: Boolean get() = intent == Intent.REGISTER
+}
+
+/**
+ * One record a write sets: the website ([Kind.CONTENTHASH], [value] the
+ * contenthash in hex, `0x` to clear it), the ETH address ([Kind.ADDRESS],
+ * checksummed) or the text record [key] ([Kind.TEXT]).
+ */
+data class NameRecord(val kind: Kind, val value: String, val key: String? = null) {
+    enum class Kind { CONTENTHASH, ADDRESS, TEXT }
 }
 
 /**
@@ -347,6 +386,16 @@ internal object NameJournalCodec {
         .put("wrapped", o.wrapped)
         .put("message", o.message ?: JSONObject.NULL)
         .put("revision", o.revision)
+        .put("chat", o.chat ?: JSONObject.NULL)
+        .put("declined", o.declined)
+        .put(
+            "record",
+            o.record?.let { JSONObject().put("kind", it.kind.name).put("value", it.value).put("key", it.key ?: JSONObject.NULL) } ?: JSONObject.NULL,
+        )
+        .put("before", o.before ?: JSONObject.NULL)
+        .put("authority", o.authority ?: JSONObject.NULL)
+        .put("publicationId", o.publicationId ?: JSONObject.NULL)
+        .put("reference", o.reference ?: JSONObject.NULL)
 
     /** What [decodeAll] read: every operation that came back whole, and how many didn't. */
     class Decoded(val operations: List<NameOperation>, val dropped: Int)
@@ -384,12 +433,18 @@ internal object NameJournalCodec {
         val id = o.getString("id")
         require(ID.matches(id))
         val parsed = NameContracts.parse(o.getString("name"))
-        require(parsed.space.tld == o.getString("space") && parsed.topLevel)
+        val intent = NameOperation.Intent.valueOf(o.getString("intent"))
+        // A record can be written on a subname; registering and renewing are top-level only.
+        require(parsed.space.tld == o.getString("space") && (parsed.topLevel || intent.recordWrite))
+        val record = o.optJSONObject("record")?.let {
+            NameRecord(NameRecord.Kind.valueOf(it.getString("kind")), it.getString("value"), it.str("key"))
+        }
+        require(intent.recordWrite == (record != null))
         return NameOperation(
             id = id,
             name = parsed.name,
             space = parsed.space,
-            intent = NameOperation.Intent.valueOf(o.getString("intent")),
+            intent = intent,
             account = o.getString("account").also { NameAbi.addressBytes(it) },
             accountIndex = o.getInt("accountIndex"),
             duration = o.getLong("duration"),
@@ -409,6 +464,13 @@ internal object NameJournalCodec {
             wrapped = o.optBoolean("wrapped", false),
             message = o.str("message"),
             revision = o.optInt("revision", 0),
+            chat = o.str("chat"),
+            declined = o.optBoolean("declined", false),
+            record = record,
+            before = o.str("before"),
+            authority = o.str("authority"),
+            publicationId = o.str("publicationId"),
+            reference = o.str("reference"),
         )
     }
 

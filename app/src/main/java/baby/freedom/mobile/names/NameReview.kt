@@ -5,8 +5,10 @@ import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.names.NameOperation.Intent
 import baby.freedom.mobile.names.NameOperation.State
 import baby.freedom.mobile.names.NameOperation.Step
+import baby.freedom.mobile.wallet.Eip712
 import baby.freedom.mobile.wallet.SendAmounts
 import baby.freedom.mobile.wallet.SendQuote
+import baby.freedom.mobile.wallet.WalletAccount
 import java.math.BigInteger
 import java.text.DateFormat
 import java.util.Date
@@ -37,7 +39,13 @@ internal data class NameReviewRow(val label: String, val value: String)
  */
 internal class NameReview(val headline: String, val rows: List<NameReviewRow>, val contract: NameContracts.Role)
 
-internal fun nameReview(op: NameOperation, plan: NameRegistrar.Plan, quote: SendQuote): NameReview? {
+internal fun nameReview(
+    op: NameOperation,
+    plan: NameRegistrar.Plan,
+    quote: SendQuote,
+    /** The wallet's addresses, for an address write's "Belongs to" row; null when they couldn't be read. */
+    own: List<WalletAccount>? = null,
+): NameReview? {
     val r = quote.request
     val matches = plan.operationId == op.id && plan.step == op.step &&
         r.chain.id == NameContracts.CHAIN_ID && quote.tx.chainId == NameContracts.CHAIN_ID &&
@@ -51,6 +59,15 @@ internal fun nameReview(op: NameOperation, plan: NameRegistrar.Plan, quote: Send
         Step.COMMIT -> Strings.get(R.string.namereg_review_commit_headline, op.name)
         Step.REVEAL -> Strings.get(R.string.namereg_review_reveal_headline, op.name)
         Step.RENEW -> Strings.get(R.string.namereg_review_renew_headline, op.name)
+        Step.RECORD -> Strings.get(
+            when (op.intent) {
+                Intent.SET_WEBSITE -> R.string.namereg_review_website_headline
+                Intent.CLEAR_WEBSITE -> R.string.namereg_review_clear_website_headline
+                Intent.SET_ADDRESS -> R.string.namereg_review_address_headline
+                else -> R.string.namereg_review_text_headline
+            },
+            op.name,
+        )
     }
     val rows = ArrayList<NameReviewRow>()
     rows += NameReviewRow(Strings.get(R.string.namereg_review_name), op.name)
@@ -59,6 +76,10 @@ internal fun nameReview(op: NameOperation, plan: NameRegistrar.Plan, quote: Send
             Strings.get(R.string.namereg_review_step_label),
             Strings.get(if (plan.step == Step.COMMIT) R.string.namereg_review_step_commit else R.string.namereg_review_step_reveal),
         )
+    }
+    if (plan.step == Step.RECORD) {
+        recordRows(op, own).let { rows += it }
+        return NameReview(headline, rows, plan.contract)
     }
     rows += NameReviewRow(
         Strings.get(R.string.namereg_review_term),
@@ -90,11 +111,57 @@ internal fun nameReview(op: NameOperation, plan: NameRegistrar.Plan, quote: Send
     return NameReview(headline, rows, plan.contract)
 }
 
-/** The step an operation's next review is for, said plainly. */
+/**
+ * A record write's rows (desktop's `presentPlan` record items): which
+ * record, its key, what it holds now and what it will hold — written as
+ * set by whoever controls the name, so every character that could hide
+ * or rearrange text shows as an escape ([Eip712.visible]) — and for an
+ * address, whether it's one of this wallet's.
+ */
+private fun recordRows(op: NameOperation, own: List<WalletAccount>?): List<NameReviewRow> {
+    val record = op.record ?: return emptyList()
+    val rows = ArrayList<NameReviewRow>()
+    rows += NameReviewRow(
+        Strings.get(R.string.namereg_review_record),
+        Strings.get(
+            when (record.kind) {
+                NameRecord.Kind.CONTENTHASH -> R.string.namereg_review_record_website
+                NameRecord.Kind.ADDRESS -> R.string.namereg_review_record_address
+                NameRecord.Kind.TEXT -> R.string.namereg_review_record_text
+            },
+        ),
+    )
+    record.key?.let { rows += NameReviewRow(Strings.get(R.string.namereg_review_key), Eip712.visible(it)) }
+    val empty = Strings.get(R.string.namereg_review_empty)
+    val before = op.before.orEmpty()
+    val unset = before.isEmpty() || before == "0x" || before.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true)
+    rows += NameReviewRow(Strings.get(R.string.namereg_review_current), if (unset) empty else Eip712.visible(before))
+    val next = when {
+        op.reference != null -> "bzz://${op.reference}"
+        record.value == "0x" -> Strings.get(R.string.namereg_review_cleared)
+        else -> Eip712.visible(record.value)
+    }
+    rows += NameReviewRow(Strings.get(R.string.namereg_review_new), next)
+    if (record.kind == NameRecord.Kind.ADDRESS) {
+        val mine = own?.firstOrNull { it.address.equals(record.value, ignoreCase = true) }
+        rows += NameReviewRow(
+            Strings.get(R.string.namereg_review_belongs_to),
+            when {
+                mine != null -> Strings.get(R.string.namereg_review_belongs_own, Eip712.visible(mine.name))
+                own != null -> Strings.get(R.string.namereg_review_belongs_other, op.name)
+                else -> Strings.get(R.string.namereg_review_belongs_unknown)
+            },
+        )
+    }
+    return rows
+}
+
+/** The step an operation's next review is for, said plainly (the wallet history's label: "record" names a record write). */
 internal fun stepLabel(step: Step): String = when (step) {
     Step.COMMIT -> "commit"
     Step.REVEAL -> "reveal"
     Step.RENEW -> "renew"
+    Step.RECORD -> "record"
 }
 
 /**
@@ -108,6 +175,7 @@ internal fun operationStatus(op: NameOperation, nowSeconds: Long): String {
             Step.COMMIT -> Strings.get(R.string.namereg_op_ready_commit)
             Step.REVEAL -> Strings.get(R.string.namereg_op_ready_reveal)
             Step.RENEW -> Strings.get(R.string.namereg_op_ready_renew)
+            Step.RECORD -> Strings.get(R.string.namereg_op_ready_record)
         }
         State.DISPATCHING -> Strings.get(R.string.namereg_op_dispatching)
         State.PENDING -> Strings.get(R.string.namereg_op_pending)
@@ -115,7 +183,13 @@ internal fun operationStatus(op: NameOperation, nowSeconds: Long): String {
             val left = (op.readyAt ?: 0) - nowSeconds
             if (left > 5) Strings.get(R.string.namereg_op_waiting, durationText(left)) else Strings.get(R.string.namereg_op_waiting_soon)
         }
-        State.COMPLETED -> Strings.get(if (op.intent == Intent.REGISTER) R.string.namereg_op_completed_register else R.string.namereg_op_completed_renew)
+        State.COMPLETED -> Strings.get(
+            when {
+                op.intent == Intent.REGISTER -> R.string.namereg_op_completed_register
+                op.intent.recordWrite -> R.string.namereg_op_completed_record
+                else -> R.string.namereg_op_completed_renew
+            },
+        )
         State.STALE -> Strings.get(R.string.namereg_op_stale)
         State.FAILED -> Strings.get(R.string.namereg_state_reverted)
         State.EXPIRED -> Strings.get(R.string.namereg_state_commitment_expired)
@@ -139,6 +213,7 @@ internal fun operationStatus(op: NameOperation, nowSeconds: Long): String {
  */
 internal fun carriedOnNotice(op: NameOperation, nowSeconds: Long): String? {
     if (op.state == State.READY || op.state.terminal) return null
+    if (op.intent.recordWrite) return null
     val text = if (op.registering) R.string.namereg_open_registration_continues else R.string.namereg_open_renewal_continues
     return Strings.get(text, op.name, operationStatus(op, nowSeconds))
 }

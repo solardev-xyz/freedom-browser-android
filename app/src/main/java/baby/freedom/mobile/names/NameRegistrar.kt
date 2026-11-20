@@ -7,12 +7,14 @@ import baby.freedom.mobile.browser.shortAddress
 import baby.freedom.mobile.chains.rpc.ChainDataRouter
 import baby.freedom.mobile.chains.rpc.ChainRpcException
 import baby.freedom.mobile.chains.rpc.WalletRpc
+import baby.freedom.mobile.l10n.Said
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.names.NameContracts.Role
 import baby.freedom.mobile.names.NameOperation.Intent
 import baby.freedom.mobile.names.NameOperation.State
 import baby.freedom.mobile.names.NameOperation.Step
 import baby.freedom.mobile.wallet.WalletSender
+import baby.freedom.mobile.wallet.X402
 import java.io.File
 import java.math.BigInteger
 import java.security.SecureRandom
@@ -98,7 +100,7 @@ class NameRegistrar internal constructor(
     /** Desktop's `inspect` with its quote: availability, owner, expiry and price for [duration]. */
     suspend fun check(input: String, duration: Long): Check = readsGuarded {
         val parsed = NameContracts.parse(input)
-        if (!parsed.topLevel) refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_top_level_only))
+        if (!parsed.topLevel) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_top_level_only))
         checkDuration(parsed.space, duration)
         val state = chain.inspect(parsed)
         val price = when {
@@ -118,20 +120,23 @@ class NameRegistrar internal constructor(
      * when it's the same choice (intent, account, term); any other choice
      * is refused ([NameException.Code.CONFLICT]) naming the open one, which
      * the user finishes or dismisses first — never silently swapped in.
+     * [chat]: the agent chat that prepared it (#599), so its
+     * `domain_operation_status` lists its own; null from the screen.
      */
-    suspend fun start(check: Check, intent: Intent, account: String, accountIndex: Int): NameOperation {
+    suspend fun start(check: Check, intent: Intent, account: String, accountIndex: Int, chat: String? = null): NameOperation {
         loaded.await()
         val parsed = check.parsed
         checkDuration(parsed.space, check.duration)
         _operations.value.orEmpty().firstOrNull { it.name == parsed.name && !it.state.terminal }?.let { open ->
             // The same choice carries on where it is; a different one (account, term, register or renew) is told why it can't start.
             if (open.intent == intent && open.account.equals(account, ignoreCase = true) && open.duration == check.duration) return open
+            if (open.intent.recordWrite) refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
             val years = Strings.plural(R.plurals.namereg_years, (open.duration / NameContracts.YEAR).toInt(), (open.duration / NameContracts.YEAR).toInt())
             val text = if (open.registering) R.string.namereg_error_open_registration else R.string.namereg_error_open_renewal
-            refuse(NameException.Code.CONFLICT, Strings.get(text, open.name, shortAddress(open.account), years))
+            refuse(NameException.Code.CONFLICT, Strings.said(text, open.name, shortAddress(open.account), years))
         }
-        if (intent == Intent.REGISTER && !check.canRegister) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_no_longer_available))
-        if (intent == Intent.RENEW && !check.canRenew) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_cannot_renew))
+        if (intent == Intent.REGISTER && !check.canRegister) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_no_longer_available))
+        if (intent == Intent.RENEW && !check.canRenew) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_cannot_renew))
         val idBytes = ByteArray(12).also(random::nextBytes)
         var op = NameOperation(
             id = "name_" + idBytes.joinToString("") { "%02x".format(it) },
@@ -145,6 +150,7 @@ class NameRegistrar internal constructor(
             state = State.READY,
             createdAt = clock(),
             quotedWei = check.priceWei,
+            chat = chat,
         )
         if (intent == Intent.REGISTER) {
             val secret = ByteArray(32).also(random::nextBytes)
@@ -152,7 +158,7 @@ class NameRegistrar internal constructor(
                 secrets.seal(secret)
             } catch (e: Exception) {
                 Log.w(TAG, "sealing the secret failed: ${e.javaClass.simpleName}")
-                refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_secure_storage))
+                refuse(NameException.Code.SECURE_STORAGE, Strings.said(R.string.namereg_error_secure_storage))
             }
             op = op.copy(
                 encryptedSecret = sealed,
@@ -162,6 +168,91 @@ class NameRegistrar internal constructor(
             secret.fill(0)
         } else {
             op = op.copy(beforeExpiry = check.state.expiry, beforeWrapperExpiry = check.state.wrapperExpiry, wrapped = check.state.wrapped)
+        }
+        return save(op, expectedRevision = null)
+    }
+
+    /**
+     * Desktop's `domain_inspect` (#599): [input] (a subname too) at one
+     * block with its records — the resolver, website, address and the
+     * text [keys] — and, for a top-level name, the price of [duration]:
+     * a registration's when it's free, a renewal's when it's registered.
+     */
+    data class Inspection(
+        val parsed: ParsedName,
+        val state: NameChain.State,
+        val duration: Long?,
+        val priceWei: BigInteger?,
+    )
+
+    suspend fun inspect(input: String, keys: List<String>, duration: Long): Inspection = readsGuarded {
+        val parsed = NameContracts.parse(input)
+        if (parsed.topLevel) checkDuration(parsed.space, duration)
+        val state = chain.inspect(parsed, keys = keys)
+        val price = when {
+            !parsed.topLevel -> null
+            state.available -> chain.price(parsed, duration, state.snapshot, registering = true)
+            state.renewable -> chain.price(parsed, duration, state.snapshot, registering = false, wrapped = state.wrapped)
+            else -> null
+        }
+        Inspection(parsed, state, if (parsed.topLevel) duration else null, price)
+    }
+
+    /**
+     * A new record write on [input] (#599): [record] set by [account] —
+     * the wallet's [accountIndex] — saved [State.READY] at [Step.RECORD]
+     * with what the record and the name's authority are now, both of
+     * which must still hold when it's sent. Refused when the name isn't
+     * active on a resolver Freedom writes to, when [account] may not
+     * write its records, or when the record already holds the value (an
+     * unsent no-op would otherwise read as done, since an outcome nobody
+     * could tell is settled by the record's value on chain). An open
+     * operation for the name from [account] that is the same write is
+     * returned instead of a second; any other is refused naming it.
+     */
+    suspend fun startRecord(
+        input: String,
+        intent: Intent,
+        record: NameRecord,
+        account: String,
+        accountIndex: Int,
+        chat: String? = null,
+        publicationId: String? = null,
+        reference: String? = null,
+    ): NameOperation {
+        loaded.await()
+        checkRecord(intent, record, reference)
+        val parsed = NameContracts.parse(input)
+        _operations.value.orEmpty().firstOrNull { it.name == parsed.name && !it.state.terminal }?.let { open ->
+            if (open.intent == intent && open.record == record && open.account.equals(account, ignoreCase = true)) return open
+            refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
+        }
+        val op = readsGuarded {
+            val s = chain.snapshot()
+            val state = chain.inspect(parsed, s, recordKeys(record))
+            val r = recordsOf(state)
+            authorize(parsed, r, account, s)
+            val before = currentValue(r, record)
+            if (holds(before, record)) refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_record_unchanged))
+            val idBytes = ByteArray(12).also(random::nextBytes)
+            NameOperation(
+                id = "name_" + idBytes.joinToString("") { "%02x".format(it) },
+                name = parsed.name,
+                space = parsed.space,
+                intent = intent,
+                account = account,
+                accountIndex = accountIndex,
+                duration = 0,
+                step = Step.RECORD,
+                state = State.READY,
+                createdAt = clock(),
+                chat = chat,
+                record = record,
+                before = before,
+                authority = authorityOf(state),
+                publicationId = publicationId,
+                reference = reference,
+            )
         }
         return save(op, expectedRevision = null)
     }
@@ -203,8 +294,8 @@ class NameRegistrar internal constructor(
      * again on the review, which says when it's dearer than at commit.
      */
     suspend fun plan(id: String): Plan = readsGuarded {
-        val op = get(id) ?: refuse(NameException.Code.INVALID, Strings.get(R.string.namereg_error_gone))
-        if (op.state != State.READY) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_not_ready))
+        val op = get(id) ?: refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_gone))
+        if (op.state != State.READY) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_not_ready))
         build(op)
     }
 
@@ -218,10 +309,11 @@ class NameRegistrar internal constructor(
      */
     private suspend fun build(op: NameOperation, reviewed: Plan? = null): Plan {
         val parsed = NameContracts.parse(op.name)
-        if (parsed.space != op.space || !parsed.topLevel) refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_inconsistent))
-        checkDuration(parsed.space, op.duration)
+        val records = op.intent.recordWrite
+        if (parsed.space != op.space || (!parsed.topLevel && !records)) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_inconsistent))
+        if (records) checkRecord(op) else checkDuration(parsed.space, op.duration)
         val s = chain.snapshot()
-        val state = chain.inspect(parsed, s)
+        val state = chain.inspect(parsed, s, op.record?.let(::recordKeys))
         val eth = parsed.space == NameSpace.ETH
         if (eth) {
             checkCodes(s, Role.BASE, Role.REGISTRY, *(if (state.wrapped) arrayOf(Role.WRAPPER) else emptyArray()))
@@ -229,55 +321,56 @@ class NameRegistrar internal constructor(
             val role = Role.nft(parsed.space)
             chain.checkCode(role, s)
             if (chain.uint(role, NameContracts.nftComputeIdData(parsed.name), s) != parsed.tokenId) {
-                refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_inconsistent))
+                refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_inconsistent))
             }
         }
         val built = when (op.intent) {
             Intent.REGISTER -> buildRegister(op, parsed, state, s)
             Intent.RENEW -> buildRenew(op, parsed, state, s)
+            Intent.SET_WEBSITE, Intent.CLEAR_WEBSITE, Intent.SET_ADDRESS, Intent.SET_TEXT -> buildRecord(op, parsed, state, s)
         }
         val plan = if (reviewed != null && built.coveredBy(reviewed)) built.copy(value = reviewed.value) else built
         // An account that can't pay is told so, not that the contract would refuse.
         if (plan.value.signum() > 0) {
             val held = chain.balance(op.account, s)
             if (held < plan.value) {
-                refuse(NameException.Code.FUNDS, Strings.get(R.string.namereg_error_funds, ethText(plan.value), ethText(held)))
+                refuse(NameException.Code.FUNDS, Strings.said(R.string.namereg_error_funds, ethText(plan.value), ethText(held)))
             }
         }
         // Always simulated from the paying account, commits included.
         try {
             chain.simulate(op.account, plan.to, plan.data, plan.value, s)
         } catch (e: ChainRpcException.Rpc) {
-            refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_would_revert))
+            refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_would_revert))
         }
         return plan
     }
 
     private suspend fun buildRegister(op: NameOperation, parsed: ParsedName, state: NameChain.State, s: NameChain.Snapshot): Plan {
-        if (!state.available) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_no_longer_available))
+        if (!state.available) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_no_longer_available))
         val role = NameChain.commitRole(parsed.space)
         if (parsed.space == NameSpace.ETH) {
             checkCodes(s, Role.CONTROLLER, Role.RESOLVER)
             if (!chain.bool(Role.BASE, NameContracts.controllersData(Role.CONTROLLER.address), s)) {
-                refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_controller_changed))
+                refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_controller_changed))
             }
             val minimum = chain.uint(Role.CONTROLLER, NameContracts.minRegistrationDurationData(), s)
             if (BigInteger.valueOf(op.duration) < minimum || !chain.bool(Role.CONTROLLER, NameContracts.validData(parsed.label), s)) {
-                refuse(NameException.Code.INVALID, Strings.get(R.string.namereg_error_not_accepted))
+                refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_not_accepted))
             }
         } else if (chain.string(role, NameContracts.nftNormalizeData(parsed.label), s) != parsed.label) {
-            refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_legacy_unicode))
+            refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_legacy_unicode))
         }
         val secret = openSecret(op)
         try {
             val expected = NameContracts.hex(NameContracts.commitment(parsed.space, parsed.label, op.account, op.duration, secret))
-            if (!expected.equals(op.commitment, ignoreCase = true)) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_commitment_mismatch))
+            if (!expected.equals(op.commitment, ignoreCase = true)) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_commitment_mismatch))
             val price = chain.price(parsed, op.duration, s, registering = true)
             return when (op.step) {
                 Step.COMMIT -> Plan(op.id, op.revision, Step.COMMIT, role.address, NameContracts.commitData(hexBytes(expected)), BigInteger.ZERO, price, role)
                 Step.REVEAL -> {
                     val window = commitmentWindow(op, s)
-                    if (window.state != State.READY) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_not_ready))
+                    if (window.state != State.READY) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_not_ready))
                     val data = if (parsed.space == NameSpace.ETH) {
                         NameContracts.registerData(parsed.label, op.account, op.duration, secret)
                     } else {
@@ -285,7 +378,7 @@ class NameRegistrar internal constructor(
                     }
                     Plan(op.id, op.revision, Step.REVEAL, role.address, data, NameContracts.withBuffer(price), price, role)
                 }
-                Step.RENEW -> refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_inconsistent))
+                Step.RENEW, Step.RECORD -> refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_inconsistent))
             }
         } finally {
             secret.fill(0)
@@ -293,10 +386,10 @@ class NameRegistrar internal constructor(
     }
 
     private suspend fun buildRenew(op: NameOperation, parsed: ParsedName, state: NameChain.State, s: NameChain.Snapshot): Plan {
-        if (!state.renewable) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_cannot_renew))
+        if (!state.renewable) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_cannot_renew))
         // Renewing what was checked: a name that changed hands or expiry since is quoted afresh.
         if (state.expiry != op.beforeExpiry || state.wrapped != op.wrapped || state.wrapperExpiry != op.beforeWrapperExpiry) {
-            refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_changed))
+            refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_changed))
         }
         val role: Role
         val data: ByteArray
@@ -306,14 +399,14 @@ class NameRegistrar internal constructor(
                 if (!chain.bool(Role.WRAPPER, NameContracts.controllersData(Role.WRAPPED_CONTROLLER.address), s) ||
                     !chain.bool(Role.BASE, NameContracts.controllersData(Role.WRAPPER.address), s)
                 ) {
-                    refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_controller_changed))
+                    refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_controller_changed))
                 }
                 role = Role.WRAPPED_CONTROLLER
                 data = NameContracts.wrappedRenewData(parsed.label, op.duration)
             } else {
                 chain.checkCode(Role.CONTROLLER, s)
                 if (!chain.bool(Role.BASE, NameContracts.controllersData(Role.CONTROLLER.address), s)) {
-                    refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_controller_changed))
+                    refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_controller_changed))
                 }
                 role = Role.CONTROLLER
                 data = NameContracts.renewData(parsed.label, op.duration)
@@ -324,6 +417,54 @@ class NameRegistrar internal constructor(
         }
         val price = chain.price(parsed, op.duration, s, registering = false, wrapped = state.wrapped)
         return Plan(op.id, op.revision, Step.RENEW, role.address, data, NameContracts.withBuffer(price), price, role)
+    }
+
+    /**
+     * A record write (desktop's resolver branch of `#build`): the name
+     * still active on a resolver Freedom writes to, its authority (owner,
+     * manager, resolver, record generation) and the record's value just
+     * as they were when it was prepared, [NameOperation.account] still
+     * allowed to write it; sent to the ENS public resolver or the NameNFT,
+     * with no value.
+     */
+    private suspend fun buildRecord(op: NameOperation, parsed: ParsedName, state: NameChain.State, s: NameChain.Snapshot): Plan {
+        val record = op.record ?: refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_invalid))
+        val r = recordsOf(state)
+        if (authorityOf(state) != op.authority) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_record_changed))
+        authorize(parsed, r, op.account, s)
+        if (currentValue(r, record) != op.before) refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_record_changed))
+        val role = if (parsed.space == NameSpace.ETH) Role.RESOLVER else Role.nft(parsed.space)
+        val data = when (record.kind) {
+            NameRecord.Kind.CONTENTHASH -> NameContracts.setContenthashData(parsed, hexBytes(record.value))
+            NameRecord.Kind.ADDRESS -> NameContracts.setAddrData(parsed, record.value)
+            NameRecord.Kind.TEXT -> NameContracts.setTextData(parsed, record.key!!, record.value)
+        }
+        return Plan(op.id, op.revision, Step.RECORD, role.address, data, BigInteger.ZERO, null, role)
+    }
+
+    /** [state]'s records, refused unless the name is active on a resolver Freedom writes to. */
+    private fun recordsOf(state: NameChain.State): NameChain.Records {
+        val r = state.records ?: refuse(NameException.Code.UNAVAILABLE, Strings.said(R.string.namereg_error_unreadable))
+        if (!r.active || !r.supportedResolver) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_resolver_unsupported))
+        return r
+    }
+
+    /**
+     * Refuses unless [account] may write [parsed]'s records: for `.eth`,
+     * the public resolver at its pinned code, and [account] the record
+     * owner or approved by it (for all its names or this one); for a
+     * NameNFT, [account] the token's owner — an ERC-721 operator isn't.
+     */
+    private suspend fun authorize(parsed: ParsedName, r: NameChain.Records, account: String, s: NameChain.Snapshot) {
+        val ok = if (parsed.space == NameSpace.ETH) {
+            chain.checkCode(Role.RESOLVER, s)
+            r.recordOwner.equals(account, ignoreCase = true) ||
+                chain.bool(Role.RESOLVER, NameContracts.isApprovedForAllData(r.recordOwner, account), s) ||
+                chain.bool(Role.RESOLVER, NameContracts.isApprovedForData(r.recordOwner, parsed.node, account), s)
+        } else {
+            r.manager.equals(account, ignoreCase = true)
+        }
+        if (!ok) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_not_record_owner))
     }
 
     /**
@@ -347,8 +488,17 @@ class NameRegistrar internal constructor(
         /** The wallet broadcast it; [refresh] follows it. */
         data class Sent(val hash: String, override val unsaved: Boolean = false) : Dispatched
 
-        /** Nothing was sent; [message] says why, and the step can be reviewed again. */
-        data class NotSent(val message: String, override val unsaved: Boolean = false) : Dispatched
+        /**
+         * Nothing was sent; [message] says why ([english] for the agent's
+         * model), and the step can be reviewed again. [rejected]: the user
+         * refused it on their Ledger.
+         */
+        data class NotSent(
+            val message: String,
+            override val unsaved: Boolean = false,
+            val english: String = message,
+            val rejected: Boolean = false,
+        ) : Dispatched
 
         /** The wallet may have sent it: it's never sent again, only settled from chain state. */
         data class Unknown(override val unsaved: Boolean = false) : Dispatched
@@ -370,11 +520,11 @@ class NameRegistrar internal constructor(
 
     private suspend fun dispatchNow(plan: Plan, send: suspend () -> WalletSender.Broadcast): Dispatched {
         synchronized(dispatching) {
-            if (!dispatching.add(plan.operationId)) refuse(NameException.Code.CONFLICT, Strings.get(R.string.namereg_error_busy))
+            if (!dispatching.add(plan.operationId)) refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_busy))
         }
         try {
-            var op = get(plan.operationId) ?: refuse(NameException.Code.INVALID, Strings.get(R.string.namereg_error_gone))
-            if (op.state != State.READY || op.revision != plan.revision) refuse(NameException.Code.CONFLICT, Strings.get(R.string.namereg_error_changed))
+            var op = get(plan.operationId) ?: refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_gone))
+            if (op.state != State.READY || op.revision != plan.revision) refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_changed))
             val fresh = try {
                 readsGuarded { build(op, reviewed = plan) }
             } catch (e: NameException) {
@@ -385,12 +535,12 @@ class NameRegistrar internal constructor(
             }
             if (!fresh.sameTransaction(plan)) {
                 if (op.step == Step.REVEAL || op.step == Step.RENEW) {
-                    refuse(NameException.Code.QUOTE_CHANGED, Strings.get(R.string.namereg_error_quote_changed))
+                    refuse(NameException.Code.QUOTE_CHANGED, Strings.said(R.string.namereg_error_quote_changed))
                 }
                 save(op.copy(state = State.STALE, message = Strings.get(R.string.namereg_error_changed)), op.revision)
-                refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_changed))
+                refuse(NameException.Code.STALE, Strings.said(R.string.namereg_error_changed))
             }
-            op = save(op.copy(state = State.DISPATCHING, quotedWei = plan.quotedWei ?: op.quotedWei, message = null), op.revision)
+            op = save(op.copy(state = State.DISPATCHING, quotedWei = plan.quotedWei ?: op.quotedWei, message = null, declined = false), op.revision)
             val outcome = try {
                 send()
             } catch (e: CancellationException) {
@@ -409,20 +559,32 @@ class NameRegistrar internal constructor(
                 is WalletSender.Broadcast.Failed -> if (outcome.mayHaveGone) {
                     unknown(op.id, outcome.hash)
                 } else {
-                    notSent(op.id, outcome.message)
+                    notSent(op.id, Said(outcome.message, outcome.english))
                 }
-                WalletSender.Broadcast.Busy -> notSent(op.id, Strings.get(R.string.namereg_send_busy))
-                is WalletSender.Broadcast.Stale -> notSent(op.id, Strings.get(R.string.namereg_send_stale))
-                WalletSender.Broadcast.Rejected -> notSent(op.id, Strings.get(R.string.namereg_send_rejected))
+                WalletSender.Broadcast.Busy -> notSent(op.id, Strings.said(R.string.namereg_send_busy))
+                is WalletSender.Broadcast.Stale -> notSent(op.id, Strings.said(R.string.namereg_send_stale))
+                WalletSender.Broadcast.Rejected -> notSent(op.id, Strings.said(R.string.namereg_send_rejected), rejected = true)
             }
         } finally {
             synchronized(dispatching) { dispatching.remove(plan.operationId) }
         }
     }
 
-    private suspend fun notSent(id: String, message: String): Dispatched {
-        val saved = record(id) { it.copy(state = State.READY, message = message) }
-        return Dispatched.NotSent(message, unsaved = !saved)
+    private suspend fun notSent(id: String, said: Said, rejected: Boolean = false): Dispatched {
+        val saved = record(id) { it.copy(state = State.READY, message = said.text, declined = rejected) }
+        return Dispatched.NotSent(said.text, unsaved = !saved, english = said.english, rejected = rejected)
+    }
+
+    /**
+     * Marks [id]'s ready step as one the user [declined] on its review
+     * (the agent's sheet, #599), or clears that: `domain_execute` then
+     * shows it again only when asked to resume. Nothing else changes.
+     */
+    suspend fun markDeclined(id: String, declined: Boolean) {
+        loaded.await()
+        val op = get(id) ?: return
+        if (op.declined == declined || op.state != State.READY) return
+        save(op.copy(declined = declined), op.revision)
     }
 
     private suspend fun unknown(id: String, hash: String?): Dispatched {
@@ -494,8 +656,13 @@ class NameRegistrar internal constructor(
 
     /** [op] completed, if the chain at [s] shows its registration or renewal done; else null. */
     private suspend fun verifyEffect(op: NameOperation, s: NameChain.Snapshot): NameOperation? {
-        val state = chain.inspect(NameContracts.parse(op.name), s)
+        val state = chain.inspect(NameContracts.parse(op.name), s, op.record?.let(::recordKeys))
         val done = when (op.intent) {
+            Intent.SET_WEBSITE, Intent.CLEAR_WEBSITE, Intent.SET_ADDRESS, Intent.SET_TEXT -> {
+                val r = state.records
+                val record = op.record
+                r != null && record != null && r.supportedResolver && holds(currentValue(r, record), record)
+            }
             Intent.REGISTER -> !state.available && state.owner.equals(op.account, ignoreCase = true)
             Intent.RENEW -> {
                 val before = op.beforeExpiry ?: return null
@@ -551,7 +718,7 @@ class NameRegistrar internal constructor(
             } else {
                 null
             }
-            Step.RENEW -> verifyEffect(op, s)
+            Step.RENEW, Step.RECORD -> verifyEffect(op, s)
         }
     }
 
@@ -587,11 +754,11 @@ class NameRegistrar internal constructor(
         val op = get(id) ?: return
         // A sent transaction can be let go (the screen warns it may still go through); one being handed over can't.
         if (op.state == State.DISPATCHING || synchronized(dispatching) { id in dispatching }) {
-            refuse(NameException.Code.CONFLICT, Strings.get(R.string.namereg_error_busy))
+            refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_busy))
         }
         writing.withLock {
             val next = _operations.value.orEmpty().filter { it.id != id }
-            if (!withContext(io) { journal.save(next) }) refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
+            if (!withContext(io) { journal.save(next) }) refuse(NameException.Code.SECURE_STORAGE, Strings.said(R.string.namereg_error_save))
             _operations.value = next
         }
     }
@@ -620,7 +787,7 @@ class NameRegistrar internal constructor(
             _operations.value = emptyList()
             val erased = withContext(io) { journal.erase() }
             eraseOwed = !erased
-            if (!erased) refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_wipe))
+            if (!erased) refuse(NameException.Code.SECURE_STORAGE, Strings.said(R.string.namereg_error_wipe))
         }
     }
 
@@ -653,7 +820,7 @@ class NameRegistrar internal constructor(
     private suspend fun saveLocked(op: NameOperation, expectedRevision: Int?, holdUnsaved: Boolean = false): NameOperation {
         val current = _operations.value.orEmpty()
         val stored = current.firstOrNull { it.id == op.id }
-        if ((stored?.revision) != expectedRevision) refuse(NameException.Code.CONFLICT, Strings.get(R.string.namereg_error_changed))
+        if ((stored?.revision) != expectedRevision) refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_changed))
         val saved = op.copy(revision = (expectedRevision ?: 0) + 1)
         var next = listOf(saved) + current.filter { it.id != op.id }
         next = next.sortedByDescending { it.createdAt }
@@ -664,28 +831,28 @@ class NameRegistrar internal constructor(
         }
         if (!withContext(io) { journal.save(next) }) {
             if (holdUnsaved) _operations.value = next
-            refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_save))
+            refuse(NameException.Code.SECURE_STORAGE, Strings.said(R.string.namereg_error_save))
         }
         _operations.value = next
         return saved
     }
 
     private fun openSecret(op: NameOperation): ByteArray {
-        val sealed = op.encryptedSecret ?: refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_secret_lost))
+        val sealed = op.encryptedSecret ?: refuse(NameException.Code.SECURE_STORAGE, Strings.said(R.string.namereg_error_secret_lost))
         val secret = try {
             secrets.open(sealed)
         } catch (e: Exception) {
             Log.w(TAG, "opening the secret failed: ${e.javaClass.simpleName}")
-            refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_secret_lost))
+            refuse(NameException.Code.SECURE_STORAGE, Strings.said(R.string.namereg_error_secret_lost))
         }
-        if (secret.size != 32) refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_secret_lost))
+        if (secret.size != 32) refuse(NameException.Code.SECURE_STORAGE, Strings.said(R.string.namereg_error_secret_lost))
         return secret
     }
 
     private inline fun <T> readsGuarded(block: () -> T): T = try {
         block()
     } catch (e: ChainRpcException) {
-        refuse(NameException.Code.UNAVAILABLE, Strings.get(R.string.namereg_error_chain_unreachable))
+        refuse(NameException.Code.UNAVAILABLE, Strings.said(R.string.namereg_error_chain_unreachable))
     }
 
     companion object {
@@ -694,7 +861,72 @@ class NameRegistrar internal constructor(
         /** Refuses a term the namespace doesn't sell: `.wei`/`.gwei` one year per transaction, `.eth` up to ten. */
         fun checkDuration(space: NameSpace, duration: Long) {
             val ok = if (space == NameSpace.ETH) duration > 0 && duration <= NameContracts.MAX_YEARS * NameContracts.YEAR else duration == NameContracts.YEAR
-            if (!ok) refuse(NameException.Code.INVALID, Strings.get(R.string.namereg_error_term))
+            if (!ok) refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_term))
+        }
+
+        /** The text key a record write reads ([NameChain.inspect]'s keys): none but a text record's own. */
+        internal fun recordKeys(record: NameRecord): List<String> = listOfNotNull(record.key)
+
+        /** What [record]'s slot holds in [r]: the contenthash in hex, the address, the text ("" when unset). */
+        internal fun currentValue(r: NameChain.Records, record: NameRecord): String = when (record.kind) {
+            NameRecord.Kind.CONTENTHASH -> r.contenthash.orEmpty().lowercase()
+            NameRecord.Kind.ADDRESS -> r.address.orEmpty().lowercase()
+            NameRecord.Kind.TEXT -> r.text[record.key].orEmpty()
+        }
+
+        /** Whether [current] (from [currentValue]) already is [record]'s new value. */
+        internal fun holds(current: String, record: NameRecord): Boolean = when (record.kind) {
+            NameRecord.Kind.CONTENTHASH, NameRecord.Kind.ADDRESS -> current == record.value.lowercase()
+            NameRecord.Kind.TEXT -> current == record.value
+        }
+
+        /** Who controls [state]'s name and records, as one comparable line. */
+        internal fun authorityOf(state: NameChain.State): String {
+            val r = state.records
+            return listOf(state.owner, r?.manager, r?.resolver, r?.epoch, r?.parentEpoch, r?.fuses, state.wrapped)
+                .joinToString("|") { it?.toString()?.lowercase() ?: "-" }
+        }
+
+        /**
+         * The record [intent] sets, checked as desktop's `#prepare` checks
+         * it: a website a Swarm [reference]'s contenthash, a cleared one
+         * `0x`, an address one exact non-zero address (checksummed), a text
+         * record a key of 1–128 and a value of up to 2048 characters with no
+         * control or format characters. [address], [key] and [value] are the
+         * caller's input for the intent; the others are ignored.
+         */
+        fun recordFor(intent: Intent, reference: String? = null, address: String? = null, key: String? = null, value: String? = null): NameRecord =
+            when (intent) {
+                Intent.SET_WEBSITE -> NameRecord(NameRecord.Kind.CONTENTHASH, NameContracts.swarmContenthash(reference.orEmpty()))
+                Intent.CLEAR_WEBSITE -> NameRecord(NameRecord.Kind.CONTENTHASH, "0x")
+                Intent.SET_ADDRESS -> {
+                    val a = address?.let { X402.checksummedOrNull(it) }
+                    if (a == null || a.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true)) refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_address))
+                    NameRecord(NameRecord.Kind.ADDRESS, a)
+                }
+                Intent.SET_TEXT -> {
+                    if (key.isNullOrEmpty() || key.length > NameContracts.MAX_TEXT_KEY || value == null || value.length > NameContracts.MAX_TEXT_VALUE ||
+                        CONTROL_OR_FORMAT.containsMatchIn(key + value)
+                    ) {
+                        refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_text_record))
+                    }
+                    NameRecord(NameRecord.Kind.TEXT, value, key)
+                }
+                Intent.REGISTER, Intent.RENEW -> refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_record_invalid))
+            }
+
+        private val CONTROL_OR_FORMAT = Regex("[\\p{Cc}\\p{Cf}]")
+
+        /** A saved record write's record matches its intent ([recordFor]'s rules), else refused. */
+        private fun checkRecord(op: NameOperation) = checkRecord(op.intent, op.record, op.reference)
+
+        private fun checkRecord(intent: Intent, record: NameRecord?, reference: String?) {
+            val ok = record != null && try {
+                record == recordFor(intent, reference = reference, address = record.value, key = record.key, value = record.value)
+            } catch (e: NameException) {
+                false
+            }
+            if (!ok) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_invalid))
         }
 
         internal fun hexBytes(hex: String): ByteArray {

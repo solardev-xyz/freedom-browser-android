@@ -87,11 +87,11 @@ class RpcNameReads(private val rpc: WalletRpc) : NameReads {
         // A revert of a simulation or a read: the contract refused.
         throw e
     } catch (e: ChainRpcException) {
-        refuse(NameException.Code.UNAVAILABLE, Strings.get(R.string.namereg_error_chain_unreachable))
+        refuse(NameException.Code.UNAVAILABLE, Strings.said(R.string.namereg_error_chain_unreachable))
     }
 
     private fun unverified(trust: ChainTrust): Nothing =
-        refuse(NameException.Code.UNVERIFIED, Strings.get(R.string.namereg_error_unverified, trust.agreed.size + trust.dissented.size))
+        refuse(NameException.Code.UNVERIFIED, Strings.said(R.string.namereg_error_unverified, trust.agreed.size + trust.dissented.size))
 }
 
 /**
@@ -119,6 +119,8 @@ class NameChain(
         val wrapped: Boolean = false,
         /** The NameWrapper's own expiry for a wrapped name. */
         val wrapperExpiry: BigInteger? = null,
+        /** What a record write needs (#599); null when [inspect] wasn't asked for records. */
+        val records: Records? = null,
     ) {
         /** Whether a renewal makes sense: registered and not free. */
         val renewable: Boolean get() = parsed.topLevel && !available && expiry != null && expiry.signum() > 0
@@ -137,12 +139,43 @@ class NameChain(
         return if (latest.block < mined) reads.at(mined) else latest
     }
 
-    suspend fun inspect(parsed: ParsedName, at: Snapshot? = null): State {
+    /**
+     * Who may write a name's records, and what they hold (desktop's
+     * `inspect` records half): [manager] is the ENS registry's owner of
+     * the node (the NFT owner for a NameNFT), [recordOwner] whose say the
+     * public resolver goes by (a wrapped name's wrapper owner), the
+     * [resolver] and whether it's the one Freedom writes to
+     * ([supportedResolver]), [active] whether the name is live, and the
+     * record generation ([epoch], [parentEpoch]) a NameNFT bumps when it
+     * changes hands. [contenthash] in hex (`0x` when none), [address]
+     * (zero when none) and the asked [text] keys, each at most
+     * [NameContracts.MAX_RECORD_BYTES]; all null with an unsupported resolver.
+     */
+    data class Records(
+        val manager: String,
+        val recordOwner: String,
+        val resolver: String,
+        val supportedResolver: Boolean,
+        val active: Boolean,
+        val fuses: BigInteger? = null,
+        val epoch: BigInteger? = null,
+        val parentEpoch: BigInteger? = null,
+        val contenthash: String? = null,
+        val address: String? = null,
+        val text: Map<String, String> = emptyMap(),
+    )
+
+    /**
+     * [parsed] at [at] (the latest block when null). With [keys] the
+     * records are read too ([State.records]): the resolver, the website,
+     * the address and those text keys.
+     */
+    suspend fun inspect(parsed: ParsedName, at: Snapshot? = null, keys: List<String>? = null): State {
         val s = at ?: reads.latest()
-        return if (parsed.space == NameSpace.ETH) inspectEth(parsed, s) else inspectNft(parsed, s)
+        return if (parsed.space == NameSpace.ETH) inspectEth(parsed, s, keys) else inspectNft(parsed, s, keys)
     }
 
-    private suspend fun inspectEth(parsed: ParsedName, s: Snapshot): State {
+    private suspend fun inspectEth(parsed: ParsedName, s: Snapshot, keys: List<String>?): State {
         val manager = address(Role.REGISTRY, NameContracts.registryOwnerData(parsed.node), s)
         var owner = manager
         var expiry: BigInteger? = null
@@ -153,16 +186,33 @@ class NameChain(
         }
         val wrapped = manager.equals(Role.WRAPPER.address, ignoreCase = true)
         var wrapperExpiry: BigInteger? = null
+        var fuses: BigInteger? = null
         if (wrapped) {
             val w = words(Role.WRAPPER, NameContracts.wrapperGetData(parsed.node), s, 3)
             owner = NameAbi.wordAddress(w[0]) ?: malformed()
+            fuses = NameAbi.wordUint(w[1])
             wrapperExpiry = NameAbi.wordUint(w[2])
         }
         val available = parsed.topLevel && bool(Role.CONTROLLER, NameContracts.availableData(parsed.label), s)
-        return State(parsed, s, available, owner, expiry, wrapped, wrapperExpiry)
+        val records = keys?.let {
+            val resolver = address(Role.REGISTRY, NameContracts.registryResolverData(parsed.node), s)
+            val supported = resolver.equals(Role.RESOLVER.address, ignoreCase = true)
+            Records(
+                manager = manager,
+                recordOwner = if (wrapped) owner else manager,
+                resolver = resolver,
+                supportedResolver = supported,
+                active = !manager.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true) && (expiry == null || expiry > BigInteger.valueOf(s.timestamp)),
+                fuses = fuses,
+                contenthash = if (supported) bytesRecord(Role.RESOLVER, NameContracts.contenthashData(parsed), s) else null,
+                address = if (supported) address(Role.RESOLVER, NameContracts.addressData(parsed), s) else null,
+                text = if (supported) keys.associateWith { k -> textRecord(Role.RESOLVER, NameContracts.textData(parsed, k), s) } else emptyMap(),
+            )
+        }
+        return State(parsed, s, available, owner, expiry, wrapped, wrapperExpiry, records)
     }
 
-    private suspend fun inspectNft(parsed: ParsedName, s: Snapshot): State {
+    private suspend fun inspectNft(parsed: ParsedName, s: Snapshot, keys: List<String>?): State {
         val role = Role.nft(parsed.space)
         val parentId = if (parsed.topLevel) BigInteger.ZERO else uint(role, NameContracts.nftComputeIdData(parsed.name.substringAfter('.')), s)
         val available = bool(role, NameContracts.nftIsAvailableData(parsed.label, parentId), s)
@@ -172,7 +222,36 @@ class NameChain(
         val expiresAt = NameAbi.wordUint(record[2])
         // ownerOf only for a recorded token: an error is never read as "no owner".
         val owner = if (label.isNotEmpty()) address(role, NameContracts.ownerOfData(parsed.tokenId), s) else NameContracts.ZERO_ADDRESS
-        return State(parsed, s, available, owner, expiresAt)
+        val records = keys?.let {
+            val resolved = address(role, NameContracts.addressData(parsed), s)
+            Records(
+                manager = owner,
+                recordOwner = owner,
+                resolver = role.address,
+                supportedResolver = true,
+                // Desktop's rule: the NameNFT resolves a live name to an address (its owner's when none is set), an expired one to zero.
+                active = !resolved.equals(NameContracts.ZERO_ADDRESS, ignoreCase = true),
+                epoch = uint(role, NameContracts.nftRecordVersionData(parsed.tokenId), s),
+                parentEpoch = NameAbi.wordUint(record[4]),
+                contenthash = bytesRecord(role, NameContracts.contenthashData(parsed), s),
+                address = resolved,
+                text = keys.associateWith { k -> textRecord(role, NameContracts.textData(parsed, k), s) },
+            )
+        }
+        return State(parsed, s, available, owner, expiresAt, records = records)
+    }
+
+    /** A `bytes` record in hex, refused past [NameContracts.MAX_RECORD_BYTES]. */
+    private suspend fun bytesRecord(role: Role, data: ByteArray, s: Snapshot): String {
+        val b = NameAbi.dynamicBytes(NameAbi.words(reads.call(role.address, data, s.block)) ?: malformed(), 0) ?: malformed()
+        if (b.size > NameContracts.MAX_RECORD_BYTES) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_too_large))
+        return NameContracts.hex(b)
+    }
+
+    private suspend fun textRecord(role: Role, data: ByteArray, s: Snapshot): String {
+        val b = NameAbi.dynamicBytes(NameAbi.words(reads.call(role.address, data, s.block)) ?: malformed(), 0) ?: malformed()
+        if (b.size > NameContracts.MAX_RECORD_BYTES) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_record_too_large))
+        return String(b, Charsets.UTF_8)
     }
 
     /**
@@ -196,7 +275,7 @@ class NameChain(
     suspend fun checkCode(role: Role, s: Snapshot) {
         val code = reads.code(role.address, s.block)
         val hash = NameContracts.hex(Keccak256.digest(hexBytes(code)))
-        if (!hash.equals(pinned(role), ignoreCase = true)) refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_contract_changed))
+        if (!hash.equals(pinned(role), ignoreCase = true)) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_contract_changed))
     }
 
     /** When [commitment] was committed (seconds), or zero when it isn't on chain. */
@@ -247,6 +326,6 @@ class NameChain(
             return ByteArray(h.length / 2) { h.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
         }
 
-        private fun malformed(): Nothing = refuse(NameException.Code.UNAVAILABLE, Strings.get(R.string.namereg_error_unreadable))
+        private fun malformed(): Nothing = refuse(NameException.Code.UNAVAILABLE, Strings.said(R.string.namereg_error_unreadable))
     }
 }

@@ -3,6 +3,7 @@ package baby.freedom.mobile.names
 import baby.freedom.mobile.R
 import baby.freedom.mobile.ens.EnsNormalize
 import baby.freedom.mobile.ens.Keccak256
+import baby.freedom.mobile.l10n.Said
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.names.NameAbi.toHexString
 import java.math.BigInteger
@@ -11,13 +12,19 @@ import java.math.BigInteger
  * Why a name operation can't go ahead. [code] is desktop's `DomainError`
  * code (`DOMAIN_INVALID`, `DOMAIN_STALE`, …) without the prefix, so the
  * agent's `domain_*` tools can hand the same codes on later; [message] is
- * already the user's language.
+ * already the user's language, and [english] the same words for the agent's
+ * model (#599), which is told nothing in the phone's language.
  */
-class NameException(val code: Code, message: String) : Exception(message) {
+class NameException(val code: Code, message: String, val english: String = message) : Exception(message) {
+    constructor(code: Code, said: Said) : this(code, said.text, said.english)
+
     enum class Code { INVALID, UNSUPPORTED, UNAVAILABLE, UNVERIFIED, STALE, QUOTE_CHANGED, CONFLICT, SECURE_STORAGE, FUNDS }
 }
 
 internal fun refuse(code: NameException.Code, message: String): Nothing = throw NameException(code, message)
+
+/** [said] for the screen, and in English ([NameException.english]) for the agent's `domain_*` tools. */
+internal fun refuse(code: NameException.Code, said: Said): Nothing = throw NameException(code, said)
 
 /** The three namespaces Freedom registers and renews in (#579). */
 enum class NameSpace(val tld: String) {
@@ -121,7 +128,7 @@ object NameContracts {
      * legacy name into a different token.
      */
     fun parse(value: String): ParsedName {
-        val invalid = Strings.get(R.string.namereg_error_full_name)
+        val invalid = Strings.said(R.string.namereg_error_full_name)
         if (value.length > 255 || value != value.trim() || CONTROLS.containsMatchIn(value)) refuse(NameException.Code.INVALID, invalid)
         val labels = value.split('.')
         val space = NameSpace.of(labels.last().lowercase())
@@ -129,11 +136,11 @@ object NameContracts {
         var normalized = try {
             EnsNormalize.normalize(value)
         } catch (e: IllegalArgumentException) {
-            refuse(NameException.Code.INVALID, Strings.get(R.string.namereg_error_not_valid))
+            refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_not_valid))
         }
         if (space.nft) {
             val ascii = value.map { if (it in 'A'..'Z') it.lowercaseChar() else it }.joinToString("")
-            if (ascii != normalized) refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_legacy_unicode))
+            if (ascii != normalized) refuse(NameException.Code.UNSUPPORTED, Strings.said(R.string.namereg_error_legacy_unicode))
             normalized = ascii
         }
         val parts = normalized.split('.')
@@ -200,6 +207,54 @@ object NameContracts {
 
     /** A NameNFT renewal: one year for the token. */
     fun nftRenewData(tokenId: BigInteger): ByteArray = NameAbi.call("renew(uint256)", NameAbi.uint(tokenId))
+
+    /**
+     * A name's record writes (#599): on the ENS public resolver keyed by
+     * the name's node (`bytes32`), on a NameNFT by its token (`uint256`).
+     * The two are the same 32 bytes; only the function signature differs.
+     */
+    private fun key(parsed: ParsedName): Pair<String, NameAbi.Word> =
+        if (parsed.space == NameSpace.ETH) "bytes32" to NameAbi.bytes32(parsed.node) else "uint256" to NameAbi.uint(parsed.tokenId)
+
+    fun setContenthashData(parsed: ParsedName, contenthash: ByteArray): ByteArray =
+        key(parsed).let { (t, k) -> NameAbi.call("setContenthash($t,bytes)", k, NameAbi.Bytes(contenthash)) }
+
+    fun setAddrData(parsed: ParsedName, address: String): ByteArray =
+        key(parsed).let { (t, k) -> NameAbi.call("setAddr($t,address)", k, NameAbi.address(address)) }
+
+    fun setTextData(parsed: ParsedName, textKey: String, value: String): ByteArray =
+        key(parsed).let { (t, k) -> NameAbi.call("setText($t,string,string)", k, NameAbi.string(textKey), NameAbi.string(value)) }
+
+    fun contenthashData(parsed: ParsedName) = key(parsed).let { (t, k) -> NameAbi.call("contenthash($t)", k) }
+
+    fun textData(parsed: ParsedName, textKey: String) = key(parsed).let { (t, k) -> NameAbi.call("text($t,string)", k, NameAbi.string(textKey)) }
+
+    /** The address record: ENS `addr(bytes32)`; a NameNFT's `resolve(uint256)` (its owner's address when unset, zero once expired). */
+    fun addressData(parsed: ParsedName) =
+        if (parsed.space == NameSpace.ETH) NameAbi.call("addr(bytes32)", NameAbi.bytes32(parsed.node)) else NameAbi.call("resolve(uint256)", NameAbi.uint(parsed.tokenId))
+
+    fun registryResolverData(node: ByteArray) = NameAbi.call("resolver(bytes32)", NameAbi.bytes32(node))
+    fun isApprovedForAllData(owner: String, operator: String) =
+        NameAbi.call("isApprovedForAll(address,address)", NameAbi.address(owner), NameAbi.address(operator))
+    fun isApprovedForData(owner: String, node: ByteArray, delegate: String) =
+        NameAbi.call("isApprovedFor(address,bytes32,address)", NameAbi.address(owner), NameAbi.bytes32(node), NameAbi.address(delegate))
+    fun nftRecordVersionData(tokenId: BigInteger) = NameAbi.call("recordVersion(uint256)", NameAbi.uint(tokenId))
+
+    /**
+     * The contenthash of a Swarm manifest [reference] (64 lowercase hex
+     * digits): desktop's `swarmContenthash`, `0xe40101fa011b20` ‖ reference.
+     */
+    fun swarmContenthash(reference: String): String {
+        if (!Regex("^[0-9a-f]{64}$").matches(reference)) refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_reference))
+        return "0xe40101fa011b20$reference"
+    }
+
+    /** Longest existing record read for a direct edit (desktop's `boundedRecord`, 8 KiB). */
+    const val MAX_RECORD_BYTES = 8192
+
+    /** Longest text record key and value a write takes (desktop's 128 and 2048). */
+    const val MAX_TEXT_KEY = 128
+    const val MAX_TEXT_VALUE = 2048
 
     // Reads.
 
