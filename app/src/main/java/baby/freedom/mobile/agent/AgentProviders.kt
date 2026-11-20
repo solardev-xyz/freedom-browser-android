@@ -354,6 +354,7 @@ internal class AgentProviders(
                 } else {
                     ProviderClient.CALL_TIMEOUT_MS
                 },
+                accept = ProviderClient.testAccept(definition),
             )
         }
         val reply = when (called) {

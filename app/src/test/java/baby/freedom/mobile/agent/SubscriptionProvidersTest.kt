@@ -656,7 +656,11 @@ class SubscriptionProvidersTest {
         signIn(SubscriptionAuth.CODEX)
         routes["/openai-codex/codex/responses"] = { reply("OK") }
         assertEquals(TestResult.Ok, providers.testConnection(SubscriptionAuth.CODEX, "gpt-6-astra"))
-        val body = JSONObject(requests("/openai-codex/codex/responses").single().body.readUtf8())
+        val test = requests("/openai-codex/codex/responses").single()
+        // It asks for a stream, as the chat does: never a JSON answer.
+        assertEquals("text/event-stream", test.getHeader("Accept"))
+        assertEquals(listOf("text/event-stream"), test.headers.values("Accept"))
+        val body = JSONObject(test.body.readUtf8())
         assertTrue(body.getBoolean("stream"))
         assertFalse(body.has("max_output_tokens"))
         routes["/openai-codex/codex/responses"] = { json(JSONObject().put("output", JSONArray())) }

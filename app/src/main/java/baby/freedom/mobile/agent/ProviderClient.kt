@@ -181,8 +181,10 @@ internal class ProviderClient(
 
     /**
      * Fetches [url] (a GET, or a JSON POST of [json]) for [connectionId]
-     * at [revision], reading at most [maxBytes] of the answer. Cancelling
-     * the caller cancels the call at once, as do [RequestGate.disable] and
+     * at [revision], reading at most [maxBytes] of the answer, asking for
+     * [accept] (Codex's streamed Test connection asks for
+     * `text/event-stream`, as its chat does: [testAccept]). Cancelling the
+     * caller cancels the call at once, as do [RequestGate.disable] and
      * [RequestGate.bump].
      */
     suspend fun fetch(
@@ -193,10 +195,11 @@ internal class ProviderClient(
         maxBytes: Long,
         json: JSONObject? = null,
         timeoutMs: Long = CALL_TIMEOUT_MS,
+        accept: String = ACCEPT_JSON,
     ): ProviderReply {
         val sent = Sent()
         val request = Request.Builder().url(url).tag(Sent::class.java, sent).apply {
-            header("Accept", "application/json")
+            header("Accept", accept)
             headers.forEach { (k, v) -> header(k, v) }
             if (json != null) post(json.toString().toRequestBody(JSON))
         }.build()
@@ -271,7 +274,7 @@ internal class ProviderClient(
     ): StreamEnd {
         val sent = Sent()
         val request = Request.Builder().url(url).tag(Sent::class.java, sent).apply {
-            header("Accept", "text/event-stream")
+            header("Accept", ACCEPT_EVENT_STREAM)
             headers.forEach { (k, v) -> header(k, v) }
             post(json.toString().toRequestBody(JSON))
         }.build()
@@ -497,6 +500,17 @@ internal class ProviderClient(
                 api.plus("chat/completions")
             }
         }
+
+        const val ACCEPT_JSON = "application/json"
+        const val ACCEPT_EVENT_STREAM = "text/event-stream"
+
+        /**
+         * What Test connection's request for [definition] accepts: Codex's
+         * is a stream ([testRequest]), so it asks for one, as its chat
+         * ([stream]) and Pi do; every other test is one JSON answer.
+         */
+        fun testAccept(definition: ProviderDefinition): String =
+            if (definition.wire == WireFormat.CodexResponses) ACCEPT_EVENT_STREAM else ACCEPT_JSON
 
         /** The Test connection request for [definition] at [base]: its URL and body. */
         fun testRequest(definition: ProviderDefinition, base: HttpUrl, modelId: String): Pair<HttpUrl, JSONObject> {
