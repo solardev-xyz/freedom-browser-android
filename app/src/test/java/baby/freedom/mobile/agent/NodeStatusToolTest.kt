@@ -139,6 +139,25 @@ class NodeStatusToolTest {
     }
 
     @Test
+    fun `a paused chain on a stale anchor is stopped, as the page shows Paused, and one not paused is syncing`() {
+        fun gnosis(paused: Boolean) = nodes(
+            NodeSnapshot(
+                myotis = MyotisInfo(
+                    MyotisStatus.Running,
+                    listOf(synced.copy(chainId = 100L, beaconState = MyotisChainStatus.STALE_ANCHOR, paused = paused)),
+                ),
+                myotisRunning = setOf(MyotisNetwork.Gnosis),
+            ),
+        )["myotis-gnosis"]!!
+        val paused = gnosis(paused = true)
+        assertEquals("stopped", paused.getString("state"))
+        assertFalse(paused.getBoolean("running"))
+        val parking = gnosis(paused = false)
+        assertEquals("syncing", parking.getString("state"))
+        assertTrue(parking.getBoolean("running"))
+    }
+
+    @Test
     fun `nothing of the user's leaves the phone - no address, ID, endpoint or error text`() {
         val text = NodeStatusReport.build(
             NodeSnapshot(

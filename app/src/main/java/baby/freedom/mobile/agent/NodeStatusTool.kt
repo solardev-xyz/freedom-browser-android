@@ -172,8 +172,11 @@ internal object NodeStatusReport {
                     chain.error != null -> "error"
                     // A checkpoint recovery that needs the user (#195); one still under way is syncing.
                     chain.recovery?.phase == MyotisRecovery.Phase.Blocked -> "error"
-                    chain.recovery != null || chain.staleAnchor -> "syncing"
-                    chain.paused || !chain.running -> "stopped"
+                    chain.recovery != null -> "syncing"
+                    // Paused before stale anchor, as the page's `myotisChainLabel` reads it.
+                    chain.paused -> "stopped"
+                    chain.staleAnchor -> "syncing"
+                    !chain.running -> "stopped"
                     chain.ready -> "ready"
                     else -> "syncing"
                 }
