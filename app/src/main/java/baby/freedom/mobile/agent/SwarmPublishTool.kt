@@ -605,12 +605,16 @@ internal class SwarmPublishTools(
         return ok(JSONObject().put("publication", now.receipt()).apply { stillGoing(now)?.let { put("note", it) } })
     }
 
-    private fun stillGoing(r: AgentPublication): String? = when (r.state) {
-        AgentPublication.UPLOADING ->
+    /** Reads [AgentPublication.endedPossiblyApplied], the same test as the receipt and the next card's warning. */
+    private fun stillGoing(r: AgentPublication): String? = when {
+        r.state == AgentPublication.UPLOADING ->
             "Still uploading. Keep the publicationId and check it with swarm_publication_status; do not publish again."
-        AgentPublication.OUTCOME_UNKNOWN ->
+        r.state == AgentPublication.OUTCOME_UNKNOWN ->
             "The outcome is unknown: the content may be published. Do not claim success or failure and do not publish " +
                 "it again without asking the user."
+        r.endedPossiblyApplied ->
+            "The upload failed after part of it had already reached the Swarm node, so some of the content may be " +
+                "published. Do not claim it was not published and do not publish it again without asking the user."
         else -> null
     }
 
@@ -654,7 +658,7 @@ internal class SwarmPublishTools(
             name = STATUS,
             description = "Check a Swarm publication by its Freedom publication ID. Omit publicationId after an " +
                 "interrupted model run to list this chat's recent publications. Use this to reconcile uploading or " +
-                "outcome_unknown work before considering another publish.",
+                "outcome_unknown work before considering another publish; a failed one marked possibly_applied may be partly published too.",
             parameters = JSONObject()
                 .put("type", "object")
                 .put(

@@ -311,13 +311,15 @@ class SwarmPublishToolTest {
             r.dispatching()
             r.finished(PublishOutcome.Unknown("The Swarm node didn't finish the upload in time"))
         }
-        val unknown = publish("hello").publication()
+        val unknown0 = publish("hello")
+        val unknown = unknown0.publication()
         assertEquals("outcome_unknown", unknown.getString("state"))
         assertEquals("possibly_applied", unknown.getString("applicationState"))
         assertEquals(1, backend.started.size)
 
         backend.outcome = { r -> r.finished(PublishOutcome.NotSent("Turn on the Swarm node")) }
-        val notSent = publish("hello", session = "other").publication()
+        val notSent0 = publish("hello", session = "other")
+        val notSent = notSent0.publication()
         assertEquals("failed", notSent.getString("state"))
         assertEquals("not_applied", notSent.getString("applicationState"))
 
@@ -325,7 +327,12 @@ class SwarmPublishToolTest {
             r.dispatching()
             r.finished(PublishOutcome.Refused("refused"))
         }
-        assertEquals("possibly_applied", publish("hello", session = "third").publication().getString("applicationState"))
+        val refused = publish("hello", session = "third")
+        assertEquals("failed", refused.publication().getString("state"))
+        assertEquals("possibly_applied", refused.publication().getString("applicationState"))
+        assertTrue(refused.output, JSONObject(refused.output).getJSONObject("result").getString("note").contains("do not publish it again"))
+        assertTrue(JSONObject(unknown0.output).getJSONObject("result").has("note"))
+        assertFalse(JSONObject(notSent0.output).getJSONObject("result").has("note"))
         assertEquals(3, backend.started.size)
     }
 
