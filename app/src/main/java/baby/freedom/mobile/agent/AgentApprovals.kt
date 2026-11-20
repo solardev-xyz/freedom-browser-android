@@ -190,7 +190,7 @@ internal object ApprovalText {
         /** No text at all. */
         data object Empty : Typed
 
-        /** Only blank space: [count] characters of it, which flattening alone would show as nothing. */
+        /** Only spaces (no tab or line break): [count] of them, counted rather than drawn as ␣ after ␣. */
         data class Blank(val count: Int) : Typed
 
         data class Shown(val text: String) : Typed
