@@ -399,7 +399,7 @@ fun NameRegistrationScreen(
                     stringResource(
                         when {
                             op.step == Step.REVEAL && !op.state.terminal -> R.string.namereg_dismiss_paid_commit
-                            op.state == State.DISPATCH_UNKNOWN || op.state == State.VERIFICATION_NEEDED -> R.string.namereg_dismiss_unknown
+                            op.state == State.PENDING || op.state == State.DISPATCH_UNKNOWN || op.state == State.VERIFICATION_NEEDED -> R.string.namereg_dismiss_unknown
                             else -> R.string.namereg_dismiss_plain
                         },
                     ),
@@ -563,7 +563,7 @@ private fun OperationCard(
                 if (op.state.waiting) {
                     OutlinedButton(onClick = onCheckAgain) { Text(stringResource(R.string.namereg_check_again)) }
                 }
-                if (op.state != State.DISPATCHING && op.state != State.PENDING) {
+                if (op.state != State.DISPATCHING) {
                     TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.namereg_dismiss)) }
                 }
             }

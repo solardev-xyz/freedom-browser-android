@@ -34,6 +34,12 @@ interface NameReads {
 
     /** The receipt of [hash], or null while there is none. */
     suspend fun receipt(hash: String): JSONObject?
+
+    /**
+     * [address]'s balance at [block], only to say why a payment can't go:
+     * nothing is sent on it (the wallet reads its own before signing).
+     */
+    suspend fun balance(address: String, block: Long): BigInteger
 }
 
 /** [NameReads] through the wallet's chain-data router, refusing any read that isn't [undisputed]. */
@@ -69,6 +75,10 @@ class RpcNameReads(private val rpc: WalletRpc) : NameReads {
         val r = rpc.receipt(chain, hash)
         // No receipt yet is no news, whoever said it; a receipt acts only when undisputed.
         if (r.value == null) null else trusted(r)
+    }
+
+    override suspend fun balance(address: String, block: Long): BigInteger = guarded {
+        rpc.balance(chain, address, "0x" + block.toString(16)).value
     }
 
     private inline fun <T> guarded(block: () -> T): T = try {
@@ -217,6 +227,8 @@ class NameChain(
     }
 
     suspend fun receipt(hash: String): JSONObject? = reads.receipt(hash)
+
+    suspend fun balance(address: String, s: Snapshot): BigInteger = reads.balance(address, s.block)
 
     private suspend fun words(role: Role, data: ByteArray, s: Snapshot, atLeast: Int): List<ByteArray> {
         val w = NameAbi.words(reads.call(role.address, data, s.block)) ?: malformed()

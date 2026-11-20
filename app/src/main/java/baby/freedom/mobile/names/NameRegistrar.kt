@@ -22,6 +22,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -197,9 +199,7 @@ class NameRegistrar internal constructor(
         val state = chain.inspect(parsed, s)
         val eth = parsed.space == NameSpace.ETH
         if (eth) {
-            chain.checkCode(Role.BASE, s)
-            chain.checkCode(Role.REGISTRY, s)
-            if (state.wrapped) chain.checkCode(Role.WRAPPER, s)
+            checkCodes(s, Role.BASE, Role.REGISTRY, *(if (state.wrapped) arrayOf(Role.WRAPPER) else emptyArray()))
         } else {
             val role = Role.nft(parsed.space)
             chain.checkCode(role, s)
@@ -210,6 +210,13 @@ class NameRegistrar internal constructor(
         val plan = when (op.intent) {
             Intent.REGISTER -> buildRegister(op, parsed, state, s)
             Intent.RENEW -> buildRenew(op, parsed, state, s)
+        }
+        // An account that can't pay is told so, not that the contract would refuse.
+        if (plan.value.signum() > 0) {
+            val held = chain.balance(op.account, s)
+            if (held < plan.value) {
+                refuse(NameException.Code.FUNDS, Strings.get(R.string.namereg_error_funds, ethText(plan.value), ethText(held)))
+            }
         }
         // Always simulated from the paying account, commits included.
         try {
@@ -224,8 +231,7 @@ class NameRegistrar internal constructor(
         if (!state.available) refuse(NameException.Code.STALE, Strings.get(R.string.namereg_error_no_longer_available))
         val role = NameChain.commitRole(parsed.space)
         if (parsed.space == NameSpace.ETH) {
-            chain.checkCode(Role.CONTROLLER, s)
-            chain.checkCode(Role.RESOLVER, s)
+            checkCodes(s, Role.CONTROLLER, Role.RESOLVER)
             if (!chain.bool(Role.BASE, NameContracts.controllersData(Role.CONTROLLER.address), s)) {
                 refuse(NameException.Code.UNSUPPORTED, Strings.get(R.string.namereg_error_controller_changed))
             }
@@ -294,6 +300,15 @@ class NameRegistrar internal constructor(
         return Plan(op.id, op.revision, Step.RENEW, role.address, data, NameContracts.withBuffer(price), price, role)
     }
 
+    /**
+     * [roles]' code hashes, read side by side: a step is built twice
+     * (for the review, then again at Confirm before anything is signed),
+     * and the wallet's quote must still be fresh after the second.
+     */
+    private suspend fun checkCodes(s: NameChain.Snapshot, vararg roles: Role) = coroutineScope {
+        roles.map { async { chain.checkCode(it, s) } }.awaitAll()
+    }
+
     /** What happened to a [dispatch]. */
     sealed interface Dispatched {
         /** The wallet broadcast it; [refresh] follows it. */
@@ -329,7 +344,7 @@ class NameRegistrar internal constructor(
                 readsGuarded { build(op) }
             } catch (e: NameException) {
                 // A dearer reveal stays ready, to be quoted for a fresh approval.
-                if (e.code == NameException.Code.UNVERIFIED || e.code == NameException.Code.UNAVAILABLE) throw e
+                if (e.code == NameException.Code.UNVERIFIED || e.code == NameException.Code.UNAVAILABLE || e.code == NameException.Code.FUNDS) throw e
                 if (op.step != Step.REVEAL) save(op.copy(state = State.STALE, message = e.message), op.revision)
                 throw e
             }
@@ -403,7 +418,10 @@ class NameRegistrar internal constructor(
         return when (op.state) {
             State.PENDING -> {
                 hash ?: return op.copy(state = State.DISPATCH_UNKNOWN, message = Strings.get(R.string.namereg_state_dispatch_unknown))
-                val receipt = chain.receipt(hash) ?: return null
+                // The receipt says a revert; when no receipt is undisputed yet, the effect on chain settles a success.
+                val receipt = undisputedReceipt(hash) ?: return byEffect(op, chain.snapshot())?.let {
+                    if (op.step == Step.COMMIT) it.copy(commitHash = hash) else it
+                }
                 mined(op, hash, receipt)
             }
             State.WAITING_COMMITMENT -> {
@@ -466,8 +484,22 @@ class NameRegistrar internal constructor(
         val s = chain.snapshot()
         val hash = op.transactionHash
         if (hash != null && op.state == State.DISPATCH_UNKNOWN) {
-            chain.receipt(hash)?.let { return mined(op, hash, it) }
+            undisputedReceipt(hash)?.let { return mined(op, hash, it) }
         }
+        return byEffect(op, s)
+    }
+
+    /** The receipt of [hash] when one is there and undisputed; null for none yet, or one only a lone server vouches for. */
+    private suspend fun undisputedReceipt(hash: String): org.json.JSONObject? = try {
+        chain.receipt(hash)
+    } catch (e: NameException) {
+        if (e.code != NameException.Code.UNVERIFIED) throw e
+        null
+    }
+
+    /** [op] moved on by its effect on chain at [s] (the commitment there, the name owned, the expiry moved), or null. */
+    private suspend fun byEffect(op: NameOperation, s: NameChain.Snapshot): NameOperation? {
+        val hash = op.transactionHash
         return when (op.step) {
             Step.COMMIT -> {
                 val commitment = op.commitment ?: return null
@@ -506,13 +538,15 @@ class NameRegistrar internal constructor(
     }
 
     /**
-     * Forgets [id]. A dispatch in progress or a transaction still waiting
-     * for its receipt can't be dropped.
+     * Forgets [id]. A dispatch in progress can't be dropped; a sent
+     * transaction can (it may still go through: the screen says so), or a
+     * commit that never lands would hold its name here for good.
      */
     suspend fun dismiss(id: String) {
         loaded.await()
         val op = get(id) ?: return
-        if (op.state == State.DISPATCHING || op.state == State.PENDING || synchronized(dispatching) { id in dispatching }) {
+        // A sent transaction can be let go (the screen warns it may still go through); one being handed over can't.
+        if (op.state == State.DISPATCHING || synchronized(dispatching) { id in dispatching }) {
             refuse(NameException.Code.CONFLICT, Strings.get(R.string.namereg_error_busy))
         }
         writing.withLock {

@@ -47,6 +47,8 @@ class NameRegistrarTest {
         var premium = BigInteger.ZERO
         var nftFee = BigInteger("1000000000000000")
         var unverified = false
+        var receiptsUnverified = false
+        var balance: BigInteger = BigInteger.TEN.pow(18)
         var revertSimulation = false
         val tampered = HashSet<String>()
         val simulated = ArrayList<Pair<ByteArray, BigInteger?>>()
@@ -71,7 +73,12 @@ class NameRegistrarTest {
             return code(address)
         }
 
-        override suspend fun receipt(hash: String): JSONObject? = receipts[hash]
+        override suspend fun receipt(hash: String): JSONObject? {
+            if (receiptsUnverified) refuse(NameException.Code.UNVERIFIED, "unverified")
+            return receipts[hash]
+        }
+
+        override suspend fun balance(address: String, block: Long): BigInteger = balance
 
         private fun word(v: BigInteger) = NameAbi.uint(v).bytes
         private fun ret(vararg words: ByteArray) = "0x" + words.joinToString("") { w -> w.joinToString("") { "%02x".format(it) } }
@@ -459,22 +466,69 @@ class NameRegistrarTest {
     }
 
     @Test
-    fun `one open operation per name, and a pending one can't be dismissed`() = runBlocking {
+    fun `one open operation per name, one being handed to the wallet can't be dismissed, a sent one can`() = runBlocking {
         val r = registrar()
         val check = r.check("freedom.eth", NameContracts.YEAR)
         val op = r.start(check, Intent.REGISTER, me, 0)
         assertEquals(op.id, r.start(check, Intent.REGISTER, someoneElse, 1).id)
-        r.dispatch(r.plan(op.id), sent(hash1))
-        try {
-            r.dismiss(op.id)
-            fail("dismissed a pending send")
-        } catch (e: NameException) {
-            assertEquals(NameException.Code.CONFLICT, e.code)
+        r.dispatch(r.plan(op.id)) {
+            try {
+                r.dismiss(op.id)
+                fail("dismissed while the wallet had it")
+            } catch (e: NameException) {
+                assertEquals(NameException.Code.CONFLICT, e.code)
+            }
+            WalletSender.Broadcast.Sent(hash1)
         }
         chain.mine(hash1, ok = false)
         assertEquals(State.FAILED, r.refresh(op.id)!!.state)
         r.dismiss(op.id)
         assertEquals(emptyList<NameOperation>(), r.operations.value)
+        // A sent commit that never lands doesn't hold the name for good.
+        val again = r.start(check, Intent.REGISTER, me, 0)
+        r.dispatch(r.plan(again.id), sent(hash2))
+        assertEquals(State.PENDING, r.get(again.id)!!.state)
+        r.dismiss(again.id)
+        assertEquals(emptyList<NameOperation>(), r.operations.value)
+    }
+
+    @Test
+    fun `a sent step whose receipt no second server confirms settles from its effect on chain`() = runBlocking {
+        val r = registrar()
+        val op = r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        r.dispatch(r.plan(op.id), sent(hash1))
+        chain.receiptsUnverified = true
+        chain.mine(hash1)
+        // Mined, but only a lone server says so, and the commitment isn't seen: still pending.
+        assertEquals(State.PENDING, r.refresh(op.id)!!.state)
+        chain.commitments[op.commitment!!] = BigInteger.valueOf(chain.timestamp)
+        val now = r.refresh(op.id)!!
+        assertEquals(Step.REVEAL, now.step)
+        assertEquals(State.WAITING_COMMITMENT, now.state)
+        assertEquals(hash1, now.commitHash)
+    }
+
+    @Test
+    fun `an account that can't pay is told what it holds, and nothing is marked stale`() = runBlocking {
+        chain.available["wei"] = false
+        chain.owner["wei"] = someoneElse
+        chain.expiry["wei"] = BigInteger.valueOf(chain.timestamp + 1000)
+        chain.balance = BigInteger.valueOf(1000)
+        val r = registrar()
+        val op = r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.RENEW, me, 0)
+        try {
+            r.plan(op.id)
+            fail("planned a renewal the account can't pay")
+        } catch (e: NameException) {
+            assertEquals(NameException.Code.FUNDS, e.code)
+            assertTrue(e.message!!.contains("0.00102 ETH"))
+            assertTrue(e.message!!.contains("0.000000000000001 ETH"))
+        }
+        assertEquals(State.READY, r.get(op.id)!!.state)
+        // A commit sends nothing, so needs only the fee (the wallet's own check).
+        chain.available["gwei"] = true
+        val commit = r.start(r.check("freedom.gwei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        assertEquals(BigInteger.ZERO, r.plan(commit.id).value)
     }
 
     @Test

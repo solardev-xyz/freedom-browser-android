@@ -14,7 +14,7 @@ import java.math.BigInteger
  * already the user's language.
  */
 class NameException(val code: Code, message: String) : Exception(message) {
-    enum class Code { INVALID, UNSUPPORTED, UNAVAILABLE, UNVERIFIED, STALE, QUOTE_CHANGED, CONFLICT, SECURE_STORAGE }
+    enum class Code { INVALID, UNSUPPORTED, UNAVAILABLE, UNVERIFIED, STALE, QUOTE_CHANGED, CONFLICT, SECURE_STORAGE, FUNDS }
 }
 
 internal fun refuse(code: NameException.Code, message: String): Nothing = throw NameException(code, message)

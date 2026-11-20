@@ -21,6 +21,8 @@
     <string name="namereg_error_cannot_renew">This name can\'t be renewed in its current state.</string>
     <string name="namereg_error_changed">The name, its owner or its expiry changed since this was prepared. Check it again.</string>
     <string name="namereg_error_quote_changed">The price changed while you were reviewing. Nothing was sent. Review it again.</string>
+    <!-- %1$s: what the step sends, in ETH; %2$s: what the account holds -->
+    <string name="namereg_error_funds">This sends %1$s plus the network fee, and the account holds %2$s. Add ETH to it, then review again.</string>
     <string name="namereg_error_would_revert">The contract would refuse this transaction now, so nothing was sent. Check the name again.</string>
     <string name="namereg_error_commitment_mismatch">The saved registration doesn\'t match its commitment. Nothing was sent.</string>
     <string name="namereg_error_secret_lost">The saved registration secret can\'t be read on this phone any more. The commit can\'t be completed; dismiss it and start again.</string>
