@@ -258,11 +258,16 @@ class PublicationScanTest {
     @Test
     fun `svg and xhtml published as text get the third-party check`() {
         val svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script src=\"https://tracker.example.net/t.js\"></script></svg>"
-        for (type in listOf("image/svg+xml", "application/xhtml+xml; charset=utf-8", "text/xml", "application/xml; charset=utf-8")) {
+        for (type in listOf(
+            "image/svg+xml", "application/xhtml+xml; charset=utf-8", "text/xml", "application/xml; charset=utf-8",
+            "application/rss+xml", "application/atom+xml; charset=utf-8", "application/vnd.example+xml",
+        )) {
             val found = PublicationScan.scanPublication("Text", svg.toByteArray(), type).filter { it.kind == Kind.ThirdParty }
             assertEquals(type, listOf("third-party-script" to "https://tracker.example.net"), found.map { it.rule to it.excerpt })
         }
-        assertTrue(PublicationScan.scanPublication("Text", svg.toByteArray(), "text/plain").none { it.kind == Kind.ThirdParty })
+        for (type in listOf("text/plain", "application/json", "application/xmlish", "application/rss+xmlx")) {
+            assertTrue(type, PublicationScan.scanPublication("Text", svg.toByteArray(), type).none { it.kind == Kind.ThirdParty })
+        }
         // A prefixed XHTML element in plain XML is as live as an unprefixed one.
         val xml = "<doc xmlns:h=\"http://www.w3.org/1999/xhtml\"><h:script src=\"https://cdn.tracker.io/x.js\"/></doc>"
         assertEquals(
@@ -472,9 +477,12 @@ class PublicationScanTest {
             assertEquals(line, emptyList<String>(), rulesIn(line))
             assertFalse(line, SecretBackstop.containsSecret(line))
         }
-        // A member access with a digit, or not of a code object or credential, is still a value;
-        // a quoted value is never code.
-        for (line in listOf("password: Tr0ub4dor.3horse", "password: correct.horse.battery", "token = \"self.token.data\"")) {
+        // A member access with a digit, or not of a code object, is still a value, even when one of
+        // its words is a credential name; a quoted value is never code.
+        for (line in listOf(
+            "password: Tr0ub4dor.3horse", "password: correct.horse.battery", "token = \"self.token.data\"",
+            "password: Super.Secret", "DB_PASSWORD=Admin.Password", "api_key: Secret.Sauce.Recipe",
+        )) {
             assertEquals(line, listOf("credential-assignment"), rulesIn(line))
             assertTrue(line, SecretBackstop.containsSecret(line))
         }

@@ -264,19 +264,19 @@ internal object PublicationScan {
         "ctx", "context", "options", "opts", "args", "params", "app", "props", "state", "credentials", "creds", "secrets",
     )
     private val CODE_SEGMENT = Regex("[A-Za-z_$]+")
-    private val CREDENTIAL_WORD = Regex("(?:$CREDENTIAL_NAMES)", RegexOption.IGNORE_CASE)
 
     /**
      * An unquoted value that reads as code, not as a credential: a member
      * access of letter-only names that starts at a common object
-     * (`self.token`, `os.environ.get`) or names a credential itself
-     * (`form.password.data`, `settings.SECRET_KEY`). A digit anywhere, as
-     * in most real passwords, keeps it a value.
+     * (`self.token`, `os.environ.get`, `form.password.data`,
+     * `settings.SECRET_KEY`). Dotted words that start anywhere else stay a
+     * value even when one of them is a credential name, as in the passwords
+     * `Super.Secret` or `Admin.Password`; a digit anywhere, as in most real
+     * passwords, keeps it a value too.
      */
     internal fun codeReference(value: String): Boolean {
         val segments = value.split('.')
-        return segments.size >= 2 && segments.all { CODE_SEGMENT.matches(it) } &&
-            (segments[0].lowercase() in CODE_ROOTS || segments.any { CREDENTIAL_WORD.containsMatchIn(it) })
+        return segments.size >= 2 && segments.all { CODE_SEGMENT.matches(it) } && segments[0].lowercase() in CODE_ROOTS
     }
 
     /**
@@ -714,10 +714,11 @@ internal object PublicationScan {
 
     /**
      * The media types a browser renders as markup, loading what its tags name,
-     * as the file extensions above. Plain XML counts: an element in the XHTML
-     * (or SVG) namespace inside it is a live `<script>` or `<img>`.
+     * as the file extensions above. Any XML counts, plain or `+xml`
+     * (`application/rss+xml`, `application/atom+xml`, ...): an element in the
+     * XHTML (or SVG) namespace inside it is a live `<script>` or `<img>`.
      */
-    private val MARKUP_TYPE = Regex("^(?:text/html|application/xhtml\\+xml|image/svg\\+xml|text/xml|application/xml)(?![A-Za-z0-9_])")
+    private val MARKUP_TYPE = Regex("^(?:text/html|text/xml|application/xml|[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]*\\+xml)(?![A-Za-z0-9_])")
     private val SCRIPT_FILE = Regex("\\.(?:m?js|cjs)$", RegexOption.IGNORE_CASE)
     private val HYGIENE_TAG = p("<(?:[A-Za-z_][A-Za-z0-9_.-]{0,64}:)?(script|link|img|form)(?=[$S/>])", ci = true)
     private val HYGIENE_FETCH = p("${B}fetch[ \\t]{0,16}\\([ \\t\\r\\n]{0,16}([\"'`])")
