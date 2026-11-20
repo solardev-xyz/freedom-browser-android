@@ -776,4 +776,15 @@ class AgentProvidersTest {
         assertFalse(id in state.keys)
         assertFalse(state.connection(id)!!.hasKey)
     }
+
+    @Test
+    fun `a no-tools refusal is told by its own wording, not by the word tools`() {
+        assertTrue(refusesTools("""{"error":"registry.ollama.ai/library/gemma3:latest does not support tools"}"""))
+        assertTrue(refusesTools("""{"error":{"message":"No endpoints found that support tool use.","code":404}}"""))
+        assertTrue(refusesTools("Model X Does Not Support Tool Use"))
+        assertFalse(refusesTools("""{"error":"maximum context length exceeded","request":{"tools":[],"tool_choice":"auto"}}"""))
+        assertFalse(refusesTools("""{"error":"invalid tool use block"}"""))
+        assertFalse(refusesTools("supports toolsets"))
+        assertFalse(refusesTools(""))
+    }
 }

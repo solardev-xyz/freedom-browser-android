@@ -47,12 +47,13 @@ internal data class Summary(val text: String, val through: Int)
 internal sealed interface StepOutcome {
     data class Ok(val result: StepResult) : StepOutcome
     /**
-     * [badRequest]: the server turned the request down as malformed
-     * (HTTP 400) before answering. A model that takes no tools (Ollama's
-     * gemma3, phi3 and the like) answers a request that offers some this
-     * way, so the loop asks again without them.
+     * [noTools]: the server turned the request down before answering in
+     * a way a model that takes no tools does (Ollama's gemma3, phi3 and
+     * the like: a 400; OpenRouter, for a model no endpoint serves with
+     * tools: a 404 "No endpoints found that support tool use"), so the
+     * loop asks again without them.
      */
-    data class Failed(val error: ChatError, val badRequest: Boolean = false) : StepOutcome
+    data class Failed(val error: ChatError, val noTools: Boolean = false) : StepOutcome
 }
 
 /** Where a step goes: [onText] gets each piece of reply text as it streams in. */
@@ -152,12 +153,14 @@ internal class AgentLoop(
             }
             var outcome = model.step(StepRequest(modelId, system, items, specs, limits.maxOutput), onDelta)
             // A model that takes no tools refuses any request offering them
-            // (HTTP 400, "does not support tools"): ask once more without
-            // them, so it can still chat. Only before the turn has used a
-            // tool (a model that called one takes them) and before
-            // anything streamed; the server's words are never read, so a
-            // 400 for another reason just fails again and shows as before.
-            if (outcome is StepOutcome.Failed && outcome.badRequest && offerTools && first &&
+            // (a 400 "does not support tools", a 404 "No endpoints found
+            // that support tool use"): ask once more without them, so it
+            // can still chat. Only before the turn has used a tool (a
+            // model that called one takes them) and before anything
+            // streamed. A hosted provider's refusal must say so; on a
+            // server on the network any 400 is tried again, and if that
+            // fails too it shows as before and isn't remembered.
+            if (outcome is StepOutcome.Failed && outcome.noTools && offerTools && first &&
                 turn.none { it is ChatItem.ToolResult }
             ) {
                 offerTools = false

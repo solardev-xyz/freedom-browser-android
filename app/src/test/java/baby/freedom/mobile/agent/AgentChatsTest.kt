@@ -270,6 +270,86 @@ class AgentChatsTest {
         assertTrue(bodies[2].has("tools"))
     }
 
+    /** The chat requests sent so far (saving a key also fetches the model list). */
+    private fun chatBodies() = synchronized(bodies) { bodies.filter { it.has("messages") } }
+
+    @Test
+    fun `openrouter - a 404 saying no endpoint takes tools is asked again without them, and remembered`() = runBlocking {
+        val model = connectHosted("openrouter", "deepseek/deepseek-r1:free")
+        val noTools = {
+            MockResponse().setResponseCode(404)
+                .setBody("""{"error":{"message":"No endpoints found that support tool use. To learn more about provider routing, visit: https://openrouter.ai/docs/provider-routing","code":404}}""")
+        }
+        route(
+            "/openrouter/chat/completions",
+            noTools,
+            { sse(chatText("Hello there."), chatStop, "data: [DONE]") },
+            { sse(chatText("Again."), chatStop, "data: [DONE]") },
+        )
+        val id = chats.send(null, "hi", model)!!
+        val turn = awaitDone(id)
+        assertEquals(ChatStatus.COMPLETED, turn.status)
+        assertEquals("Hello there.", turn.assistantText)
+        assertNull(turn.error)
+        assertTrue(chatBodies()[0].has("tools"))
+        assertTrue(!chatBodies()[1].has("tools"))
+        assertEquals(id, chats.send(id, "once more", model))
+        assertEquals("Again.", awaitDone(id).assistantText)
+        assertEquals(3, chatBodies().size)
+        assertTrue(!chatBodies()[2].has("tools"))
+    }
+
+    @Test
+    fun `hosted - a 400 or 404 that doesn't say so is tried once, and tools stay offered`() = runBlocking {
+        val model = connectHosted("openrouter", "some/model")
+        // A request at the context limit: the body quotes it, tools and all.
+        val tooLong = {
+            MockResponse().setResponseCode(400)
+                .setBody("""{"error":{"message":"This endpoint's maximum context length is 128000 tokens.","request":{"tools":[{"type":"function"}]}}}""")
+        }
+        route(
+            "/openrouter/chat/completions",
+            tooLong,
+            { MockResponse().setResponseCode(404).setBody("""{"error":{"message":"No such model"}}""") },
+            { MockResponse().setResponseCode(404) },
+            { sse(chatText("Fine."), chatStop, "data: [DONE]") },
+        )
+        val id = chats.send(null, "hi", model)!!
+        val first = awaitDone(id)
+        assertEquals(ChatStatus.FAILED, first.status)
+        assertEquals(ChatError.Refused.name, first.error)
+        assertEquals(1, chatBodies().size)
+        chats.send(id, "again", model)
+        assertEquals(ChatError.ModelNotFound.name, awaitDone(id).error)
+        assertEquals(2, chatBodies().size)
+        chats.send(id, "and again", model)
+        assertEquals(ChatError.ModelNotFound.name, awaitDone(id).error)
+        assertEquals(3, chatBodies().size)
+        chats.send(id, "last", model)
+        assertEquals("Fine.", awaitDone(id).assistantText)
+        assertTrue(chatBodies().all { it.has("tools") })
+    }
+
+    @Test
+    fun `hosted - a refusal saying so only past what's read, or cut off mid-body, isn't a no-tools one`() = runBlocking {
+        val model = connectHosted("openrouter", "some/model")
+        val late = {
+            MockResponse().setResponseCode(404)
+                .setBody("x".repeat(ProviderClient.REFUSAL_PEEK_BYTES.toInt()) + "No endpoints found that support tool use")
+        }
+        val cut = {
+            MockResponse().setResponseCode(404).setBody("""{"error":"No endpoints found that support tool use"}""")
+                .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+        }
+        route("/openrouter/chat/completions", late, cut)
+        val id = chats.send(null, "hi", model)!!
+        assertEquals(ChatError.ModelNotFound.name, awaitDone(id).error)
+        assertEquals(1, chatBodies().size)
+        chats.send(id, "again", model)
+        assertEquals(ChatError.ModelNotFound.name, awaitDone(id).error)
+        assertEquals(2, chatBodies().size)
+    }
+
     @Test
     fun `a refusal is told in plain words from its status, never the body`() = runBlocking {
         val model = connectOllama()

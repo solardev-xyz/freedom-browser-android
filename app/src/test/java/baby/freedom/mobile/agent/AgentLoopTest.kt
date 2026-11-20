@@ -180,7 +180,7 @@ class AgentLoopTest {
         assertNull(Regex("[^\\x00-\\x7F]").find(block))
     }
 
-    private val badRequest: (StepRequest) -> StepOutcome = { StepOutcome.Failed(ChatError.Refused, badRequest = true) }
+    private val badRequest: (StepRequest) -> StepOutcome = { StepOutcome.Failed(ChatError.Refused, noTools = true) }
 
     @Test
     fun `a model refusing a request with tools is asked again without them, and told`() {

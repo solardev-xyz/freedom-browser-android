@@ -111,8 +111,12 @@ internal sealed interface StreamEnd {
     /** The body ended; whether it was a whole answer is the parser's call. */
     data object Ended : StreamEnd
 
-    /** The server answered with [code]; its body is never read or shown. */
-    data class Status(val code: Int) : StreamEnd
+    /**
+     * The server answered with [code]; its body is never kept or shown.
+     * [noTools]: a 400 or 404 whose body says the model takes no tools
+     * (see [refusesTools]), the one thing it's read for.
+     */
+    data class Status(val code: Int, val noTools: Boolean = false) : StreamEnd
 
     /** The stream carried an error, or an answer that can't be used. */
     data class Wire(val error: WireError) : StreamEnd
@@ -246,8 +250,10 @@ internal class ProviderClient(
      * [connectionId] at [revision] and hands each server-sent event to
      * [onEvent] (its `event:` name, if any, and its data) as it arrives,
      * on OkHttp's thread. [onEvent] may throw [WireException] to end the
-     * stream; the answer's body is never read when the server refuses
-     * (a non-2xx status).
+     * stream. When the server refuses (a non-2xx status) its body is never
+     * kept or shown: only a 400's or 404's first [REFUSAL_PEEK_BYTES] are
+     * checked for whether they say the model takes no tools
+     * ([StreamEnd.Status.noTools]).
      *
      * There's no deadline on the whole answer (a long one takes as long
      * as it takes) but the server must keep sending: [STREAM_IDLE_MS]
@@ -320,10 +326,34 @@ internal class ProviderClient(
     }
 
     private fun readEvents(response: Response, onEvent: (String?, String) -> Unit): StreamEnd {
-        if (!response.isSuccessful) return StreamEnd.Status(response.code)
+        if (!response.isSuccessful) {
+            val code = response.code
+            return StreamEnd.Status(code, noTools = (code == 400 || code == 404) && saysNoTools(response))
+        }
         val body = response.body ?: return StreamEnd.Unreachable
         SseReader(body.source()).forEach(onEvent)
         return StreamEnd.Ended
+    }
+
+    /**
+     * Whether a refusal's body says the model takes no tools. Reads at
+     * most [REFUSAL_PEEK_BYTES]; the text goes no further than this
+     * check. Anything going wrong while reading is "no": the server
+     * still answered with its status.
+     */
+    private fun saysNoTools(response: Response): Boolean = try {
+        val source = response.body?.source()
+        if (source == null) {
+            false
+        } else {
+            val buffer = Buffer()
+            while (buffer.size < REFUSAL_PEEK_BYTES) {
+                if (source.read(buffer, REFUSAL_PEEK_BYTES - buffer.size) == -1L) break
+            }
+            refusesTools(buffer.readUtf8(minOf(buffer.size, REFUSAL_PEEK_BYTES)))
+        }
+    } catch (e: Exception) {
+        false
     }
 
     private fun read(response: Response, maxBytes: Long): ProviderReply {
@@ -366,6 +396,9 @@ internal class ProviderClient(
          */
         const val STREAM_IDLE_MS = 120_000L
         const val CATALOG_TIMEOUT_MS = 20_000L
+
+        /** How much of a 400's or 404's body is checked for a no-tools refusal. */
+        const val REFUSAL_PEEK_BYTES = 4_096L
 
         /**
          * Test connection to a server on the network: a local server may
@@ -502,3 +535,13 @@ internal class ProviderClient(
         }
     }
 }
+
+/**
+ * Whether a refusal's [text] says the model takes no tools: Ollama's
+ * "… does not support tools" (400) and OpenRouter's "No endpoints found
+ * that support tool use" (404). Matched on the refusal's own wording, not
+ * on "tools" alone, which a body quoting the request would contain.
+ */
+internal fun refusesTools(text: String): Boolean = NO_TOOLS.containsMatchIn(text)
+
+private val NO_TOOLS = Regex("\\bsupports?\\s+(tools\\b|tool\\s+use\\b)", RegexOption.IGNORE_CASE)
