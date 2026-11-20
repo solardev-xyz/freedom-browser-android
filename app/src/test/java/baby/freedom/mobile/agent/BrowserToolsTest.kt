@@ -883,6 +883,83 @@ class BrowserToolsTest {
     }
 
     @Test
+    fun `the download card shows the link's address in full, as matched`() = runBlocking {
+        // Padding past where other cards cut, with the part that picks the file at the end.
+        val href = "https://drive.example/uc?export=download&x=" + "p".repeat(1_500) + "&id=the-file"
+        downloadLink(href)
+        files.rows[42] = files.entry(42, "report.pdf", "completed")
+        host.duringTap = { AgentDownloads.claim(1, href)!!.started(42) }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertFalse(out.output, out.isError)
+        assertEquals(href, (asked.single().action as AgentAction.Download).target.target)
+
+        // The page swaps the end of the address while the card is up: refused, nothing tapped.
+        AgentTabs.clear()
+        host.tabs.clear()
+        asked.clear()
+        host.taps.clear()
+        downloadLink(href)
+        answer = { host.control.put("target", href.replace("the-file", "other-file")); ApprovalOutcome.Approved }
+        host.duringTap = { error("not tapped") }
+        val swapped = toolset()
+        assertEquals("STALE_ELEMENT_REFERENCE", swapped.call("browser_download", JSONObject().put("ref", snapshotRef(swapped))).code())
+        assertTrue(host.taps.isEmpty())
+    }
+
+    @Test
+    fun `a link whose address the card can't show as it is is refused before asking`() = runBlocking {
+        downloadLink("https://example.com/files/report.pdf\u202E&id=other")
+        val tools = toolset()
+        assertEquals("ELEMENT_NOT_INTERACTABLE", tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools))).code())
+        assertTrue(asked.isEmpty())
+        assertTrue(host.taps.isEmpty())
+    }
+
+    @Test
+    fun `asking where to save, turned on while the card is up, still counts`() = runBlocking {
+        downloadLink()
+        answer = { files.askWhere = true; ApprovalOutcome.Approved }
+        var direct: Boolean? = null
+        host.duringTap = {
+            val claim = AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!
+            direct = claim.direct
+            claim.declined()
+        }
+        val tools = toolset()
+        assertEquals("DOWNLOAD_CANCELLED_BY_USER", tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools))).code())
+        assertEquals(false, direct)
+    }
+
+    @Test
+    fun `an approved download Freedom couldn't list is reported, not waited on`() = runBlocking {
+        downloadLink()
+        host.duringTap = { AgentDownloads.claim(1, "https://example.com/files/report.pdf")!!.failed() }
+        val tools = toolset()
+        val out = tools.call("browser_download", JSONObject().put("ref", snapshotRef(tools)))
+        assertEquals("CAPABILITY_UNAVAILABLE", out.code())
+        assertTrue(files.records.of("chat").isEmpty())
+    }
+
+    @Test
+    fun `stopping the turn after the claim but before the row stops the download once it starts`() = runBlocking {
+        downloadLink()
+        files.rows[42] = files.entry(42, "report.pdf", "running")
+        var claim: AgentDownloadClaim? = null
+        host.duringTap = { claim = AgentDownloads.claim(1, "https://example.com/files/report.pdf")!! }
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        val job = launch { tools.call("browser_download", JSONObject().put("ref", ref)) }
+        while (claim == null) kotlinx.coroutines.yield()
+        job.cancel()
+        job.join()
+        // Its row comes after the Stop: stopped as it starts, never recorded.
+        claim!!.started(42)
+        assertEquals(listOf(42L), files.cancelled)
+        assertTrue(files.records.of("chat").isEmpty())
+    }
+
+    @Test
     fun `a download other than the approved link is held for the user and reported`() = runBlocking {
         downloadLink()
         host.duringTap = { assertNull(AgentDownloads.claim(1, "https://elsewhere.example/report.pdf")) }

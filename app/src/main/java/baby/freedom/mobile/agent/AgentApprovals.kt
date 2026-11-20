@@ -23,9 +23,11 @@ internal sealed interface AgentAction {
     data class Upload(val target: PageTarget) : AgentAction
 
     /**
-     * Tap a download link (browser_download, #600): the download that tap
-     * starts on the link's site is saved without another prompt
-     * ([DownloadIntentMatch]); one from any other site waits for the user.
+     * Tap a download link (browser_download, #600): only a download of the
+     * link's exact address (fragment aside, [DownloadIntentMatch]) is saved
+     * without another prompt, once; any other download the tap starts, even
+     * where the link redirects to on its own site, waits for the user.
+     * [target]'s address is the link's in full, as matched.
      */
     data class Download(val target: PageTarget) : AgentAction
 

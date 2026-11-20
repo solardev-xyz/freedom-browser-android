@@ -305,7 +305,9 @@ internal class BrowserToolset(
             tag = ApprovalText.flatten(t.optString("tag"), 32),
             name = ApprovalText.flatten(t.optString("name"), 200),
             effect = t.optString("effect").ifEmpty { null },
-            target = t.optString("target").ifEmpty { null }?.let { ApprovalText.flatten(it, 500) },
+            // In full (up to the page script's own cut): the card shows, and the
+            // approval binding compares, every character of where it goes, not a prefix.
+            target = t.optString("target").ifEmpty { null }?.let { ApprovalText.flatten(it, MAX_LINK_CHARS) },
             sensitive = t.optBoolean("sensitive"),
         )
     }
@@ -685,7 +687,9 @@ internal class BrowserToolset(
      * asks; the approved tap on the link arms a one-time intent on the tab,
      * and only a download of that exact link ([DownloadIntentMatch]) is saved
      * without the usual prompt (or offered, when the user asks where to save
-     * each file). Any other download the page starts waits for the user.
+     * each file, as set when the intent is armed). Any other download the
+     * page starts waits for the user. The card shows that address in full;
+     * one it can't show as it is isn't asked about.
      */
     private suspend fun download(rawRef: String): ToolOutcome {
         val port = files() ?: throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Downloads are unavailable right now.")
@@ -707,9 +711,19 @@ internal class BrowserToolset(
                 "This link's address is too long to check. Ask the user to download it manually.",
             )
         }
-        val direct = !port.askWhereToSave()
+        // Shown as matched, or not at all: an address with characters the
+        // card can't draw as they are (spaces, controls, hidden marks) is
+        // refused before asking.
+        if (ApprovalText.flatten(href, MAX_LINK_CHARS) != href) {
+            throw ToolError(
+                ToolError.ELEMENT_NOT_INTERACTABLE,
+                "This link's address can't be shown to the user as it is. Ask the user to download it manually.",
+            )
+        }
         val approval = approve(tab.id, tab.site, tab.document, AgentAction.Download(target), null, needsScreen = true)
         val run = onScreen(tab, ref, approval, "click", null)
+        // Read as the intent is armed: a change made while the card was up counts.
+        val direct = !port.askWhereToSave()
         val intent = DownloadIntent(sessionId, tab.id, href, direct)
         if (!AgentDownloads.arm(intent)) {
             throw ToolError(ToolError.CAPABILITY_UNAVAILABLE, "Another approved download is already pending on this page. Nothing was done.")
@@ -725,15 +739,23 @@ internal class BrowserToolset(
                     intent.claimed.onAwait {}
                     intent.start.onAwait {}
                 }
-            } ?: throw ToolError(
-                ToolError.WAIT_TIMEOUT,
-                "The page did not start a download after the requested interaction. Take a new snapshot to see what it did.",
-            )
+            } ?: run {
+                // Disarmed first: a download that met the intent as the wait ran
+                // out is answered below, not left to start unreported.
+                if (AgentDownloads.disarm(intent)) {
+                    throw ToolError(
+                        ToolError.WAIT_TIMEOUT,
+                        "The page did not start a download after the requested interaction. Take a new snapshot to see what it did.",
+                    )
+                }
+            }
             // Then its start: at once, or the user's answer to the offer when they choose where to save.
             intent.start.await()
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            // Stopped between the claim and the row: a download that starts on the
-            // approval alone stops too. One the user accepts in the offer prompt is theirs.
+        } catch (e: Throwable) {
+            // Stopped (or failed) between the claim and the row: a download that
+            // starts on the approval alone stops too. One the user accepts in the
+            // offer prompt is theirs. Disarmed first, so no claim lands after the check.
+            AgentDownloads.disarm(intent)
             if (direct && intent.claimed.isCompleted) {
                 intent.start.invokeOnCompletion {
                     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -765,6 +787,10 @@ internal class BrowserToolset(
                     "or too many are waiting. Ask the user to download it themselves.",
             )
             DownloadIntent.Start.TakenBack -> throw ToolError(ToolError.POLICY_DENIED, "The user took the tab back; the download is theirs now.")
+            DownloadIntent.Start.Failed -> throw ToolError(
+                ToolError.CAPABILITY_UNAVAILABLE,
+                "Freedom couldn't start this download (it couldn't be listed). Ask the user to download it themselves.",
+            )
         }
         // Stopping the turn from here on stops its download too (desktop's
         // cancelAgentDownloads), wherever the Stop lands: one that started on

@@ -86,6 +86,9 @@ internal interface AgentDownloadClaim {
 
     /** The offer prompt didn't take it (its tab's downloads blocked, or too many waiting). */
     fun notQueued()
+
+    /** Freedom couldn't list it (its row couldn't be written): nothing started. */
+    fun failed()
 }
 
 /**
@@ -117,6 +120,9 @@ internal class DownloadIntent(
 
         /** The user took the tab back before its download came: theirs now. */
         data object TakenBack : Start
+
+        /** It matched, but Freedom couldn't start it (its row couldn't be written). */
+        data object Failed : Start
     }
 
     /** Completes when a download from the tab met this intent and matched. */
@@ -149,10 +155,17 @@ internal object AgentDownloads {
         return true
     }
 
-    /** [intent] is over, whichever way (answered, timed out, the turn stopped). */
+    /**
+     * [intent] is over, whichever way (answered, timed out, the turn
+     * stopped). True if it was still armed: no download met it, and none
+     * can now. False if a download already met it ([claim]), so its
+     * [DownloadIntent.start] is, or will be, answered.
+     */
     @Synchronized
-    fun disarm(intent: DownloadIntent) {
-        if (armed[intent.tabId] === intent) armed.remove(intent.tabId)
+    fun disarm(intent: DownloadIntent): Boolean {
+        if (armed[intent.tabId] !== intent) return false
+        armed.remove(intent.tabId)
+        return true
     }
 
     /**
@@ -193,6 +206,10 @@ internal object AgentDownloads {
 
             override fun notQueued() {
                 intent.start.complete(DownloadIntent.Start.NotQueued)
+            }
+
+            override fun failed() {
+                intent.start.complete(DownloadIntent.Start.Failed)
             }
         }
     }

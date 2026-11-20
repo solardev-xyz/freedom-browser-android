@@ -200,6 +200,25 @@ class AgentFilesTest {
     }
 
     @Test
+    fun `disarming says whether a download already met the intent`() {
+        val i = intent()
+        AgentDownloads.arm(i)
+        // Nothing came: disarmed, and nothing can claim it now.
+        assertTrue(AgentDownloads.disarm(i))
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertFalse(i.claimed.isCompleted)
+        // A download came just before the disarm (as a wait runs out): it's
+        // claimed, and the disarm says so, so the tool answers it.
+        val j = intent()
+        AgentDownloads.arm(j)
+        val claim = AgentDownloads.claim(1, "https://example.com/a.zip")!!
+        assertFalse(AgentDownloads.disarm(j))
+        assertTrue(j.claimed.isCompleted)
+        claim.failed()
+        assertEquals(DownloadIntent.Start.Failed, j.start.getCompleted())
+    }
+
+    @Test
     fun `a tab taken back before its download comes is the user's`() {
         val i = intent()
         AgentDownloads.arm(i)
