@@ -258,6 +258,8 @@ private fun ChatView(
     val attachmentStore = remember(context) { AgentAttachments.get(context) }
     val staged by attachmentStore.staged.collectAsState()
     var refused by remember { mutableStateOf<List<StageResult.Refused>>(emptyList()) }
+    // Files of a message that couldn't be saved and didn't fit back (#601).
+    val notPutBack by attachmentStore.notPutBack.collectAsState()
     // Picks still being copied in: Send waits for them.
     var staging by remember { mutableStateOf(0) }
     val recognizers = rememberDictationRecognizer()
@@ -458,15 +460,17 @@ private fun ChatView(
                 serviceOffered = RecognizerKind.Service in recognizers.available,
                 onOpenAndroidSettings = { openAppSettings(context) },
             )
-            StageRefusals(refused)
+            StageRefusals(notPutBack + refused)
             StagedAttachments(staged) { id ->
                 refused = emptyList()
+                attachmentStore.dismissNotPutBack()
                 scope.launch { attachmentStore.unstage(id) }
             }
             StagedNote(staged, modelTakesImages = choices.firstOrNull { it.ref == model }?.vision == true)
             Row(verticalAlignment = Alignment.Bottom) {
                 AttachButton(enabled = !sending.value && staged.size < AttachmentRules.MAX_SELECTIONS) { uris ->
                     refused = emptyList()
+                    attachmentStore.dismissNotPutBack()
                     staging++
                     scope.launch {
                         try {
@@ -544,6 +548,7 @@ private fun ChatView(
                             val files = staged.map { it.id }
                             sending.value = true
                             refused = emptyList()
+                            attachmentStore.dismissNotPutBack()
                             scope.launch {
                                 try {
                                     val id = chats.send(sessionId, text, m, mode, files)

@@ -341,4 +341,20 @@ class AgentLoopTest {
         assertEquals("look\n" + AgentLoop.IMAGE_DROPPED, user.text)
         assertEquals(items, AgentLoop.withinImageBudget(items, budget = 30))
     }
+
+    @Test
+    fun `a request carries at most the newest 20 images`() {
+        val images = List(25) { ImagePart("image/png", "I$it") }
+        val items = listOf(
+            ChatItem.User("look", images.take(10)),
+            ChatItem.Assistant("", listOf(ToolCall("c1", "look", "{}"))),
+            ChatItem.ToolResult("c1", "look", "pages", images = images.drop(10)),
+        )
+        val kept = AgentLoop.withinImageBudget(items)
+        assertEquals(images.drop(10), (kept[2] as ChatItem.ToolResult).images)
+        val user = kept[0] as ChatItem.User
+        assertEquals(images.take(5), user.images)
+        assertEquals(5, user.text.split("\n").count { it == AgentLoop.IMAGE_DROPPED })
+        assertEquals(20, AgentLoop.MAX_IMAGES)
+    }
 }

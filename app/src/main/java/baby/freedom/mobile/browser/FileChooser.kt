@@ -619,16 +619,6 @@ internal fun <T : Any> pickedUris(
 }
 
 /**
- * Whether a URI another app (picker or camera) handed back may be
- * uploaded. WebView reads it with the browser's identity, so it must
- * be a `content:` URI ([scheme]) served by *someone else's* provider:
- * `file:///data/…` or `content://<our own provider>/…` (e.g. an earlier
- * capture still in cache/uploads, uploaded to a different site) would
- * have the browser upload its own private files. [authority]
- * may carry a `userId@` prefix, which ContentResolver strips before
- * resolving the provider, so it is stripped here too.
- */
-/**
  * True for an authority served by one of the browser's own content
  * providers: our [FileProvider] or any provider a library merged into the
  * manifest. Shared by a page's upload ([FileChooser]) and the agent's
@@ -642,6 +632,16 @@ internal fun isOwnProviderAuthority(context: Context, authority: String): Boolea
     return info?.packageName == context.packageName
 }
 
+/**
+ * Whether a URI another app (picker or camera) handed back may be
+ * uploaded. WebView reads it with the browser's identity, so it must
+ * be a `content:` URI ([scheme]) served by *someone else's* provider:
+ * `file:///data/…` or `content://<our own provider>/…` (e.g. an earlier
+ * capture still in cache/uploads, uploaded to a different site) would
+ * have the browser upload its own private files. [authority]
+ * may carry a `userId@` prefix, which ContentResolver strips before
+ * resolving the provider, so it is stripped here too.
+ */
 internal fun isUploadableUri(
     scheme: String?,
     authority: String?,

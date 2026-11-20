@@ -38,7 +38,7 @@ class AgentAttachmentsTest {
         else -> null
     }
 
-    private fun store(root: File = tmp.root) = AgentAttachments(root, ::fakeImageType)
+    private fun store(root: File = tmp.root) = AgentAttachments(root, imageType = ::fakeImageType)
 
     private fun bytes(n: Long, lead: String = ""): InputStream = object : InputStream() {
         var i = 0L
@@ -325,5 +325,85 @@ class AgentAttachmentsTest {
         assertEquals(listOf("ok.txt"), store().list(chat).map { it.name })
         assertNotNull(Attachment.parseList(Attachment.listJson(store().list(chat))).singleOrNull())
         assertTrue(Attachment.parseList("{not json").isEmpty())
+    }
+
+    @Test
+    fun `a slow pick's copy doesn't hold the store, and a pick over the count copied meanwhile leaves nothing`() = runBlocking {
+        val s = store()
+        val sent = s.consume(chat, listOf(s.stageOk("a.txt", open = text("alpha")).id))!!
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        // A cloud file served on demand: the copy blocks mid-stream.
+        val slow = launch(kotlinx.coroutines.Dispatchers.IO) {
+            s.stage("slow.txt", null) {
+                object : InputStream() {
+                    var done = false
+                    override fun read(): Int = error("unused")
+                    override fun read(b: ByteArray, off: Int, len: Int): Int {
+                        if (done) return -1
+                        started.countDown()
+                        release.await()
+                        b[off] = 'x'.code.toByte()
+                        done = true
+                        return 1
+                    }
+                }
+            }
+        }
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        try {
+            // A running turn's read, a chat's deletion and Delete all chats don't wait for it.
+            kotlinx.coroutines.withTimeout(5_000) {
+                assertEquals(sent, s.list(chat))
+                assertEquals("alpha", s.readText(chat, sent.single().id, 0, 100).second.text)
+                s.deleteAll()
+                // Ten picks staged meanwhile: the slow one no longer fits.
+                repeat(AttachmentRules.MAX_SELECTIONS) { s.stageOk("$it.txt", open = text("x")) }
+            }
+        } finally {
+            release.countDown()
+        }
+        assertFalse(chatDir(chat).exists())
+        slow.join()
+        assertEquals(AttachmentRules.MAX_SELECTIONS, s.staged.value.size)
+        assertFalse("slow.txt" in s.staged.value.map { it.name })
+        // The refused copy didn't stay behind.
+        assertEquals(AttachmentRules.MAX_SELECTIONS, stagedFiles().size)
+    }
+
+    @Test
+    fun `a failed save's files that no longer fit go, and are named, not dropped silently`() = runBlocking {
+        val s = store()
+        val sent = s.consume(chat, listOf(s.stageOk("a.txt", open = text("a")).id, s.stageOk("b.txt", open = text("b")).id))!!
+        // Picked while the send was being saved: one free place left.
+        repeat(AttachmentRules.MAX_SELECTIONS - 1) { s.stageOk("$it.txt", open = text("x")) }
+        val refused = s.unconsume(chat, sent)
+        assertEquals(listOf(StageResult.Refused(StageRefusal.NotPutBack, "b.txt")), refused)
+        assertEquals(refused, s.notPutBack.value)
+        assertEquals(AttachmentRules.MAX_SELECTIONS, s.staged.value.size)
+        assertEquals("a.txt", s.staged.value.last().name)
+        // Nothing left over: no unreferenced copy in staged/, and the chat's folder is gone.
+        assertEquals(AttachmentRules.MAX_SELECTIONS, stagedFiles().size)
+        assertFalse(chatDir(chat).exists())
+        s.dismissNotPutBack()
+        assertTrue(s.notPutBack.value.isEmpty())
+
+        // The 50 MB total is checked too.
+        s.clearStaged()
+        val big = s.consume(chat, listOf(s.stageOk("big.pdf") { bytes(AttachmentRules.MAX_FILE_BYTES) }.id))!!
+        s.stageOk("c.pdf") { bytes(AttachmentRules.MAX_FILE_BYTES) }
+        s.stageOk("d.pdf") { bytes(AttachmentRules.MAX_FILE_BYTES) }
+        assertEquals(listOf("big.pdf"), s.unconsume(chat, big).map { it.name })
+        assertEquals(listOf("c.pdf", "d.pdf"), s.staged.value.map { it.name })
+        assertEquals(2, stagedFiles().size)
+    }
+
+    @Test
+    fun `an image over 8000 pixels on a side is refused`() = runBlocking {
+        val sizes = mapOf("PNG" to (8001 to 600), "JPG" to (8000 to 8000))
+        val s = AgentAttachments(tmp.root, imageSize = { f -> sizes[f.inputStream().use { String(it.readNBytes(3)) }] }, imageType = ::fakeImageType)
+        assertEquals(StageRefusal.ImageTooWide, refusal(s.stage("panorama.png", null) { bytes(100, "PNG") }))
+        assertEquals("image/jpeg", s.stageOk("square.jpg") { bytes(100, "JPG") }.mimeType)
+        assertEquals(1, stagedFiles().size)
     }
 }

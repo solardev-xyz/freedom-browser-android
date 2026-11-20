@@ -290,11 +290,20 @@ internal class AgentLoop(
          */
         const val MAX_IMAGE_CHARS = 16 * 1024 * 1024
 
+        /**
+         * The most images one request carries (#601): past 20, the Claude
+         * API refuses any image over 3000 px a side, which a photo picked
+         * at up to [AttachmentRules.MAX_IMAGE_SIDE] can be. The newest are
+         * kept, as for [MAX_IMAGE_CHARS].
+         */
+        const val MAX_IMAGES = 20
+
         const val IMAGE_DROPPED = "[An image here was left out of this request to keep it small; read it again if you need it.]"
 
-        /** [items] with the oldest images over [MAX_IMAGE_CHARS] left out. */
-        fun withinImageBudget(items: List<ChatItem>, budget: Int = MAX_IMAGE_CHARS): List<ChatItem> {
+        /** [items] with the oldest images over [MAX_IMAGE_CHARS], or past the newest [MAX_IMAGES], left out. */
+        fun withinImageBudget(items: List<ChatItem>, budget: Int = MAX_IMAGE_CHARS, maxImages: Int = MAX_IMAGES): List<ChatItem> {
             var left = budget.toLong()
+            var slots = maxImages
             val out = ArrayList<ChatItem>(items.size)
             for (item in items.asReversed()) {
                 val images = when (item) {
@@ -309,9 +318,10 @@ internal class AgentLoop(
                 val kept = ArrayList<ImagePart>()
                 var dropped = 0
                 for (image in images) {
-                    if (image.base64.length <= left) {
+                    if (slots > 0 && image.base64.length <= left) {
                         kept += image
                         left -= image.base64.length
+                        slots--
                     } else {
                         dropped++
                         left = 0

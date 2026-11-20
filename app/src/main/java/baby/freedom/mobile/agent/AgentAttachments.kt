@@ -122,6 +122,17 @@ internal enum class StageRefusal {
     /** An image over [AttachmentRules.MAX_IMAGE_BYTES], the most a model is sent. */
     ImageTooLarge,
 
+    /** An image over [AttachmentRules.MAX_IMAGE_SIDE] pixels on a side, which the Claude API refuses. */
+    ImageTooWide,
+
+    /**
+     * A file of a message that couldn't be saved, which didn't fit back
+     * under the composer ([AttachmentRules.MAX_SELECTIONS] files or
+     * [AttachmentRules.MAX_TOTAL_BYTES] with what was picked meanwhile):
+     * its copy is gone, and it must be picked again.
+     */
+    NotPutBack,
+
     /** It couldn't be read, or the phone couldn't keep a copy. */
     Unreadable,
 }
@@ -158,6 +169,15 @@ internal object AttachmentRules {
      * encodes to up to 11.2M characters, over it.
      */
     const val MAX_IMAGE_BYTES = MAX_IMAGE_BASE64_CHARS / 4 * 3
+
+    /**
+     * The most pixels an image may have on a side: the Claude API refuses
+     * a bigger one ("The maximum dimensions for each image are 8000x8000
+     * px"), so a message's own image would fail every resend. Its stricter
+     * 3000 px for a request of more than 20 images never applies: a
+     * request carries at most [AgentLoop.MAX_IMAGES].
+     */
+    const val MAX_IMAGE_SIDE = 8000
 
     /**
      * Bytes of text one read returns. Desktop's is 256 KiB; here it stays
@@ -278,10 +298,12 @@ internal object AttachmentRules {
 
 /**
  * The store. [root] is its folder; [imageType] reads an image's real
- * type from its bytes (null: not a JPEG, PNG or WebP that decodes).
+ * type from its bytes (null: not a JPEG, PNG or WebP that decodes), and
+ * [imageSize] its width and height in pixels (null: unknown).
  */
 internal class AgentAttachments(
     private val root: File,
+    private val imageSize: (File) -> Pair<Int, Int>? = { null },
     private val imageType: (File) -> String?,
 ) {
     private val stagedDir = File(root, "staged")
@@ -300,6 +322,18 @@ internal class AgentAttachments(
 
     /** Files picked for the message being written, in the order picked. */
     val staged: StateFlow<List<StagedAttachment>> = _staged.asStateFlow()
+
+    private val _notPutBack = MutableStateFlow<List<StageResult.Refused>>(emptyList())
+
+    /**
+     * Files of an unsaved message that didn't fit back under the composer
+     * ([unconsume]), for the composer to say so; cleared by [dismissNotPutBack].
+     */
+    val notPutBack: StateFlow<List<StageResult.Refused>> = _notPutBack.asStateFlow()
+
+    fun dismissNotPutBack() {
+        _notPutBack.value = emptyList()
+    }
 
     init {
         // A pick never sent doesn't outlive the process that made it.
@@ -325,47 +359,60 @@ internal class AgentAttachments(
      * Copies a picked file ([open], named [name] by the picker, of type
      * [mimeType]) into staging, counting the bytes as they come: the
      * picker's own size and type aren't trusted. Off the main thread.
+     *
+     * The copy runs outside the store's lock: a file a cloud provider
+     * serves on demand can take minutes, and a running turn's reads, a
+     * chat's deletion and Delete all chats mustn't wait for it. The count
+     * and the message's total are checked again under the lock once it's
+     * copied; a file not staged in the end leaves no copy.
      */
     suspend fun stage(name: String?, mimeType: String?, open: () -> InputStream?): StageResult = withContext(Dispatchers.IO) {
         val shown = AttachmentRules.cleanName(name)
-        lock.withLock {
-            if (_staged.value.size >= AttachmentRules.MAX_SELECTIONS) return@withLock StageResult.Refused(StageRefusal.TooMany, shown)
-            val (kind, typed) = AttachmentRules.classify(shown, mimeType)
-                ?: return@withLock StageResult.Refused(StageRefusal.Unsupported, shown)
-            val id = newId("selection_")
-            val file = stagedFile(id)
+        if (_staged.value.size >= AttachmentRules.MAX_SELECTIONS) return@withContext StageResult.Refused(StageRefusal.TooMany, shown)
+        val (kind, typed) = AttachmentRules.classify(shown, mimeType)
+            ?: return@withContext StageResult.Refused(StageRefusal.Unsupported, shown)
+        val id = newId("selection_")
+        val file = stagedFile(id)
+        var kept = false
+        try {
             val cap = if (kind == AttachmentKind.Image) AttachmentRules.MAX_IMAGE_BYTES else AttachmentRules.MAX_FILE_BYTES
             val copied = try {
                 stagedDir.mkdirs()
-                val input = open() ?: return@withLock StageResult.Refused(StageRefusal.Unreadable, shown)
+                val input = open() ?: return@withContext StageResult.Refused(StageRefusal.Unreadable, shown)
                 input.use { copyAtMost(it, file, cap) }
             } catch (e: IOException) {
-                file.delete()
-                return@withLock StageResult.Refused(StageRefusal.Unreadable, shown)
+                return@withContext StageResult.Refused(StageRefusal.Unreadable, shown)
             } catch (e: SecurityException) {
-                file.delete()
-                return@withLock StageResult.Refused(StageRefusal.Unreadable, shown)
+                return@withContext StageResult.Refused(StageRefusal.Unreadable, shown)
             }
             if (copied == null) {
-                file.delete()
                 val reason = if (kind == AttachmentKind.Image) StageRefusal.ImageTooLarge else StageRefusal.TooLarge
-                return@withLock StageResult.Refused(reason, shown)
-            }
-            if (_staged.value.sumOf { it.bytes } + copied > AttachmentRules.MAX_TOTAL_BYTES) {
-                file.delete()
-                return@withLock StageResult.Refused(StageRefusal.TotalTooLarge, shown)
+                return@withContext StageResult.Refused(reason, shown)
             }
             var mime = typed
             if (kind == AttachmentKind.Image) {
                 // An image the provider can't decode fails the whole turn: checked now.
-                mime = imageType(file)?.takeIf { it in AttachmentRules.IMAGE_TYPES.values } ?: run {
-                    file.delete()
-                    return@withLock StageResult.Refused(StageRefusal.NotAnImage, shown)
+                mime = imageType(file)?.takeIf { it in AttachmentRules.IMAGE_TYPES.values }
+                    ?: return@withContext StageResult.Refused(StageRefusal.NotAnImage, shown)
+                // So does one the Claude API refuses for its size in pixels.
+                val (w, h) = imageSize(file) ?: (0 to 0)
+                if (w > AttachmentRules.MAX_IMAGE_SIDE || h > AttachmentRules.MAX_IMAGE_SIDE) {
+                    return@withContext StageResult.Refused(StageRefusal.ImageTooWide, shown)
                 }
             }
-            val staged = StagedAttachment(id, shown, copied, mime, kind)
-            _staged.update { it + staged }
-            StageResult.Staged(staged)
+            lock.withLock {
+                // Other picks may have been staged while this one was copied.
+                if (_staged.value.size >= AttachmentRules.MAX_SELECTIONS) return@withLock StageResult.Refused(StageRefusal.TooMany, shown)
+                if (_staged.value.sumOf { it.bytes } + copied > AttachmentRules.MAX_TOTAL_BYTES) {
+                    return@withLock StageResult.Refused(StageRefusal.TotalTooLarge, shown)
+                }
+                val staged = StagedAttachment(id, shown, copied, mime, kind)
+                _staged.update { it + staged }
+                kept = true
+                StageResult.Staged(staged)
+            }
+        } finally {
+            if (!kept) file.delete()
         }
     }
 
@@ -458,22 +505,44 @@ internal class AgentAttachments(
     /**
      * Puts [attachments] back under the composer: their message couldn't
      * be saved after all. Any whose file is gone (the chat was deleted
-     * meanwhile) is dropped.
+     * meanwhile) is dropped. Files picked meanwhile stay; one that would
+     * take the composer past [AttachmentRules.MAX_SELECTIONS] files or
+     * [AttachmentRules.MAX_TOTAL_BYTES] isn't put back: its copy goes, and
+     * it's named in [notPutBack]. Returns those.
      */
-    suspend fun unconsume(sessionId: String, attachments: List<Attachment>) = withContext(Dispatchers.IO) {
-        if (attachments.isEmpty()) return@withContext
+    suspend fun unconsume(sessionId: String, attachments: List<Attachment>): List<StageResult.Refused> = withContext(Dispatchers.IO) {
+        if (attachments.isEmpty()) return@withContext emptyList()
         lock.withLock {
             val dir = chatDir(sessionId)
             val back = ArrayList<StagedAttachment>()
+            val refused = ArrayList<StageResult.Refused>()
+            var count = _staged.value.size
+            var total = _staged.value.sumOf { it.bytes }
             stagedDir.mkdirs()
             for (a in attachments) {
+                val file = File(dir, a.id)
+                if (!file.isFile) continue
+                if (count >= AttachmentRules.MAX_SELECTIONS || total + a.bytes > AttachmentRules.MAX_TOTAL_BYTES) {
+                    file.delete()
+                    refused += StageResult.Refused(StageRefusal.NotPutBack, a.name)
+                    continue
+                }
                 val s = StagedAttachment(newId("selection_"), a.name, a.bytes, a.mimeType, a.kind)
-                if (File(dir, a.id).renameTo(stagedFile(s.id))) back += s
+                if (file.renameTo(stagedFile(s.id))) {
+                    back += s
+                    count++
+                    total += a.bytes
+                } else {
+                    file.delete()
+                    refused += StageResult.Refused(StageRefusal.NotPutBack, a.name)
+                }
             }
             val ids = attachments.map { it.id }.toSet()
             val left = readManifest(dir).filterNot { it.id in ids }
             if (left.isEmpty()) dir.deleteRecursively() else writeManifest(dir, left)
-            _staged.update { (it + back).take(AttachmentRules.MAX_SELECTIONS) }
+            _staged.update { it + back }
+            if (refused.isNotEmpty()) _notPutBack.update { it + refused }
+            refused
         }
     }
 
@@ -658,8 +727,20 @@ internal class AgentAttachments(
         }
 
         fun get(context: Context): AgentAttachments = instance ?: synchronized(this) {
-            instance ?: AgentAttachments(File(context.applicationContext.noBackupFilesDir, DIR), ::decodedImageType)
+            instance ?: AgentAttachments(
+                File(context.applicationContext.noBackupFilesDir, DIR),
+                imageSize = ::decodedImageSize,
+                imageType = ::decodedImageType,
+            )
                 .also { instance = it }
+        }
+
+        /** An image's width and height from its header; null if Android can't read them. */
+        fun decodedImageSize(file: File): Pair<Int, Int>? {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.path, options)
+            if (options.outWidth <= 0 || options.outHeight <= 0) return null
+            return options.outWidth to options.outHeight
         }
 
         /** An image's type from its header, if Android can decode it and it's one a model takes. */
