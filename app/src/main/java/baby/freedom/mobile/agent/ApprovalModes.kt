@@ -26,7 +26,7 @@ internal enum class ApprovalMode(val wire: String) {
 
 /**
  * What an action is, as the approval policy sorts it. Only the first
- * three are website interactions the chat's mode decides; every other
+ * four are website interactions the chat's mode decides; every other
  * kind asks the user in every mode, before any classifier is consulted.
  */
 internal enum class ActionKind {
@@ -38,6 +38,14 @@ internal enum class ActionKind {
 
     /** One that does: asks in "sensitive actions" without asking the model (desktop). */
     FormSubmission,
+
+    /**
+     * Typing or a key into a password or one-time-code field: asks in
+     * "sensitive actions" without asking the model, which is only given
+     * a character count and the page's label for the field (phase 1's
+     * card always flagged these).
+     */
+    Credential,
 
     /** Answering a page's alert, confirm or prompt (desktop asks these in every mode). */
     Dialog,
@@ -65,6 +73,9 @@ internal sealed interface ApprovalCheck {
     /** It sends a form, which isn't left to the model. */
     data object SendsForm : ApprovalCheck
 
+    /** It types into a password or one-time-code field, which isn't left to the model. */
+    data object Credential : ApprovalCheck
+
     /** The check gave no usable answer (an error, a timeout, a reply in the wrong shape). */
     data object NoAnswer : ApprovalCheck
 
@@ -91,7 +102,7 @@ internal sealed interface PolicyDecision {
 internal object ApprovalPolicy {
     /** The kinds that ask in every mode. */
     fun alwaysAsks(kind: ActionKind): Boolean = when (kind) {
-        ActionKind.Navigate, ActionKind.PageInteraction, ActionKind.FormSubmission -> false
+        ActionKind.Navigate, ActionKind.PageInteraction, ActionKind.FormSubmission, ActionKind.Credential -> false
         ActionKind.Dialog, ActionKind.Upload, ActionKind.Download, ActionKind.Transfer, ActionKind.Publish,
         ActionKind.NodeWrite, ActionKind.DomainTransaction, ActionKind.PageTool, ActionKind.Mcp,
         -> true
@@ -102,7 +113,7 @@ internal object ApprovalPolicy {
      * (it can take seconds, and the user may have switched back to
      * asking every time meanwhile). [classify] is only called in
      * "sensitive actions", for a website interaction that isn't a form
-     * submission; anything it throws but a cancellation reads as uncertain.
+     * submission or typing into a password or one-time-code field; anything it throws but a cancellation reads as uncertain.
      */
     suspend fun decide(
         kind: ActionKind,
@@ -115,6 +126,7 @@ internal object ApprovalPolicy {
             ApprovalMode.AllowWebsiteInteractions -> PolicyDecision.Proceed
             ApprovalMode.SensitiveActions -> {
                 if (kind == ActionKind.FormSubmission) return PolicyDecision.Ask(ApprovalCheck.SendsForm)
+                if (kind == ActionKind.Credential) return PolicyDecision.Ask(ApprovalCheck.Credential)
                 val check = try {
                     classify()
                 } catch (e: CancellationException) {
@@ -145,7 +157,7 @@ internal object ApprovalPolicy {
             ApprovalMode.SensitiveActions ->
                 "Freedom independently classifies the intended consequence of each navigation and website " +
                     "interaction. Ordinary browsing may proceed, while consequential or uncertain interactions ask " +
-                    "the user; so does every form submission and every dialog answer. For every browser_click, " +
+                    "the user; so does every form submission, all typing into a password or one-time-code field, and every dialog answer. For every browser_click, " +
                     "browser_type, browser_select, browser_press, and browser_scroll call, include a brief literal " +
                     "intent describing what you expect that exact interaction to accomplish. Dialog answers, " +
                     "uploads, downloads, wallet requests, Swarm and Radicle publishing, signing, messages and writes, " +
@@ -157,8 +169,9 @@ internal object ApprovalPolicy {
                     "writes, and other privileged capabilities keep their " +
                     "separate Freedom approval boundaries."
         }
-        val screen = if (mode == ApprovalMode.EveryInteraction) "" else " An interaction allowed without asking runs " +
-            "only in a tab already on screen; otherwise the user is asked to switch to it."
+        val screen = if (mode == ApprovalMode.EveryInteraction) "" else " A page interaction (click, type, select, " +
+            "press, scroll) allowed without asking runs only in a tab already on screen; otherwise the user is asked " +
+            "to switch to it. A navigation allowed without asking runs in its tab whether or not it is on screen."
         return "Freedom approval policy (this chat's approval mode is ${mode.wire}; the user can change it at any " +
             "time, and this line always shows the current one): $policy$screen Freedom enforces this policy; do not claim " +
             "broader authority."

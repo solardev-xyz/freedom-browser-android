@@ -48,7 +48,7 @@ class ApprovalPolicyTest {
 
     @Test
     fun `allow website interactions runs navigation, interactions and form submissions without a card`() = runBlocking {
-        for (kind in listOf(ActionKind.Navigate, ActionKind.PageInteraction, ActionKind.FormSubmission)) {
+        for (kind in listOf(ActionKind.Navigate, ActionKind.PageInteraction, ActionKind.FormSubmission, ActionKind.Credential)) {
             val check = Counting(InteractionIntentClassifier.uncertain())
             assertEquals(PolicyDecision.Proceed, ApprovalPolicy.decide(kind, { ApprovalMode.AllowWebsiteInteractions }, check::classify))
             assertEquals(0, check.calls)
@@ -78,6 +78,14 @@ class ApprovalPolicyTest {
         val d = ApprovalPolicy.decide(ActionKind.FormSubmission, { ApprovalMode.SensitiveActions }, check::classify)
         assertEquals(0, check.calls)
         assertEquals(PolicyDecision.Ask(ApprovalCheck.SendsForm), d)
+    }
+
+    @Test
+    fun `typing a credential asks in sensitive actions without asking the model`() = runBlocking {
+        val check = Counting(ordinary)
+        val d = ApprovalPolicy.decide(ActionKind.Credential, { ApprovalMode.SensitiveActions }, check::classify)
+        assertEquals(0, check.calls)
+        assertEquals(PolicyDecision.Ask(ApprovalCheck.Credential), d)
     }
 
     @Test

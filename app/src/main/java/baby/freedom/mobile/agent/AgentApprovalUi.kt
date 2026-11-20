@@ -189,6 +189,7 @@ private fun ApprovalBody(approval: AgentApproval) {
             when (check) {
                 is ApprovalCheck.Judged -> stringResource(R.string.agent_approve_check, check.summary)
                 ApprovalCheck.SendsForm -> stringResource(R.string.agent_approve_check_form)
+                ApprovalCheck.Credential -> stringResource(R.string.agent_approve_check_credential)
                 ApprovalCheck.NoAnswer -> stringResource(R.string.agent_approve_check_none)
                 ApprovalCheck.NeedsScreen -> stringResource(R.string.agent_approve_check_screen)
             },

@@ -693,13 +693,20 @@ internal class BrowserToolset(
         fun kindOf(action: AgentAction): ActionKind = when (action) {
             is AgentAction.Navigate -> ActionKind.Navigate
             is AgentAction.Dialog -> ActionKind.Dialog
-            is AgentAction.Click, is AgentAction.Type, is AgentAction.Select, is AgentAction.Press, is AgentAction.Scroll ->
-                when (ApprovalBinding.targetOf(action)?.effect) {
+            is AgentAction.Click, is AgentAction.Type, is AgentAction.Select, is AgentAction.Press, is AgentAction.Scroll -> {
+                val target = ApprovalBinding.targetOf(action)
+                when (target?.effect) {
                     "file_upload" -> ActionKind.Upload
                     "file_download" -> ActionKind.Download
                     "form_submission" -> ActionKind.FormSubmission
-                    else -> ActionKind.PageInteraction
+                    // A credential typed in: the classifier would see only a count and the page's label.
+                    else -> if (target?.sensitive == true && (action is AgentAction.Type || action is AgentAction.Press)) {
+                        ActionKind.Credential
+                    } else {
+                        ActionKind.PageInteraction
+                    }
                 }
+            }
         }
 
         /** [action] as the intent classifier is given it: typed text only as a count (desktop). */

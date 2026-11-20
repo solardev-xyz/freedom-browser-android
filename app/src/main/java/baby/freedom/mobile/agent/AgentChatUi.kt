@@ -236,9 +236,15 @@ private fun ChatView(
     var draft by rememberSaveable(saver = ComposerSaver) { mutableStateOf("") }
     var picked by rememberSaveable(sessionId, saver = ModelRefSaver) { mutableStateOf(null) }
     var sendFailed by remember { mutableStateOf(false) }
-    // The approval mode (#595): the chat's own, or for a chat not started yet the one picked.
-    var pickedMode by rememberSaveable(sessionId) { mutableStateOf(ApprovalMode.DEFAULT.wire) }
-    val mode = session?.let { ApprovalMode.of(it.approvalMode) } ?: ApprovalMode.of(pickedMode)
+    // The approval mode (#595): the chat's own, else the one last picked or sent for this chat
+    // (a new chat's pick, which holds once its first send has started it until its row loads,
+    // so the picker never shows a mode the chat isn't under). Not keyed to [sessionId], which
+    // changes when the first send starts the chat; [pickedFor] names the chat the pick is for.
+    var pickedMode by rememberSaveable { mutableStateOf(ApprovalMode.DEFAULT.wire) }
+    var pickedFor by rememberSaveable { mutableStateOf<String?>(null) }
+    val mode = session?.let { ApprovalMode.of(it.approvalMode) }
+        ?: ApprovalMode.of(pickedMode).takeIf { pickedFor == sessionId }
+        ?: ApprovalMode.DEFAULT
     var modeFailed by remember(sessionId) { mutableStateOf(false) }
     // When the last send came back: its turn's Stop can show a frame later.
     val sentAt = remember { mutableLongStateOf(Long.MIN_VALUE / 2) }
@@ -403,8 +409,18 @@ private fun ChatView(
                     modeFailed = false
                     if (sessionId == null) {
                         pickedMode = m.wire
+                        pickedFor = null
                     } else {
-                        scope.launch { if (!chats.setMode(sessionId, m)) modeFailed = true }
+                        val id = sessionId
+                        scope.launch {
+                            if (chats.setMode(id, m)) {
+                                // Shown until the chat's row reads it back.
+                                pickedMode = m.wire
+                                pickedFor = id
+                            } else {
+                                modeFailed = true
+                            }
+                        }
                     }
                 }
             }
@@ -509,6 +525,9 @@ private fun ChatView(
                                             draft = ""
                                             dictation?.edited("")
                                         }
+                                        // The mode it was sent with stays shown once it's started.
+                                        pickedMode = mode.wire
+                                        pickedFor = id
                                         onStarted(id)
                                     }
                                 } finally {

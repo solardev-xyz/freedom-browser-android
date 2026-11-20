@@ -777,5 +777,28 @@ class BrowserToolsTest {
         assertEquals(ActionKind.Navigate, BrowserToolset.kindOf(AgentAction.Navigate("https://a.example/", newTab = true)))
         assertEquals(ActionKind.Dialog, BrowserToolset.kindOf(AgentAction.Dialog("alert", "hi", true, null)))
         assertEquals(ActionKind.PageInteraction, BrowserToolset.kindOf(AgentAction.Scroll(null, "down", 1.0)))
+        // A password or one-time-code field: typing or a key into it is a credential; a tap isn't.
+        val code = PageTarget("textbox", "input", "Code", sensitive = true)
+        assertEquals(ActionKind.Credential, BrowserToolset.kindOf(AgentAction.Type(code, "123456", replace = true)))
+        assertEquals(ActionKind.Credential, BrowserToolset.kindOf(AgentAction.Press(code, "5")))
+        assertEquals(ActionKind.PageInteraction, BrowserToolset.kindOf(AgentAction.Click(code)))
+        // The page's markup for a form still wins: it asks either way.
+        assertEquals(ActionKind.FormSubmission, BrowserToolset.kindOf(AgentAction.Press(code.copy(effect = "form_submission"), "Enter")))
+    }
+
+    @Test
+    fun `typing into a password or one-time-code field asks in sensitive actions without the model`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        host.control = JSONObject().put("role", "textbox").put("tag", "input").put("name", "Code").put("sensitive", true)
+        val approvals = Approvals(ApprovalMode.SensitiveActions, ordinary)
+        val tools = toolset(approvals = approvals)
+        val ref = snapshotRef(tools)
+        answer = { ApprovalOutcome.Declined }
+        assertEquals("USER_DECLINED", tools.call("browser_type", JSONObject().put("ref", ref).put("text", "123456")).code())
+        val card = asked.single()
+        assertEquals(ApprovalCheck.Credential, card.check)
+        assertTrue((card.action as AgentAction.Type).target.sensitive)
+        assertTrue(approvals.inputs.isEmpty())
     }
 }

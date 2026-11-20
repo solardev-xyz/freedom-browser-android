@@ -171,9 +171,9 @@
     <string name="agent_mode_every">Ask every time</string>
     <string name="agent_mode_every_hint">Every page visit, tap, typing and scroll waits for your OK.</string>
     <string name="agent_mode_sensitive">Ask when it matters</string>
-    <string name="agent_mode_sensitive_hint">Your model checks each step first. Ordinary browsing runs on its own; anything that sends, buys, posts or changes an account asks, and so does anything the check isn\'t sure about, or a step in a tab that isn\'t on screen.</string>
+    <string name="agent_mode_sensitive_hint">Your model checks each step first. Ordinary browsing runs on its own; anything that sends, buys, posts or changes an account asks, and so does typing a password or one-time code, anything the check isn\'t sure about, or a tap, typing, key or scroll in a tab that isn\'t on screen.</string>
     <string name="agent_mode_allow">Allow site actions</string>
-    <string name="agent_mode_allow_hint">Page visits and page interactions run without asking. A step in a tab that isn\'t on screen asks you to switch to it.</string>
+    <string name="agent_mode_allow_hint">Page visits and page interactions run without asking. A page visit runs even in a tab that isn\'t on screen; a tap, typing, key or scroll there asks you to switch to it.</string>
     <string name="agent_mode_always">Whatever you pick, answering a page\'s dialog, uploads, downloads, wallet requests and Swarm or Radicle publishing, signing and writes always ask.</string>
     <string name="agent_mode_label">Approvals: %1$s</string>
     <string name="agent_mode_save_failed">Couldn\'t change the approvals for this chat. Try again.</string>
@@ -241,6 +241,7 @@
     <!-- "Ask when it matters" (#595): why this one asks, in the model's words. -->
     <string name="agent_approve_check">Your model\'s check: “%1$s”</string>
     <string name="agent_approve_check_form">Asked because this sends a form.</string>
+    <string name="agent_approve_check_credential">Asked because this types into a password or one-time code field.</string>
     <string name="agent_approve_check_none">Asked because your model couldn\'t check this step.</string>
     <string name="agent_approve_check_screen">Asked because this step needs its tab on screen, and only you switch to it.</string>
     <string name="agent_approve_untrusted">Names and messages come from the website.</string>
