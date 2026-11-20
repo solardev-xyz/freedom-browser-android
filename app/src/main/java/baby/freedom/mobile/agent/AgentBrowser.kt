@@ -93,15 +93,18 @@ internal interface AgentBrowserHost {
      * the active tab and closes the agent's chat and the other plain
      * panels over the page. True once the page is on screen, uncovered,
      * with the app in front; false if it can't be (a wallet page, say).
+     * If the agent's chat page was open over it and had to close, chat
+     * [chat] is the one the page opens on again next time
+     * ([AgentBrowser.chatTookScreen]); otherwise nothing is remembered.
      */
-    suspend fun bringToFront(id: Long): Boolean
+    suspend fun bringToFront(id: Long, chat: String? = null): Boolean
 
     /**
      * A tap at ([x], [y]) in the WebView's own pixels. [proceed] is asked
      * before the finger lifts: false cancels the touch instead (the tab
-     * was taken back mid-tap), and the tap returns false.
+     * was taken back mid-tap), as does the tab going off screen meanwhile.
      */
-    suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean = { true }): Boolean
+    suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean = { true }): AgentTap
 
     /** Presses and releases [keyCode] in the focused element. */
     fun key(id: Long, keyCode: Int): Boolean
@@ -116,6 +119,22 @@ internal interface AgentBrowserHost {
     fun answerDialog(id: Long, dialog: AgentDialog, accept: Boolean, promptText: String?): Boolean
 }
 
+/** How a [AgentBrowserHost.tap] ended. */
+internal enum class AgentTap {
+    /** Down and up: the page had a whole tap. */
+    Tapped,
+
+    /** Never touched: not on screen, or outside the visible page. */
+    NotTouched,
+
+    /**
+     * Touched, then cancelled before the finger lifted (taken back, or
+     * the tab went off screen): the page saw the touch start
+     * (touchstart, pointerdown) but no click.
+     */
+    Cancelled,
+}
+
 /** Where the tools reach the browser: null while there's no WebView host (no Activity). */
 internal object AgentBrowser {
     @Volatile
@@ -123,15 +142,17 @@ internal object AgentBrowser {
 
     /**
      * Installed by the browser screen: closes the agent's chat and the
-     * plain panels and shows tab [id]. Null before the screen composes.
+     * plain panels and shows tab [id]; true if the chat page was open
+     * and closed for it. Null before the screen composes.
      */
     @Volatile
-    var showTab: ((Long) -> Unit)? = null
+    var showTab: ((Long) -> Boolean)? = null
 
     /**
      * The chat whose approved input last took the screen from the chat
-     * page ([BrowserToolset]): the page opens on it again next time,
-     * instead of on a new chat. Taken once.
+     * page ([AgentBrowserHost.bringToFront] closed the page for it): the
+     * page opens on it again next time, instead of on a new chat. Set
+     * only then, never for an input on a tab already on screen. Taken once.
      */
     private val reopen = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
@@ -236,9 +257,12 @@ private class BrowserTabsHost(
             wv.isAttachedToWindow && wv.isShown && wv.width > 0 && wv.height > 0
     }
 
-    override suspend fun bringToFront(id: Long): Boolean {
+    override suspend fun bringToFront(id: Long, chat: String?): Boolean {
         if (state(id) == null) return false
-        if (!onScreen(id)) AgentBrowser.showTab?.invoke(id)
+        if (!onScreen(id)) {
+            val closedChat = AgentBrowser.showTab?.invoke(id) == true
+            if (closedChat && chat != null) AgentBrowser.chatTookScreen(chat)
+        }
         // Laid out and drawn once more, so the page's coordinates are the ones on screen.
         return withTimeoutOrNull(3_000) {
             while (!onScreen(id)) delay(50)
@@ -249,9 +273,9 @@ private class BrowserTabsHost(
 
     private fun page(id: Long): PageWebView? = (webViewFor(id) as? PageWebView)?.takeIf { onScreen(id) }
 
-    override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean): Boolean {
-        val wv = page(id) ?: return false
-        if (x < 0 || y < 0 || x >= wv.width || y >= wv.height) return false
+    override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean): AgentTap {
+        val wv = page(id) ?: return AgentTap.NotTouched
+        if (x < 0 || y < 0 || x >= wv.width || y >= wv.height) return AgentTap.NotTouched
         val down = SystemClock.uptimeMillis()
         touch(wv, down, down, MotionEvent.ACTION_DOWN, x, y)
         delay(60)
@@ -259,7 +283,7 @@ private class BrowserTabsHost(
         // the page sees no click, and no long press either.
         val go = proceed() && page(id) === wv
         touch(wv, down, SystemClock.uptimeMillis(), if (go) MotionEvent.ACTION_UP else MotionEvent.ACTION_CANCEL, x, y)
-        return go
+        return if (go) AgentTap.Tapped else AgentTap.Cancelled
     }
 
     /** One touch event into [wv], handed back to the pool once Chromium has it. */

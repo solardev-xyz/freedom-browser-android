@@ -325,8 +325,8 @@ internal class BrowserToolset(
         // On screen, then everything the card named checked again on the live tab.
         // Still this chat's (taken back while it was asked, the card was withdrawn).
         ownedTab(tab.id, readable = true)
-        AgentBrowser.chatTookScreen(sessionId)
-        if (!onMain { host().bringToFront(tab.id) }) {
+        // Back to this chat next time only if its page closed for the tab.
+        if (!onMain { host().bringToFront(tab.id, chat = sessionId) }) {
             throw ToolError(
                 ToolError.CAPABILITY_UNAVAILABLE,
                 "The tab couldn't be put on screen (another Freedom page is open over it, or the app is in the " +
@@ -404,16 +404,30 @@ internal class BrowserToolset(
         return p
     }
 
-    /** A tap, checked against the approval just before it lands and again before the finger lifts. */
+    /**
+     * A tap, checked against the approval just before it lands and again
+     * before the finger lifts. False if it never touched the page; a tap
+     * cancelled after the touch went down throws, saying the page may
+     * already have acted on it (a widget that works on pointerdown).
+     */
     private suspend fun tap(r: Run, p: JSONObject, started: Boolean): Boolean = onMain {
         stillBound(r.approval, started)
         val approval = r.approval
-        val ok = host().tap(r.tab.id, p.getDouble("x").toFloat(), p.getDouble("y").toFloat()) {
+        val result = host().tap(r.tab.id, p.getDouble("x").toFloat(), p.getDouble("y").toFloat()) {
             runCatching { stillBound(approval, true) }.isSuccess
         }
-        // Let go of (cancelled) because the tab was taken back: say so.
-        if (!ok) stillBound(approval, true)
-        ok
+        if (result == AgentTap.Cancelled) {
+            // Let go of because the tab was taken back (or navigated): say so.
+            stillBound(approval, true)
+            // Still held, but the tab went off screen with the finger down.
+            throw ToolError(
+                ToolError.CAPABILITY_UNAVAILABLE,
+                "The tab went off screen during the tap (another Freedom page opened over it, or the app went to the " +
+                    "background), so the touch was cancelled. It had already started on the page: the page may have " +
+                    "acted on it. Take a new snapshot to see, and ask the user to return to the tab.",
+            )
+        }
+        result == AgentTap.Tapped
     }
 
     private suspend fun click(r: Run): ToolOutcome {

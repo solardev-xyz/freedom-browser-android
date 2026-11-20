@@ -270,8 +270,8 @@ class AgentLoopTest {
         override fun close(id: Long) = Unit
         override fun stop(id: Long) = Unit
         override suspend fun evaluate(id: Long, script: String, timeoutMs: Long): String? = null
-        override suspend fun bringToFront(id: Long) = false
-        override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean) = false
+        override suspend fun bringToFront(id: Long, chat: String?) = false
+        override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean) = AgentTap.NotTouched
         override fun key(id: Long, keyCode: Int) = false
         override suspend fun commitText(id: Long, text: String) = false
         override fun dialog(id: Long): AgentDialog? = null

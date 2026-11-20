@@ -11,6 +11,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -93,8 +94,10 @@ class BrowserToolsTest {
 
         private fun tokenOf(script: String) = JSONObject(script.substringAfter("\",").removeSuffix(")")).getString("token")
 
-        override suspend fun bringToFront(id: Long): Boolean {
+        val frontedFor = ArrayList<String?>()
+        override suspend fun bringToFront(id: Long, chat: String?): Boolean {
             fronted += id
+            frontedFor += chat
             onFront()
             return canFront
         }
@@ -103,14 +106,17 @@ class BrowserToolsTest {
         var duringTap: () -> Unit = {}
         val cancelledTaps = ArrayList<Pair<Float, Float>>()
 
-        override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean): Boolean {
+        /** The tab goes off screen with the finger down: the host cancels the touch. */
+        var offScreenMidTap = false
+
+        override suspend fun tap(id: Long, x: Float, y: Float, proceed: () -> Boolean): AgentTap {
             duringTap()
-            if (!proceed()) {
+            if (!proceed() || offScreenMidTap) {
                 cancelledTaps += x to y
-                return false
+                return AgentTap.Cancelled
             }
             taps += x to y
-            return true
+            return AgentTap.Tapped
         }
 
         val keys = ArrayList<Int>()
@@ -270,7 +276,26 @@ class BrowserToolsTest {
         assertEquals(PageTarget("button", "button", "Search"), (a.action as AgentAction.Click).target)
         assertEquals("Run the search", a.intent)
         assertEquals(listOf(1L), host.fronted)
+        assertEquals(listOf<String?>("chat"), host.frontedFor)
         assertEquals(listOf(100f to 200f), host.taps)
+        // The tab was already on screen (the fake host closed no chat page):
+        // the tools themselves never mark the chat to reopen.
+        assertNull(AgentBrowser.takeChatToReopen())
+    }
+
+    @Test
+    fun `a tap cancelled because the tab went off screen says it may have reached the page`() = runBlocking {
+        host.add(page(1))
+        AgentTabs.hold(1, "chat", private = false)
+        val tools = toolset()
+        val ref = snapshotRef(tools)
+        host.offScreenMidTap = true
+        val out = tools.call("browser_click", JSONObject().put("ref", ref))
+        assertEquals("CAPABILITY_UNAVAILABLE", out.code())
+        assertTrue(out.output, out.output.contains("may have acted"))
+        assertFalse(out.output, out.output.contains("Nothing was clicked"))
+        assertEquals(listOf(100f to 200f), host.cancelledTaps)
+        assertTrue(host.taps.isEmpty())
     }
 
     @Test
@@ -500,7 +525,7 @@ class BrowserToolsTest {
         assertFalse(tools.call("browser_type", JSONObject().put("ref", ref2).put("text", "hi\nthere")).isError)
         assertEquals(listOf("hi\nthere"), host.commits)
         val typed = (asked.single().action as AgentAction.Type).text
-        assertEquals(ApprovalText.Typed.Shown("hi ↵ there"), ApprovalText.typed(typed, 2_000))
+        assertEquals(ApprovalText.Typed.Shown("hi↵\nthere"), ApprovalText.typed(typed, 2_000))
     }
 
     @Test

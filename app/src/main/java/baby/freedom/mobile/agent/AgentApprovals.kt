@@ -197,16 +197,59 @@ internal object ApprovalText {
     }
 
     /**
-     * What a Type card shows for [text]: flattened, with each line break
-     * marked ↵ rather than run into a space, so the card says where a new
-     * line goes; text that's only blank space is counted, not shown blank.
+     * What a Type card shows for [text]: every character the field will
+     * get, not [flatten]ed. Each line break is marked ↵ and starts a new
+     * line on the card; a tab shows as ⇥; spaces stay as typed (a run of
+     * them too), and those that would draw nothing — at the start or end
+     * of the text or of a line — show as ␣. Controls and anything that
+     * hides ([MessageSigning.hides]) show as U+FFFD. Text that's only
+     * spaces is counted, not shown blank. Cut at [max] code points.
      */
     fun typed(text: String, max: Int): Typed {
         if (text.isEmpty()) return Typed.Empty
-        val marked = text.replace("\r\n", "\n").map { if (isLineBreak(it)) " ↵ " else it.toString() }.joinToString("")
-        val shown = flatten(marked, max)
-        return if (shown.isEmpty()) Typed.Blank(text.codePointCount(0, text.length)) else Typed.Shown(shown)
+        val t = text.replace("\r\n", "\n")
+        val cps = t.codePoints().toArray()
+        if (cps.all { isTypedSpace(it) }) return Typed.Blank(cps.size)
+        val scan = MessageSigning.Scan()
+        val out = StringBuilder()
+        var cut = false
+        var i = 0
+        while (i < cps.size) {
+            if (i >= max) {
+                cut = true
+                break
+            }
+            val cp = cps[i]
+            val hidden = scan.hides(cp)
+            when {
+                cp == '\n'.code || cp == '\r'.code || cp == 0x2028 || cp == 0x2029 -> out.append("↵\n")
+                cp == '\t'.code -> out.append('⇥')
+                isTypedSpace(cp) -> {
+                    // The whole run: as typed between two characters on a line, ␣ at an edge.
+                    var j = i
+                    while (j < cps.size && isTypedSpace(cps[j])) j++
+                    val edge = i == 0 || j == cps.size || isLineBreakCp(cps[i - 1]) || isLineBreakCp(cps[j])
+                    val end = minOf(j, max)
+                    for (k in i until end) {
+                        if (k > i) scan.hides(cps[k])
+                        if (edge) out.append('␣') else out.appendCodePoint(cps[k])
+                    }
+                    i = end
+                    continue
+                }
+                hidden || Character.isISOControl(cp) -> out.append('\uFFFD')
+                else -> out.appendCodePoint(cp)
+            }
+            i++
+        }
+        val shown = out.toString().removeSuffix("\n")
+        return Typed.Shown(if (cut) "$shown…" else shown)
     }
+
+    private fun isLineBreakCp(cp: Int) = cp < 0x10000 && isLineBreak(cp.toChar())
+
+    /** A space the field takes as is: U+0020 and the other space separators (no-break space, say). */
+    private fun isTypedSpace(cp: Int) = cp == ' '.code || (Character.isSpaceChar(cp) && cp != 0x2028 && cp != 0x2029)
 }
 
 /**

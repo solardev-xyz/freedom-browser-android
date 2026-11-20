@@ -3727,7 +3727,8 @@ fun BrowserScreen(
     // the agent's chat and the plain panels close; a wallet page stays.
     baby.freedom.mobile.agent.AgentApprovalHost()
     DisposableEffect(tabs) {
-        val show: (Long) -> Unit = { id ->
+        val show: (Long) -> Boolean = { id ->
+            val closedChat = showAgent
             showAgent = false
             showTabSwitcher = false
             showHistory = false
@@ -3739,6 +3740,7 @@ fun BrowserScreen(
             showLogs = null
             val index = tabs.tabs.indexOfFirst { it.id == id }
             if (index >= 0) tabs.switchTo(index)
+            closedChat
         }
         baby.freedom.mobile.agent.AgentBrowser.showTab = show
         onDispose {

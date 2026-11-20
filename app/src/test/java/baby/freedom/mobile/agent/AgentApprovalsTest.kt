@@ -167,13 +167,29 @@ class AgentApprovalsTest {
     }
 
     @Test
+    fun `typed text is shown in full - tabs, runs of spaces and edge spaces included`() {
+        assertEquals(ApprovalText.Typed.Shown("a⇥b"), ApprovalText.typed("a\tb", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("␣␣code␣␣"), ApprovalText.typed("  code  ", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("a   b"), ApprovalText.typed("a   b", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("a\u00A0b"), ApprovalText.typed("a\u00A0b", 2_000))
+        // Spaces that would draw nothing at a line's end or start.
+        assertEquals(ApprovalText.Typed.Shown("x␣↵\n␣␣y"), ApprovalText.typed("x \n  y", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("⇥⇥"), ApprovalText.typed("\t\t", 2_000))
+        // Controls and hiding characters are marked, never dropped.
+        assertEquals(ApprovalText.Typed.Shown("a\uFFFDb"), ApprovalText.typed("a\u0007b", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("a\uFFFDb"), ApprovalText.typed("a\u202Eb", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("ab…"), ApprovalText.typed("abcd", 2))
+        assertEquals(ApprovalText.Typed.Shown("␣␣…"), ApprovalText.typed("    x", 2))
+    }
+
+    @Test
     fun `typed text shows its line breaks, and blank text is counted, not shown blank`() {
         assertEquals(ApprovalText.Typed.Empty, ApprovalText.typed("", 2_000))
         assertEquals(ApprovalText.Typed.Blank(3), ApprovalText.typed("   ", 2_000))
         assertEquals(ApprovalText.Typed.Blank(1), ApprovalText.typed("\u00A0", 2_000))
         assertEquals(ApprovalText.Typed.Shown("↵"), ApprovalText.typed("\n", 2_000))
-        assertEquals(ApprovalText.Typed.Shown("Dear Ann, ↵ ↵ see you"), ApprovalText.typed("Dear Ann,\r\n\nsee you", 2_000))
-        assertEquals(ApprovalText.Typed.Shown("a ↵ b"), ApprovalText.typed("a\u2028b", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("Dear Ann,↵\n↵\nsee you"), ApprovalText.typed("Dear Ann,\r\n\nsee you", 2_000))
+        assertEquals(ApprovalText.Typed.Shown("a↵\nb"), ApprovalText.typed("a\u2028b", 2_000))
         assertTrue(ApprovalText.onlyLineBreaks("\r\n"))
         assertFalse(ApprovalText.onlyLineBreaks(" \n"))
         assertFalse(ApprovalText.onlyLineBreaks(""))
