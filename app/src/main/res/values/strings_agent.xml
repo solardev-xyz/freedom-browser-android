@@ -285,6 +285,7 @@
     <string name="agent_dictation_no_speech">Didn\'t hear anything.</string>
     <string name="agent_dictation_permission">Freedom isn\'t allowed to use the microphone. Turn it on in Android settings.</string>
     <string name="agent_dictation_language">The recognizer doesn\'t have %1$s. Pick another language in Settings → AI → Voice dictation.</string>
+    <string name="agent_dictation_finishing">Finishing… keeping what was heard.</string>
     <string name="agent_dictation_done">Added to your message.</string>
     <string name="agent_dictation_on_device_failed">Android\'s on-device recognizer didn\'t answer. Try again.</string>
     <string name="agent_dictation_network">Couldn\'t reach your phone\'s speech service. Try again.</string>

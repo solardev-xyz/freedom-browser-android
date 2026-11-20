@@ -151,8 +151,12 @@ internal sealed interface DictationStatus {
     /** The last run ended with text in the draft (said once to TalkBack). */
     data object Done : DictationStatus
 
-    /** Listening with [kind]; [hearing] once the recognizer is ready for speech. */
-    data class Listening(val kind: RecognizerKind, val hearing: Boolean) : DictationStatus
+    /**
+     * Listening with [kind]; [hearing] once the recognizer is ready for
+     * speech; [finishing] once asked to stop, while the recognizer works
+     * out what was heard (up to [Dictation.FINISH_DEADLINE_MS]).
+     */
+    data class Listening(val kind: RecognizerKind, val hearing: Boolean, val finishing: Boolean = false) : DictationStatus
 
     /** The last run stopped on [failure]; the draft keeps whatever it showed. */
     data class Failed(val failure: DictationFailure, val kind: RecognizerKind) : DictationStatus
@@ -231,7 +235,7 @@ internal class Dictation(
         _status.value = DictationStatus.Listening(kind, hearing = false)
         val events = object : Recognizer.Events {
             override fun ready() {
-                if (mine == run && listening) _status.value = DictationStatus.Listening(kind, hearing = true)
+                if (mine == run && listening) _status.value = DictationStatus.Listening(kind, hearing = true, finishing = finishing)
             }
 
             override fun partial(text: String) {
@@ -271,9 +275,11 @@ internal class Dictation(
 
     /** Stops listening and keeps what's recognized from what was heard so far. */
     fun finish() {
-        if (!listening) return
+        // A second tap while finishing changes nothing: the first one's deadline stands.
+        if (!listening || finishing) return
         val mine = run
         finishing = true
+        (_status.value as? DictationStatus.Listening)?.let { _status.value = it.copy(finishing = true) }
         try {
             recognizer?.stop()
         } catch (e: RuntimeException) {

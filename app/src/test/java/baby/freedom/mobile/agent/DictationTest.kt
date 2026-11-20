@@ -277,4 +277,51 @@ class DictationTest {
         assertFalse(d.listening)
         assertTrue(fake.destroyed)
     }
+
+    @Test
+    fun `finishing shows at once, survives a late ready, and a second tap does nothing more`() {
+        val (d, fake, draft) = setUp()
+        d.start("", "en")
+        fake.last.partial("hello")
+        d.finish()
+        assertEquals(DictationStatus.Listening(RecognizerKind.OnDevice, hearing = false, finishing = true), d.status.value)
+        fake.last.ready()
+        assertEquals(DictationStatus.Listening(RecognizerKind.OnDevice, hearing = true, finishing = true), d.status.value)
+        d.finish()
+        assertEquals(1, fake.stops)
+        assertEquals(1, later.size)
+        fake.last.final("hello there")
+        assertEquals("hello there", draft())
+        assertEquals(DictationStatus.Done, d.status.value)
+    }
+
+    @Test
+    fun `a run started after a finished one isn't finishing`() {
+        val (d, fake, _) = setUp()
+        d.start("", "en")
+        d.finish()
+        fake.last.final("one")
+        d.start("one", "en")
+        assertEquals(DictationStatus.Listening(RecognizerKind.OnDevice, hearing = false), d.status.value)
+    }
+
+    @Test
+    fun `the draft cleared after Send takes a finished run's line with it`() {
+        val (d, fake, _) = setUp()
+        d.start("", "en")
+        fake.last.final("book a table")
+        assertEquals(DictationStatus.Done, d.status.value)
+        d.edited("")
+        assertEquals(DictationStatus.Idle, d.status.value)
+    }
+
+    @Test
+    fun `a run whose draft is cleared under it stops rather than write the old text back`() {
+        val (d, fake, draft) = setUp()
+        d.start("sent text", "en")
+        d.edited("")
+        assertFalse(d.listening)
+        fake.last.partial("new words")
+        assertEquals("", draft())
+    }
 }

@@ -88,6 +88,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import baby.freedom.mobile.R
 import baby.freedom.mobile.browser.EmptyState
 import baby.freedom.mobile.browser.FullScreenScaffold
+import baby.freedom.mobile.browser.noteAndroidRefusal
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -245,7 +246,17 @@ private fun ChatView(
         dictation?.status ?: MutableStateFlow(DictationStatus.Idle)
     }.collectAsState()
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) dictation?.start(draft, language) else dictation?.refused()
+        if (granted) {
+            // Not into a draft that's being sent (Send can't be tapped
+            // over the dialog, but its send may still be under way).
+            if (!sending.value) dictation?.start(draft, language)
+        } else {
+            // The same refusal bookkeeping as a site's microphone: a
+            // refusal here still lets a site the user later allows the
+            // microphone point them at Android settings.
+            context.findHostActivity()?.let { noteAndroidRefusal(it, Manifest.permission.RECORD_AUDIO) }
+            dictation?.refused()
+        }
     }
     val approval by AgentApprovals.shown.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -261,6 +272,8 @@ private fun ChatView(
     // Another chat, an approval card over the chat, or a new language:
     // dictation stops, keeping what the draft shows.
     LaunchedEffect(sessionId, approval != null, language) { dictation?.cancel() }
+    // A finished run's or a failure's line is about the chat it was in.
+    LaunchedEffect(sessionId) { dictation?.dismiss() }
 
     if (choices.isEmpty() && turns.isEmpty()) {
         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -375,6 +388,9 @@ private fun ChatView(
                     trailingIcon = dictation?.let { d ->
                         {
                             MicButton(d.kind, dictationStatus) {
+                                // The draft is on its way: dictating now would add
+                                // to text that's about to be cleared.
+                                if (sending.value) return@MicButton
                                 if (d.listening) {
                                     d.finish()
                                 } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -433,7 +449,12 @@ private fun ChatView(
                                         sendFailed = true
                                     } else {
                                         // Only what was sent: anything typed meanwhile stays.
-                                        if (draft == text) draft = ""
+                                        // Through [Dictation.edited] like any other change,
+                                        // so a finished run's line goes with the text.
+                                        if (draft == text) {
+                                            draft = ""
+                                            dictation?.edited("")
+                                        }
                                         onStarted(id)
                                     }
                                 } finally {
@@ -461,8 +482,14 @@ private fun ChatView(
 @Composable
 private fun MicButton(kind: RecognizerKind, status: DictationStatus, onClick: () -> Unit) {
     if (status is DictationStatus.Listening) {
-        FilledIconButton(onClick = onClick) {
-            Icon(Icons.Filled.Mic, contentDescription = stringResource(R.string.agent_dictate_stop))
+        // While finishing, a second tap has nothing more to do.
+        FilledIconButton(onClick = onClick, enabled = !status.finishing) {
+            Icon(
+                Icons.Filled.Mic,
+                contentDescription = stringResource(
+                    if (status.finishing) R.string.agent_dictation_finishing else R.string.agent_dictate_stop,
+                ),
+            )
         }
     } else {
         IconButton(onClick = onClick) {
@@ -491,6 +518,7 @@ private fun DictationLine(status: DictationStatus, language: String, onOpenAndro
         is DictationStatus.Listening -> Text(
             stringResource(
                 when {
+                    status.finishing -> R.string.agent_dictation_finishing
                     !status.hearing -> R.string.agent_dictation_starting
                     status.kind == RecognizerKind.OnDevice -> R.string.agent_dictation_listening_on_device
                     else -> R.string.agent_dictation_listening_service
@@ -831,4 +859,10 @@ private fun ChatList(
             },
         )
     }
+}
+
+private tailrec fun Context.findHostActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findHostActivity()
+    else -> null
 }
