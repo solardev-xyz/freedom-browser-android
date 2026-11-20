@@ -593,14 +593,22 @@ class NameRegistrar internal constructor(
      * [NameException.Code.SECURE_STORAGE] says the file couldn't be
      * emptied or deleted ([NameJournal.erase]), for Remove wallet to say so.
      */
+    /**
+     * A [wipe] left the journal on disk: the list here is already empty, so
+     * this is what says another try is due (the wallet page, with no wallet).
+     */
+    @Volatile
+    var eraseOwed = false
+        private set
+
     suspend fun wipe() {
         loaded.await()
         writing.withLock {
             // Gone from memory whatever the disk does: nothing here may go on naming the wallet's addresses.
             _operations.value = emptyList()
-            if (!withContext(io) { journal.erase() }) {
-                refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_wipe))
-            }
+            val erased = withContext(io) { journal.erase() }
+            eraseOwed = !erased
+            if (!erased) refuse(NameException.Code.SECURE_STORAGE, Strings.get(R.string.namereg_error_wipe))
         }
     }
 

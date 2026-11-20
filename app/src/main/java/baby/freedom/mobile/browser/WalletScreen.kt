@@ -945,10 +945,10 @@ fun WalletScreen(
             history.wipe()
             incoming.wipe()
             // Name operations left by a Remove wallet whose wipe didn't reach the disk
-            // (read back at the next start): none can belong to anyone now (#579).
+            // (still owed, or read back at the next start): none can belong to anyone now (#579).
             val names = NameRegistrar.get(context)
             names.awaitLoaded()
-            if (names.operations.value.orEmpty().isNotEmpty()) {
+            if (names.eraseOwed || names.operations.value.orEmpty().isNotEmpty()) {
                 try {
                     names.wipe()
                 } catch (e: NameException) {
@@ -1746,7 +1746,7 @@ fun WalletScreen(
                             } catch (e: NameException) {
                                 // The wallet goes regardless (as with its Google backup); the page says what stayed.
                                 android.util.Log.w("WalletScreen", "couldn't forget the name operations (${e.code})")
-                                namesLeft = e.message
+                                namesLeft = Strings.get(R.string.wallet_removed_names_not_deleted)
                             }
                         },
                     )
@@ -1757,7 +1757,7 @@ fun WalletScreen(
                     error = listOfNotNull(
                         backupLeft?.let { Strings.get(R.string.wallet_removed_backup_not_deleted, it) },
                         backupKeptMessage(backupKept),
-                        namesLeft?.let { Strings.get(R.string.wallet_removed_names_not_deleted, it) },
+                        namesLeft,
                     ).joinToString("\n\n").ifEmpty { error }
                     backupCheck++
                 }

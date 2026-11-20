@@ -677,12 +677,17 @@ class NameRegistrarTest {
             assertEquals(NameException.Code.SECURE_STORAGE, e.code)
         }
         assertEquals(emptyList<NameOperation>(), r.operations.value)
-        // Next time the journal is read back, it's tried again (the wallet page, with no wallet).
+        assertTrue("another try is owed though the list is empty", r.eraseOwed)
+        // Tried again on the same instance (the wallet page, with no wallet): the disk takes it this time.
         j.failSaves = false
-        val again = registrar(j)
-        assertEquals(1, again.operations.value!!.size)
-        again.wipe()
+        r.wipe()
+        assertFalse(r.eraseOwed)
         assertEquals(emptyList<NameOperation>(), j.saved)
+        // After a restart, what a failed wipe left is read back: the list itself says a try is due.
+        val left = r.start(r.check("freedom.wei", NameContracts.YEAR), Intent.REGISTER, me, 0)
+        val restarted = registrar(NameJournal.Memory(j.saved))
+        assertFalse(restarted.eraseOwed)
+        assertEquals(listOf(left.id), restarted.operations.value!!.map { it.id })
     }
 
     @Test
