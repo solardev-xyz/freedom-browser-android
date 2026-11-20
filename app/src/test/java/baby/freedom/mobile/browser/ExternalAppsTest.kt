@@ -57,18 +57,37 @@ class ExternalAppsTest {
     }
 
     @Test
+    fun `a remembered or this-run open-in-app Allow doesn't answer in a tab Freedom Agent holds (#605)`() {
+        val o = PermissionScope("https://example.com")
+        val magnet = ExternalScheme("magnet")
+        val remembered = mapOf<SiteCapability, PermissionDecision>(magnet to PermissionDecision.ALLOW)
+        // The user's own tab: the remembered "always open" launches with no prompt.
+        assertEquals(PermissionPlan.Grant, planFor(o, listOf(magnet), remembered, PermissionSession(), agentHeld = false))
+        // Held: asked instead, whether the Allow is remembered or this run's.
+        assertEquals(PermissionPlan.Ask(listOf(magnet)), planFor(o, listOf(magnet), remembered, PermissionSession(), agentHeld = true))
+        val s = PermissionSession()
+        s.record(o, magnet, PermissionDecision.ALLOW, remembered = false)
+        assertEquals(PermissionPlan.Ask(listOf(magnet)), planFor(o, listOf(magnet), emptyMap(), s, agentHeld = true))
+        // A block still refuses there.
+        assertEquals(
+            PermissionPlan.Deny,
+            planFor(o, listOf(magnet), mapOf(magnet to PermissionDecision.DENY), PermissionSession(), agentHeld = true),
+        )
+    }
+
+    @Test
     fun `allowing one scheme for a site allows nothing else`() {
         val s = PermissionSession()
         val o = PermissionScope("https://example.com")
         s.record(o, ExternalScheme("magnet"), PermissionDecision.ALLOW, remembered = false)
-        assertEquals(PermissionPlan.Grant, planFor(o, listOf(ExternalScheme("magnet")), emptyMap(), s))
+        assertEquals(PermissionPlan.Grant, planFor(o, listOf(ExternalScheme("magnet")), emptyMap(), s, agentHeld = false))
         assertEquals(
             PermissionPlan.Ask(listOf(ExternalScheme("sms"))),
-            planFor(o, listOf(ExternalScheme("sms")), emptyMap(), s),
+            planFor(o, listOf(ExternalScheme("sms")), emptyMap(), s, agentHeld = false),
         )
         assertEquals(
             PermissionPlan.Ask(listOf(ExternalScheme("magnet"))),
-            planFor(PermissionScope("https://other.example"), listOf(ExternalScheme("magnet")), emptyMap(), s),
+            planFor(PermissionScope("https://other.example"), listOf(ExternalScheme("magnet")), emptyMap(), s, agentHeld = false),
         )
     }
 

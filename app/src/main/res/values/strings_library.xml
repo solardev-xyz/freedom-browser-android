@@ -240,6 +240,10 @@
     <!-- %1$s: the embedded frame's site; %2$s: the site the user is on. -->
     <string name="library_permission_prompt_embedded_hint">%1$s is embedded in this page. Your answer counts only on %2$s, not when you visit %1$s itself.</string>
     <string name="library_permission_prompt_private">Private tab: your answer lasts until you close your private tabs.</string>
+    <string name="library_permission_prompt_agent_held">Freedom Agent is using this tab, so “Allow this time” isn’t remembered and the next request asks again.</string>
+    <!-- Location or MIDI: WebView keeps the grant for the document's life, so a new request from this page doesn't ask (#605). -->
+    <string name="library_permission_prompt_agent_held_until_reload">Freedom Agent is using this tab, so “Allow this time” isn’t remembered, but this page keeps what you allow until it’s reloaded.</string>
+    <string name="library_permission_prompt_allow_once">Allow this time</string>
     <string name="library_permission_prompt_session_hint">“Allow this session” lasts until you close Freedom, even after you leave the site.</string>
     <string name="library_permission_prompt_allow_session">Allow this session</string>
     <string name="library_permission_prompt_allow_always">Allow every visit</string>
