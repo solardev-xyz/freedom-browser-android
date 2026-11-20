@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Android 11 and lower (`fullBackupContent`): the same exclusions as
-  data_extraction_rules.xml: the encrypted RPC API keys, the stores
+  data_extraction_rules.xml: the encrypted RPC API keys, the AI
+  providers' keys and connections (AgentStore, #573), the stores
   that let a site act on the wallet or node without asking (#229), and
   the Swarm permission manifests' record of which of those grants it owns,
   and the embedded nodes' data dirs (ant, radicle, ipfs, tor and the
@@ -14,6 +15,8 @@
 -->
 <full-backup-content>
     <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+    <exclude domain="file" path="datastore/freedom_agent.preferences_pb" />
+    <exclude domain="file" path="datastore/freedom_agent_models.preferences_pb" />
     <exclude domain="file" path="datastore/freedom_dapp_grants.preferences_pb" />
     <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
     <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />

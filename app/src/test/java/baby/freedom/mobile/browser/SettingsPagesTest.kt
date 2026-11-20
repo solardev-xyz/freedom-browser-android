@@ -59,10 +59,10 @@ class SettingsPagesTest {
     }
 
     @Test
-    fun `top level is grouped basics, privacy, web3, about`() {
+    fun `top level is grouped basics, privacy, web3, AI, about`() {
         val top = settingsTopLevel(isDefaultBrowser = false)
         assertEquals(
-            listOf(SettingsGroup.General, SettingsGroup.Privacy, SettingsGroup.Web3, SettingsGroup.About),
+            listOf(SettingsGroup.General, SettingsGroup.Privacy, SettingsGroup.Web3, SettingsGroup.Ai, SettingsGroup.About),
             top.map { it.first },
         )
         assertEquals(
@@ -70,6 +70,7 @@ class SettingsPagesTest {
                 SettingsPage.SearchEngine, SettingsPage.Appearance, SettingsPage.Downloads, SettingsPage.DefaultBrowser,
                 SettingsPage.Privacy, SettingsPage.Adblock,
                 SettingsPage.Wallet, SettingsPage.Names, SettingsPage.Nodes,
+                SettingsPage.Ai,
                 SettingsPage.About,
             ),
             top.flatMap { it.second },
@@ -102,6 +103,8 @@ class SettingsPagesTest {
         assertEquals("Nodes & networks", SettingsPage.Nodes.title)
         assertEquals("Name resolution", SettingsPage.Names.title)
         assertEquals("About Freedom", SettingsPage.About.title)
+        assertEquals("AI features", SettingsPage.Ai.title)
+        assertEquals(listOf(SettingsSection.Ai), settingsSections(SettingsPage.Ai, isDefaultBrowser = false))
     }
 
     @Test

@@ -8,6 +8,11 @@
   key that never leaves this device, so a copy would be unreadable
   anyway. (Builds before that store kept them in plain text in
   `freedom_node_settings`; MainActivity moves them out on start.)
+  So are the AI providers' API keys and connections (AgentStore, #573:
+  `datastore/freedom_agent.preferences_pb`, keys encrypted under their
+  own Keystore key `freedom_agent_api_keys`, and the model lists beside
+  it in `freedom_agent_models.preferences_pb`, which name the servers
+  on this phone's network).
   So are the stores that let a site act on the wallet or the node without
   asking: connected sites (DappGrantStore), auto-approve rules
   (AutoApproveStore), x402 allowances (X402Store), Swarm grants
@@ -59,6 +64,8 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_agent.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_agent_models.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_dapp_grants.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />
@@ -76,6 +83,8 @@
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="datastore/freedom_rpc_secrets.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_agent.preferences_pb" />
+        <exclude domain="file" path="datastore/freedom_agent_models.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_dapp_grants.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
         <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />

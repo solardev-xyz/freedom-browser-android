@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Settings → AI and its model providers (#573). -->
+<resources>
+    <string name="agent_group_ai">AI</string>
+    <string name="agent_page_ai">AI features</string>
+    <string name="agent_section_ai">AI</string>
+    <string name="agent_page_summary_off">Off</string>
+    <string name="agent_page_summary_none">On · No provider yet</string>
+    <plurals name="agent_page_summary_providers">
+        <item quantity="one">On · %1$d provider</item>
+        <item quantity="other">On · %1$d providers</item>
+    </plurals>
+
+    <string name="agent_enable">Enable AI features</string>
+    <string name="agent_enable_off">Off. Nothing is sent to an AI provider.</string>
+    <string name="agent_enable_on">On. Requests go only to the providers you add.</string>
+    <string name="agent_enable_keywords">artificial intelligence, agent, assistant, LLM, chat</string>
+    <string name="agent_enable_failed">Couldn\'t change this. Try again.</string>
+
+    <string name="agent_providers">Models &amp; providers</string>
+    <string name="agent_providers_none">No provider yet. Add one with an API key or a server on your network.</string>
+    <string name="agent_providers_keywords">API key, OpenAI, Anthropic, Claude, xAI, Grok, Meta, Muse, OpenRouter, Venice, NEAR AI, Ollama, OpenAI-compatible, LAN, model</string>
+    <string name="agent_providers_summary">%1$s · Default: %2$s</string>
+    <plurals name="agent_providers_count">
+        <item quantity="one">%1$d provider</item>
+        <item quantity="other">%1$d providers</item>
+    </plurals>
+    <string name="agent_default_none">no default model</string>
+
+    <string name="agent_group_labs">Model labs</string>
+    <string name="agent_group_marketplaces">Model marketplaces</string>
+    <string name="agent_group_network">On your network</string>
+
+    <string name="agent_default_model">Default model</string>
+    <string name="agent_default_model_none">None yet. Pick one in a provider\'s model list.</string>
+    <string name="agent_default_model_line">%1$s · %2$s</string>
+
+    <string name="agent_status_connected">Connected</string>
+    <plurals name="agent_status_connected_models">
+        <item quantity="one">Connected · %1$d model</item>
+        <item quantity="other">Connected · %1$d models</item>
+    </plurals>
+    <string name="agent_status_not_connected">Not connected</string>
+    <string name="agent_status_key_lost">Your key couldn\'t be read. Enter it again.</string>
+    <string name="agent_add_server">Add a server</string>
+    <string name="agent_add_server_subtitle">Any server with an OpenAI-compatible API</string>
+
+    <string name="agent_desc_openai">GPT models with an API key</string>
+    <string name="agent_desc_anthropic">Claude models with an API key</string>
+    <string name="agent_desc_xai">Grok models with an API key</string>
+    <string name="agent_desc_meta">Muse models with an API key</string>
+    <string name="agent_desc_openrouter">Models from many providers through one key</string>
+    <string name="agent_desc_venice">Models with privacy options</string>
+    <string name="agent_desc_near">TEE and external models</string>
+    <string name="agent_desc_ollama">Models running on a computer on your network</string>
+    <string name="agent_desc_compatible">Connect your own endpoint</string>
+
+    <string name="agent_privacy_openai">Requests go to OpenAI under its API data policy.</string>
+    <string name="agent_privacy_anthropic">Requests go to Anthropic under its API data policy.</string>
+    <string name="agent_privacy_xai">Requests go to xAI. Standard API retention applies; this connection doesn\'t turn on account-level zero retention.</string>
+    <string name="agent_privacy_meta">Requests go to the Meta Model API under your developer account\'s data policy.</string>
+    <string name="agent_privacy_openrouter">Requests go through OpenRouter to an inference provider. Its model list is public, so your key isn\'t sent to fetch it.</string>
+    <string name="agent_privacy_venice">Privacy varies by model. Models that need end-to-end encryption aren\'t offered yet.</string>
+    <string name="agent_privacy_near">NEAR AI lists both TEE-hosted and external models. TEE labels are the provider\'s claims.</string>
+    <string name="agent_privacy_ollama">Requests go only to the Ollama server you name.</string>
+    <string name="agent_privacy_compatible">Requests go to the server you name. Its retention and privacy are unknown.</string>
+
+    <string name="agent_api_key">API key</string>
+    <string name="agent_api_key_saved">A key is saved. Enter a new one to replace it.</string>
+    <string name="agent_api_key_stored">Stored encrypted on this phone, never in a backup.</string>
+    <string name="agent_api_key_invalid">A key has no spaces or line breaks.</string>
+    <string name="agent_api_key_optional">API key (optional)</string>
+    <string name="agent_api_key_new_url">A new address needs its key typed again; the saved one isn\'t sent to it.</string>
+    <string name="agent_remove_key">Remove key</string>
+    <string name="agent_removing_key">Removing…</string>
+    <string name="agent_key_removed">Key removed.</string>
+    <string name="agent_show_key">Show key</string>
+    <string name="agent_hide_key">Hide key</string>
+    <string name="agent_save_key">Save key</string>
+    <string name="agent_save">Save</string>
+    <string name="agent_saving">Saving…</string>
+    <string name="agent_save_failed">Couldn\'t save. Try again.</string>
+    <string name="agent_get_key">Get a key at %1$s</string>
+    <string name="agent_remove">Remove</string>
+    <string name="agent_remove_title">Remove %1$s?</string>
+    <string name="agent_remove_message">Its key, model list and favourites are deleted from this phone. Requests using it stop.</string>
+    <string name="agent_remove_failed">Couldn\'t remove it. Try again.</string>
+
+    <string name="agent_server_name">Name</string>
+    <string name="agent_server_url">Server URL</string>
+    <string name="agent_server_url_hint_ollama">e.g. http://192.168.1.20:11434</string>
+    <string name="agent_server_url_hint_compatible">e.g. http://192.168.1.20:8080/v1</string>
+    <string name="agent_url_rule">Plain http:// only for this phone or a private network address (10.x, 172.16–31.x, 192.168.x). Use https:// for anything else.</string>
+    <string name="agent_url_invalid">That isn\'t a web address.</string>
+    <string name="agent_url_scheme">Start with http:// or https://.</string>
+    <string name="agent_url_credentials">Leave the user name and password out of the address.</string>
+    <string name="agent_url_query">Leave out anything after ? or #.</string>
+    <string name="agent_url_public_http">Plain http:// only works for this phone or a private network address, typed as numbers (10.x, 172.16–31.x, 192.168.x). Use https:// for anything else.</string>
+    <string name="agent_url_onion">.onion servers aren\'t supported.</string>
+
+    <string name="agent_test">Test connection</string>
+    <string name="agent_testing">Testing…</string>
+    <string name="agent_refresh_models">Refresh models</string>
+    <string name="agent_refreshing">Refreshing…</string>
+    <string name="agent_test_ok">%1$s replied. The connection works.</string>
+    <string name="agent_test_no_key">Save a key first.</string>
+    <string name="agent_test_unauthorized">The provider didn\'t accept the key.</string>
+    <string name="agent_test_model_not_found">The provider doesn\'t offer %1$s to this key.</string>
+    <string name="agent_test_model_not_found_server">The server doesn\'t offer %1$s.</string>
+    <string name="agent_test_rate_limited">The provider is limiting requests. Try again later.</string>
+    <string name="agent_test_server_error">The provider had an error. Try again later.</string>
+    <string name="agent_test_refused">The provider refused the request.</string>
+    <string name="agent_test_unreachable">Couldn\'t reach the server.</string>
+    <string name="agent_test_timed_out">The server didn\'t reply in time. One loading a model can take a while: try again in a moment.</string>
+    <string name="agent_test_bad_reply">The server answered, but not with a model reply.</string>
+    <string name="agent_test_bad_url">The saved address isn\'t allowed. Enter it again.</string>
+    <string name="agent_test_cancelled">Stopped: AI was turned off or the key changed.</string>
+    <string name="agent_refresh_done">Model list updated.</string>
+    <string name="agent_refresh_too_large">The model list is too large to load.</string>
+    <string name="agent_refresh_unusable">The server didn\'t send a model list Freedom can use.</string>
+    <string name="agent_refresh_not_found">The server answered, but has no model list at this address. Check the URL.</string>
+    <string name="agent_refresh_not_found_hosted">The provider answered, but gave no model list. Try again later.</string>
+    <string name="agent_refresh_not_found_compatible">The server answered, but has no model list at this address. Check the URL: it usually ends in /v1.</string>
+    <string name="agent_refresh_timed_out">The server didn\'t send its model list in time. Try again.</string>
+    <string name="agent_refresh_failed">Couldn\'t save the model list. Try again.</string>
+
+    <string name="agent_models">Models</string>
+    <string name="agent_models_bundled">Freedom\'s list for this provider.</string>
+    <string name="agent_models_discovered">The provider\'s current list.</string>
+    <string name="agent_models_empty">No models yet. Refresh the list.</string>
+    <string name="agent_models_filter">Find a model</string>
+    <string name="agent_model_default">Default</string>
+    <string name="agent_model_use_default">Use %1$s as the default model</string>
+    <string name="agent_model_favorite">Add %1$s to favourites</string>
+    <string name="agent_model_unfavorite">Remove %1$s from favourites</string>
+</resources>

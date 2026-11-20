@@ -32,6 +32,13 @@ import kotlinx.coroutines.flow.map
 internal interface SecretCipher {
     fun encrypt(plain: ByteArray): ByteArray
     fun decrypt(blob: ByteArray): ByteArray
+
+    /**
+     * Drops the key, so the next [encrypt] makes a new one. Only for when
+     * nothing it encrypted is to be read again: a key the Keystore can no
+     * longer use would otherwise fail every new blob too.
+     */
+    fun replaceKey() {}
 }
 
 /**
@@ -40,7 +47,13 @@ internal interface SecretCipher {
  * lives in the Android Keystore ([KeystoreKey]) and never leaves it;
  * unit tests pass an in-memory key.
  */
-internal class AesGcmCipher(private val key: () -> SecretKey) : SecretCipher {
+internal class AesGcmCipher(
+    /** What [replaceKey] does: nothing unless the key can be replaced. */
+    private val replace: () -> Unit = {},
+    private val key: () -> SecretKey,
+) : SecretCipher {
+    override fun replaceKey() = replace()
+
     override fun encrypt(plain: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         // The provider picks a fresh random IV (the Keystore insists on it).
@@ -71,10 +84,20 @@ internal class AesGcmCipher(private val key: () -> SecretKey) : SecretCipher {
  * in a backup or device transfer (Keystore keys aren't carried over).
  */
 internal object KeystoreKey {
-    private const val PROVIDER = "AndroidKeyStore"
     /** Distinct from the wallet vault's `KeystoreVaultStore.KEY_ALIAS`. */
     internal const val ALIAS = "freedom_rpc_api_keys"
 
+    private val key = KeystoreAesKey(ALIAS)
+
+    fun get(): SecretKey = key.get()
+}
+
+/**
+ * An AES-256-GCM key in the Android Keystore under [alias], generated on
+ * first use and never leaving it. Each store with secrets of its own
+ * (the RPC keys, the AI providers' keys) has its own alias.
+ */
+internal class KeystoreAesKey(private val alias: String) {
     @Volatile
     private var cached: SecretKey? = null
 
@@ -84,10 +107,10 @@ internal object KeystoreKey {
 
     private fun load(): SecretKey {
         val ks = KeyStore.getInstance(PROVIDER).apply { load(null) }
-        (ks.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        (ks.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
         gen.init(
-            KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
@@ -95,6 +118,16 @@ internal object KeystoreKey {
                 .build(),
         )
         return gen.generateKey()
+    }
+
+    /** Deletes the key; the next [get] generates a new one under the same alias. */
+    fun reset(): Unit = synchronized(this) {
+        cached = null
+        KeyStore.getInstance(PROVIDER).apply { load(null) }.deleteEntry(alias)
+    }
+
+    private companion object {
+        const val PROVIDER = "AndroidKeyStore"
     }
 }
 
@@ -194,7 +227,7 @@ class RpcKeyStore internal constructor(
             instance ?: synchronized(this) {
                 instance ?: RpcKeyStore(
                     context.applicationContext.rpcSecrets,
-                    AesGcmCipher(KeystoreKey::get),
+                    AesGcmCipher(key = KeystoreKey::get),
                 ).also { instance = it }
             }
     }
