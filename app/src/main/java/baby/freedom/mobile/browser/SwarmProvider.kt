@@ -77,6 +77,11 @@ import org.json.JSONObject
  *    `bee-wallet` mode: the node decrypts with it), so only the first two
  *    bytes of the node's overlay leave with it, never the whole address.
  *
+ * No "always allow" answers in a tab Freedom Agent holds (#591): there
+ * every one of those requests gets its sheet, as a wallet request does
+ * (#577). The sheet's own switch still saves the rule, as on desktop; it
+ * answers again once the tab is the user's.
+ *
  * [origin] is always the platform's word for the requesting top-level
  * document ([providerOriginKey]), never something the page says; grants
  * are keyed by it. Feed topics are derived from the site's desktop-form
@@ -326,6 +331,14 @@ class SwarmProvider(
      * is approved (by a sheet or an "always allow") and about to run: from
      * then on the page must wait for the real answer rather than time out,
      * or it would lose the reference to something that did get published.
+     *
+     * [agentHeld]: whether Freedom Agent holds the page's tab right now
+     * (#591, desktop's `agentCustodyRefusal`; #577 for the wallet). While
+     * it does, no "always allow" answers for the user: a publish, a feed
+     * or signing call, a message send and an ACT share each get their
+     * sheet. Read at each of those decisions, so a tab the user takes
+     * back has the site's rules again from the next one. No default: a
+     * caller that forgot custody must not compile.
      */
     suspend fun request(
         origin: String,
@@ -334,9 +347,10 @@ class SwarmProvider(
         committed: () -> Unit = {},
         /** The asking document, where a `swarm_subscribe`'s messages go; null where there's none. */
         subscriber: SwarmSubscriptions.Subscriber? = null,
+        agentHeld: () -> Boolean,
         ask: suspend (SwarmAsk) -> Answer,
     ): Reply = try {
-        dispatch(origin, method, params, Calls(ask, committed, subscriber))
+        dispatch(origin, method, params, Calls(ask, committed, subscriber, agentHeld))
     } catch (e: Invalid) {
         e.error
     } catch (e: CancellationException) {
@@ -355,12 +369,24 @@ class SwarmProvider(
         Reply.Err(UNAVAILABLE, "Swarm node is not available", reason("node-stopped"))
     }
 
-    /** One request's way back to its page: [ask] a sheet, say it's [committed], and where its messages go. */
+    /**
+     * One request's way back to its page: [ask] a sheet, say it's
+     * [committed], where its messages go, and whether Freedom Agent holds
+     * its tab ([agentHeld], read live).
+     */
     private class Calls(
         val ask: suspend (SwarmAsk) -> Answer,
         val committed: () -> Unit,
         val subscriber: SwarmSubscriptions.Subscriber?,
-    )
+        val agentHeld: () -> Boolean,
+    ) {
+        /**
+         * Whether the site's "always allow" [rule] answers this request: never
+         * in a tab Freedom Agent holds (#591). Custody is read after the rule,
+         * at the decision, as EthereumProvider does (#577).
+         */
+        suspend fun ruleAnswers(rule: suspend () -> Boolean): Boolean = rule() && !agentHeld()
+    }
 
     private suspend fun dispatch(
         origin: String,
@@ -683,7 +709,7 @@ class SwarmProvider(
     }
 
     private suspend fun approvePublish(origin: String, calls: Calls, what: SwarmAsk.Publish) {
-        if (!grants.autoApprove(origin, AutoApprove.Publish)) {
+        if (!calls.ruleAnswers { grants.autoApprove(origin, AutoApprove.Publish) }) {
             val answer = calls.ask(what)
             if (!answer.allowed) throw Invalid(rejected())
             whileConnected(origin) {
@@ -736,7 +762,7 @@ class SwarmProvider(
         // page by itself.
         val needsWallet = !publishers.walletExists()
         val granted = !needsWallet && feeds.granted(origin)
-        val autoApproved = granted && grants.autoApprove(origin, kind)
+        val autoApproved = granted && calls.ruleAnswers { grants.autoApprove(origin, kind) }
         if (!granted || !autoApproved || !publishers.unlocked()) {
             // The identity that will actually sign: a feed's own, not the site's active one.
             val site = publishers.site(origin)
@@ -1140,7 +1166,7 @@ class SwarmProvider(
         }
         val publisher = share.publisher.publicKey
         withActLock(origin, calls.subscriber?.tab) {
-            if (!grants.actAllowed(origin, publisher)) {
+            if (!calls.ruleAnswers { grants.actAllowed(origin, publisher) }) {
                 val answer = calls.ask(SwarmAsk.Act(origin, share.publisher, share.reference, share.path))
                 if (!answer.allowed) throw Invalid(rejected())
                 // A rule that couldn't be saved leaves the next call asking; this one goes on (as on desktop).
@@ -1214,7 +1240,7 @@ class SwarmProvider(
         if (!grants.messaging(origin)) {
             if (!calls.ask(what.copy(grant = true)).allowed) throw Invalid(rejected())
             if (!grants.grantMessaging(origin)) throw Invalid(Reply.Err(INTERNAL, "Couldn't save the messaging permission"))
-        } else if (what.send != null && !grants.autoApprove(origin, AutoApprove.Messaging)) {
+        } else if (what.send != null && !calls.ruleAnswers { grants.autoApprove(origin, AutoApprove.Messaging) }) {
             val answer = calls.ask(what)
             if (!answer.allowed) throw Invalid(rejected())
             whileConnected(origin) {

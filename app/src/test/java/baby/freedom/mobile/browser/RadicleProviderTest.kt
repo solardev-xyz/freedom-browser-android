@@ -53,7 +53,12 @@ class RadicleProviderTest {
         /** origin → the wall-clock times its rule wrote without asking. */
         val counted = HashMap<String, MutableList<Long>>()
         var saves = true
-        override suspend fun autoWrites(origin: String, did: String) = rules[origin] == did && map[origin] == did
+        /** Run on each rule read: a tab the agent takes while the rule is being read (#591). */
+        var onRuleRead: () -> Unit = {}
+        override suspend fun autoWrites(origin: String, did: String): Boolean {
+            onRuleRead()
+            return rules[origin] == did && map[origin] == did
+        }
         override suspend fun allowAutoWrites(origin: String, did: String): Boolean {
             if (!saves || map[origin] != did) return false
             rules[origin] = did
@@ -128,9 +133,11 @@ class RadicleProviderTest {
     private var always: Boolean? = null
     /** The prompt is taken down (a navigation, the tab closing, time running out) rather than answered. */
     private var withdrawn = false
+    /** Whether Freedom Agent holds the asking tab (#591): read live by the provider, as the bridge's lambda is. */
+    private var held = false
 
     private fun req(method: String, params: JSONObject = JSONObject(), origin: String = site) = runBlocking {
-        provider.request(origin, method, params) { a ->
+        provider.request(origin, method, params, agentHeld = { held }) { a ->
             asked += a
             when {
                 withdrawn -> RadicleAnswer.REFUSED
@@ -409,7 +416,7 @@ class RadicleProviderTest {
         assertEquals(RadicleProvider.USER_REJECTED, err(req("radicle_commentIssue", comment("hello"))).code)
         assertEquals(0, writes())
         val ask = asked.single() as RadicleAsk.Write
-        assertEquals(RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "hello"), ask)
+        assertEquals(RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "hello", agentHeld = false), ask)
         answer = true
         ok(req("radicle_commentIssue", comment()))
         ok(req("radicle_commentIssue", comment()))
@@ -432,12 +439,12 @@ class RadicleProviderTest {
         req("radicle_commentIssue", comment().put("replyTo", "cccccc"))
         assertEquals(
             listOf(
-                RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", body = "line 1\nline 2", labels = listOf("bug")),
-                RadicleAsk.Write(site, "radicle_editIssueState", rid, target = "abcdef", state = "closed"),
+                RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", body = "line 1\nline 2", labels = listOf("bug"), agentHeld = false),
+                RadicleAsk.Write(site, "radicle_editIssueState", rid, target = "abcdef", state = "closed", agentHeld = false),
                 // The comment goes to the revision; the patch is only the page's word.
-                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "bbbbbb", claimedPatch = "aaaaaa", body = "c"),
-                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "aaaaaa", body = "c"),
-                RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b", replyTo = "cccccc"),
+                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "bbbbbb", claimedPatch = "aaaaaa", body = "c", agentHeld = false),
+                RadicleAsk.Write(site, "radicle_commentPatch", rid, target = "aaaaaa", body = "c", agentHeld = false),
+                RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b", replyTo = "cccccc", agentHeld = false),
             ),
             asked,
         )
@@ -450,7 +457,7 @@ class RadicleProviderTest {
         assertEquals(listOf("bug"), lines["Label (1)"])
         assertEquals(listOf("aaaaaa"), radicleWriteLines(asked[2] as RadicleAsk.Write).single { it.label.startsWith("The page says") }.rows.map(::rowText))
         // Hidden characters are shown, not obeyed.
-        val spoof = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = "ok\u202Eevil"))
+        val spoof = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = "ok\u202Eevil", agentHeld = false))
         assertEquals(listOf(RadicleWriteRow.Text("ok\\u202Eevil")), spoof.last().rows)
         // Nothing is asked about a write that would fail anyway.
         asked.clear()
@@ -460,7 +467,7 @@ class RadicleProviderTest {
 
     @Test
     fun `a write prompt can't pad what's published out of view (#544)`() {
-        fun body(text: String) = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = text)).last().rows
+        fun body(text: String) = radicleWriteLines(RadicleAsk.Write(site, "radicle_commentIssue", rid, body = text, agentHeld = false)).last().rows
         // Blank lines, of any kind of space, are counted, not drawn: the hidden text is right under "LGTM".
         assertEquals(
             listOf(RadicleWriteRow.Text("LGTM"), RadicleWriteRow.Blank(400), RadicleWriteRow.Text("<malicious text>")),
@@ -487,12 +494,12 @@ class RadicleProviderTest {
         assertEquals("5000 spaces", rowText(RadicleWriteRow.Spaces(5000)))
         // A one-line field can't open blank lines at all: its line breaks are escapes.
         val issue = radicleWriteLines(
-            RadicleAsk.Write(site, "radicle_createIssue", rid, title = "Fix" + "\n".repeat(3) + "evil", labels = listOf("bug, wontfix")),
+            RadicleAsk.Write(site, "radicle_createIssue", rid, title = "Fix" + "\n".repeat(3) + "evil", labels = listOf("bug, wontfix"), agentHeld = false),
         ).associate { it.label to it.rows }
         assertEquals(listOf(RadicleWriteRow.Text("Fix\\n\\n\\nevil")), issue["Title"])
         // One label with a comma in it is one boxed row under "Label (1)", two labels are two.
         assertEquals(listOf(RadicleWriteRow.Text("bug, wontfix")), issue["Label (1)"])
-        val two = radicleWriteLines(RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", labels = listOf("bug", "wontfix")))
+        val two = radicleWriteLines(RadicleAsk.Write(site, "radicle_createIssue", rid, title = "t", labels = listOf("bug", "wontfix"), agentHeld = false))
             .single { it.boxed }
         assertEquals("Labels (2)", two.label)
         assertEquals(listOf(RadicleWriteRow.Text("bug"), RadicleWriteRow.Text("wontfix")), two.rows)
@@ -594,6 +601,56 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `in a tab Freedom Agent holds the rule answers no write and the prompt changes no rule (#591)`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        held = true
+        val before = writes()
+        // Asked, with no switch and no "unsaved"/"used up" wording; refused, nothing is written.
+        answer = false
+        err(req("radicle_commentIssue", comment()))
+        val ask = asked.single() as RadicleAsk.Write
+        assertTrue(ask.agentHeld)
+        assertFalse(ask.ruleOn)
+        assertFalse(ask.limited)
+        assertEquals(radiclePromptCopy(ask.copy(agentHeld = false)).detail, radiclePromptCopy(ask).detail)
+        assertEquals(before, writes())
+        // Nothing charged to the rule: the prompted write isn't the rule's.
+        assertTrue(grants.counted[site].orEmpty().isEmpty())
+        // A switch value in the answer is ignored either way: off doesn't turn the rule off...
+        answer = true
+        always = false
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(ME, grants.rules[site])
+        // ...and with no rule, on doesn't turn one on.
+        grants.rules.clear()
+        always = true
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue(grants.rules.isEmpty())
+        assertTrue(grants.counted[site].orEmpty().isEmpty())
+        // Taken back: the rule answers again, without a prompt.
+        grants.rules[site] = ME
+        held = false
+        always = null
+        asked.clear()
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue(asked.isEmpty())
+        assertEquals(1, grants.counted[site]!!.size)
+    }
+
+    @Test
+    fun `custody is read after the rule, so a tab taken while it's read is prompted (#591)`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        // The agent takes the tab while the rule is read: the custody read that
+        // follows sees it, and the write asks rather than going out on the rule.
+        grants.onRuleRead = { held = true }
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue((asked.single() as RadicleAsk.Write).agentHeld)
+        assertTrue(grants.counted[site].orEmpty().isEmpty())
+    }
+
+    @Test
     fun `rejecting with the switch off turns the rule off, a withdrawn prompt leaves it`() {
         grants.map[site] = ME
         grants.rules[site] = ME
@@ -625,7 +682,7 @@ class RadicleProviderTest {
         grants.map[site] = ME
         var during: () -> Unit = {}
         fun ask() = runBlocking {
-            provider.request(site, "radicle_commentIssue", comment()) { a ->
+            provider.request(site, "radicle_commentIssue", comment(), agentHeld = { false }) { a ->
                 during()
                 RadicleAnswer(true, a is RadicleAsk.Write)
             }
@@ -655,7 +712,7 @@ class RadicleProviderTest {
     fun `a write prompt's answer keeps the user's switch even if the page has gone`() {
         val tab = BrowserState(9_501L)
         try {
-            val write = RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b")
+            val write = RadicleAsk.Write(site, "radicle_commentIssue", rid, target = "abcdef", body = "b", agentHeld = false)
             val answer = runBlocking {
                 val result = async { RadicleProviders.askOnTab(tab, 0, write, waitMs = 5_000) }
                 while (tab.radiclePrompt == null) kotlinx.coroutines.yield()
@@ -992,7 +1049,7 @@ class RadicleProviderTest {
         grants.map[site] = ""
         val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
         val r = runBlocking {
-            provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) {
+            provider.request(site, "radicle_seed", JSONObject().put("rid", rid), agentHeld = { false }) {
                 // Another tab (or the Radicle page) starts a fetch meanwhile.
                 node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(other, "connecting", "a (1/3)"))
                 RadicleAnswer.ALLOWED
@@ -1010,8 +1067,8 @@ class RadicleProviderTest {
         val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
         // B's prompt is up while A's seed is allowed; A's line hasn't arrived over IPC.
         val r = runBlocking {
-            provider.request(siteB, "radicle_seed", JSONObject().put("rid", other)) {
-                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED }
+            provider.request(siteB, "radicle_seed", JSONObject().put("rid", other), agentHeld = { false }) {
+                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid), agentHeld = { false }) { RadicleAnswer.ALLOWED }
                 assertTrue((ok(a) as JSONObject).getBoolean("seeded"))
                 RadicleAnswer.ALLOWED
             }
@@ -1180,11 +1237,11 @@ class RadicleProviderTest {
             override fun seed(rid: String) = false
         }
         val p = RadicleProvider(grants, failing, clock = { now }, io = Dispatchers.Unconfined)
-        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED } }
+        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid), agentHeld = { false }) { RadicleAnswer.ALLOWED } }
         assertEquals("seed_failed", err(r).reason)
-        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other)) { RadicleAnswer.ALLOWED } }
+        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other), agentHeld = { false }) { RadicleAnswer.ALLOWED } }
         assertEquals("seed_failed", err(r2).reason)
-        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED } }
+        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid), agentHeld = { false }) { RadicleAnswer.ALLOWED } }
         assertEquals(0, (ok(status) as JSONObject).getInt("attemptCount"))
     }
 

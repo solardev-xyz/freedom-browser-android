@@ -83,7 +83,11 @@ class RadicleProvider(
         suspend fun grantSigning(origin: String, did: String): Boolean
         suspend fun revoke(origin: String): Boolean
 
-        /** Whether [origin]'s "always allow writes" rule is on for [did] (#544). */
+        /**
+         * Whether [origin]'s "always allow writes" rule is on for [did] (#544).
+         * Whether it answers a write is the provider's: never in a tab
+         * Freedom Agent holds (#591).
+         */
         suspend fun autoWrites(origin: String, did: String): Boolean = false
 
         /** Turn the rule on, only while [origin] may still sign as [did]; false if not, or not saved. */
@@ -178,11 +182,20 @@ class RadicleProvider(
      * (not for a refusal, a dismissal, or a prompt that couldn't be
      * shown), and for a write, where the user left its "always allow"
      * switch ([RadicleAnswer.alwaysAllow]).
+     *
+     * [agentHeld]: whether Freedom Agent holds the page's tab right now
+     * (#591, desktop's `agentCustodyRefusal`; #577 for the wallet). While
+     * it does, the "always allow writes" rule answers no write: each one
+     * gets its prompt, which offers no switch, and the rule is neither
+     * charged, turned on nor turned off from it. Read at the write, so a
+     * tab the user takes back has the rule again from the next one. No
+     * default: a caller that forgot custody must not compile.
      */
     suspend fun request(
         origin: String,
         method: String,
         params: JSONObject,
+        agentHeld: () -> Boolean,
         ask: suspend (RadicleAsk) -> RadicleAnswer,
     ): Reply {
         val tier = TIERS[method] ?: return Reply.Err(UNSUPPORTED, "Unknown method: $method")
@@ -201,7 +214,7 @@ class RadicleProvider(
         }
         return when (tier) {
             Tier.Connection -> connectionMethod(origin, method, params, ask)
-            Tier.Signing -> signingMethod(origin, method, params, signingAs, ask)
+            Tier.Signing -> signingMethod(origin, method, params, signingAs, agentHeld, ask)
             Tier.None -> Reply.Err(UNSUPPORTED, "Unknown method: $method")
         }
     }
@@ -589,6 +602,7 @@ class RadicleProvider(
         method: String,
         params: JSONObject,
         signingAs: String,
+        agentHeld: () -> Boolean,
         ask: suspend (RadicleAsk) -> RadicleAnswer,
     ): Reply {
         // Checked before the prompt: nobody is asked about a write that
@@ -636,19 +650,28 @@ class RadicleProvider(
         // Each write is the user's to approve (#544), unless the site's
         // "always allow writes" rule answers it within its limits. A write
         // past them asks, and one the user approves isn't counted.
-        val ruleOn = grants.autoWrites(origin, did)
+        // Never in a tab Freedom Agent holds (#591): the rule isn't read
+        // there, so its write is neither charged to it nor offered the switch,
+        // and the prompt's answer leaves the rule as it was. Read after the
+        // rule, at the decision, as EthereumProvider does (#577).
+        val ruleSet = grants.autoWrites(origin, did)
+        val held = agentHeld()
+        val ruleOn = ruleSet && !held
         var turnOn = false
         val taken = if (ruleOn) takeAutoWrite(origin) else null
         if (taken != AutoWriteCount.COUNTED) {
-            val answer = ask(writeAsk(origin, method, params, write, ruleOn = ruleOn, limited = taken == AutoWriteCount.USED_UP))
+            val answer = ask(
+                writeAsk(origin, method, params, write, ruleOn = ruleOn, limited = taken == AutoWriteCount.USED_UP, agentHeld = held),
+            )
             // Only the user's own switch changes the rule — never a prompt
             // taken down (a navigation, the tab closing, its time running
-            // out), which carries no switch. Off is saved at once, approve
-            // or not; on only once the write has gone out, so a write that
-            // fails leaves no standing permission behind.
+            // out), which carries no switch, nor a held tab's, which shows
+            // none. Off is saved at once, approve or not; on only once the
+            // write has gone out, so a write that fails leaves no standing
+            // permission behind.
             if (ruleOn && answer.alwaysAllow == false) grants.stopAutoWrites(origin)
             if (!answer.allowed) return rejected()
-            turnOn = !ruleOn && answer.alwaysAllow == true
+            turnOn = !held && !ruleOn && answer.alwaysAllow == true
             // The prompt can be up for minutes: the site may have been
             // disconnected, or moved to another identity, meanwhile.
             when (grants.signingFor(origin)) {
@@ -693,6 +716,7 @@ class RadicleProvider(
         write: Validated.Ok,
         ruleOn: Boolean,
         limited: Boolean,
+        agentHeld: Boolean,
     ): RadicleAsk.Write {
         val a = write.args
         val labels = a.optString("labelsJson").takeIf { it.isNotEmpty() }?.let { JSONArray(it) }
@@ -713,6 +737,7 @@ class RadicleProvider(
             replyTo = a.optString("replyTo"),
             ruleOn = ruleOn,
             limited = limited,
+            agentHeld = agentHeld,
         )
     }
 
@@ -982,6 +1007,8 @@ sealed interface RadicleAsk {
      * site's "always allow writes" rule is on (it asks anyway because its
      * limit stopped this one, or the count couldn't be saved), so its
      * switch starts on. [limited]: it was the limit, which the prompt says.
+     * [agentHeld]: Freedom Agent holds the tab (#591), so the prompt
+     * offers no switch at all (desktop's `agentHeld`) and answers none.
      */
     data class Write(
         override val origin: String,
@@ -996,5 +1023,7 @@ sealed interface RadicleAsk {
         val replyTo: String = "",
         val ruleOn: Boolean = false,
         val limited: Boolean = false,
+        /** No default: an ask that forgot custody must not compile (#591). */
+        val agentHeld: Boolean,
     ) : RadicleAsk
 }

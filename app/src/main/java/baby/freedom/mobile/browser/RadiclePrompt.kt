@@ -289,8 +289,10 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
     val write = ask as? RadicleAsk.Write
     // A write's "always allow" switch starts where the site's rule is.
     var always by remember(request) { mutableStateOf(write?.ruleOn == true) }
+    // A tab Freedom Agent holds gets no switch (#591): its answer carries none.
+    val offersRule = write != null && !write.agentHeld
     // Cancel, Back and a tap outside are one answer, the switch included.
-    fun answer(allowed: Boolean) = request.respond(allowed, if (write != null) always else null)
+    fun answer(allowed: Boolean) = request.respond(allowed, if (offersRule) always else null)
     AlertDialog(
         onDismissRequest = { if (guard.accepts()) answer(false) },
         icon = { Icon(icon, contentDescription = null) },
@@ -367,7 +369,7 @@ fun RadiclePromptDialog(request: RadiclePromptRequest) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (write != null) {
+                    if (offersRule) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
