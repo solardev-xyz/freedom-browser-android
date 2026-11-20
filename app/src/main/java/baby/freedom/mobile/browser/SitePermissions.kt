@@ -361,7 +361,10 @@ sealed interface PermissionPlan {
     /** At least one permission is blocked (stored, session, or embargo). */
     data object Deny : PermissionPlan
 
-    /** Ask the user about [undecided]; the rest are already allowed. */
+    /**
+     * Ask the user about [undecided]; the rest are already allowed (in a
+     * tab Freedom Agent holds, nothing is: every one is asked about).
+     */
     data class Ask(val undecided: List<SiteCapability>) : PermissionPlan
 }
 

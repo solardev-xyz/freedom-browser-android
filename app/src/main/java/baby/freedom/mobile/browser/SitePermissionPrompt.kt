@@ -57,7 +57,9 @@ internal enum class PermissionChoice {
     /**
      * Allowed for this run only ([PermissionSession]): not stored, gone
      * once Freedom is closed — but not when the user leaves the site, so
-     * it is labelled "this session", not "while visiting".
+     * it is labelled "this session", not "while visiting". In a tab
+     * Freedom Agent holds (#605) it is "Allow this time": this request
+     * only, recorded nowhere.
      */
     ALLOW_THIS_SESSION,
 

@@ -98,7 +98,9 @@ class PermissionPrompt internal constructor(
  *     decided on that site, never by its origin's own grant. A
  *     non-http(s) origin or page, or a capability we don't prompt for,
  *     is denied — protected media (DRM, #267) with a notice saying why.
- *  2. Look up remembered + session decisions ([planFor]).
+ *  2. Look up remembered + session decisions ([planFor]). In a tab
+ *     Freedom Agent holds (#605) no Allow answers, only a block does:
+ *     the user is asked, and their Allow there is for that request only.
  *  3. Undecided → put a [PermissionPrompt] on the tab and wait. One
  *     prompt at a time per tab: requests queue behind a per-tab lock
  *     and re-plan when they get it, so a second identical request
@@ -803,8 +805,10 @@ class SitePermissionBroker private constructor(
         }
         return when (answer) {
             is PromptAnswer.Allow -> {
-                noteAllowedAgain(scope, undecided.filterIsInstance<SitePermission>(), tab.private)
+                // A held tab's Allow is for this request only: it allows
+                // nothing again in other tabs' documents either.
                 if (heldAnswerRecords(answer, agentHeld)) {
+                    noteAllowedAgain(scope, undecided.filterIsInstance<SitePermission>(), tab.private)
                     record(tier, scope, undecided, PermissionDecision.ALLOW, answer.remember && !tab.private && !agentHeld)
                 }
                 true
