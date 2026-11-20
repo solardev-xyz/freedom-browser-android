@@ -44,13 +44,16 @@ class NodeStatusToolTest {
         assertEquals("Swarm", ant.getString("name"))
         assertEquals("Ant", ant.getString("implementation"))
         assertEquals("bzz", ant.getJSONArray("protocols").getString(0))
-        assertEquals(setOf("id", "name", "implementation", "protocols", "state", "mode", "running", "ready", "recovery"), ant.keys().asSequence().toSet())
+        // Run node off is the Swarm node stopped, which node_lifecycle can start (#598).
+        assertEquals(setOf("id", "name", "implementation", "protocols", "state", "mode", "running", "ready"), ant.keys().asSequence().toSet())
+        assertEquals("stopped", ant.getString("state"))
         assertEquals(1L, list.getJSONObject(4).getLong("chainId"))
         assertEquals(100L, list.getJSONObject(5).getLong("chainId"))
-        // Everything switched off.
+        // Everything switched off: IPFS, Radicle and Tor off in Settings (or with no node to run in), the rest stopped.
         val summary = report.getJSONObject("summary")
         assertEquals(6, summary.getInt("total"))
-        assertEquals(6, summary.getInt("disabled"))
+        assertEquals(3, summary.getInt("disabled"))
+        assertEquals("stopped", list.getJSONObject(4).getString("state"))
         assertEquals(0, summary.getInt("ready"))
     }
 
@@ -94,9 +97,9 @@ class NodeStatusToolTest {
         ).getJSONObject("summary")
         assertEquals(6, summary.getInt("total"))
         assertEquals(2, summary.getInt("ready"))
-        // Swarm, IPFS, the Ethereum chain.
+        // Swarm, IPFS, the Ethereum chain; the Gnosis chain switched off is stopped.
         assertEquals(3, summary.getInt("active"))
-        assertEquals(1, summary.getInt("disabled"))
+        assertEquals(0, summary.getInt("disabled"))
         assertEquals(1, summary.getInt("attention"))
     }
 
@@ -118,7 +121,7 @@ class NodeStatusToolTest {
         assertEquals("external", n["ipfs"]!!.getString("mode"))
         assertEquals("Orbot", n["tor"]!!.getString("implementation"))
         assertEquals("external", n["tor"]!!.getString("mode"))
-        assertEquals("disabled", n["myotis-ethereum"]!!.getString("state"))
+        assertEquals("stopped", n["myotis-ethereum"]!!.getString("state"))
         assertEquals("error", n["myotis-gnosis"]!!.getString("state"))
     }
 
@@ -196,6 +199,9 @@ class NodeStatusToolTest {
 
     @Test
     fun `a chat offers node_status`() {
-        assertTrue(ToolRegistry.forChat("s").specs.any { it.name == "node_status" })
+        val names = ToolRegistry.forChat("s") { error("not needed to list the tools") }.specs.map { it.name }
+        assertTrue("node_status" in names)
+        // And Swarm publishing (#597), under desktop's names.
+        assertTrue("swarm_publish" in names && "swarm_publication_status" in names)
     }
 }

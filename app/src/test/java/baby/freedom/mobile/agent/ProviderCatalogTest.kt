@@ -27,7 +27,7 @@ class ProviderCatalogTest {
     fun `the providers, their wire formats and base URLs match desktop`() {
         assertEquals(
             listOf(
-                "openai", "anthropic", "xai", "meta", "openai-codex", "meta-subscription", "openrouter", "venice", "near-ai",
+                "openai", "anthropic", "xai", "meta", "openai-chatgpt", "openai-codex", "meta-subscription", "openrouter", "venice", "near-ai",
                 "ollama", "openai-compatible",
             ),
             ProviderCatalog.ALL.map { it.id },
@@ -49,6 +49,13 @@ class ProviderCatalogTest {
             assertTrue(def(id).bundled.any { it.id == def(id).defaultModelId })
         }
         // The subscriptions (#576): desktop's base URLs, formats and defaults.
+        // Sign in with ChatGPT (#602): OpenAI's own API and bundled list, no catalog URL.
+        assertEquals(WireFormat.OpenAiResponses, def("openai-chatgpt").wire)
+        assertEquals(ProviderKind.Subscription, def("openai-chatgpt").kind)
+        assertEquals("https://api.openai.com/v1", def("openai-chatgpt").baseUrl)
+        assertNull(def("openai-chatgpt").catalogPath)
+        assertEquals("gpt-6.1-sol", def("openai-chatgpt").defaultModelId)
+        assertTrue(def("openai-chatgpt").bundled.any { it.id == "gpt-6.1-sol" })
         assertEquals(WireFormat.CodexResponses, def("openai-codex").wire)
         assertEquals(
             "https://chatgpt.com/backend-api/codex/models?client_version=0.153.0",

@@ -40,6 +40,8 @@ class BackupRulesTest {
         "../browser/SwarmProviderBridge.kt" to "swarm-manifests.json",
         // Which downloads each Freedom Agent chat made (#600), excluded like the chats themselves.
         "../agent/AgentFiles.kt" to "agent/downloads.json",
+        // Freedom Agent's publication journal (#597): it names the chats, which stay behind.
+        "../agent/SwarmPublishTool.kt" to "agent-publications.json",
     )
 
     private val root = File("..")
@@ -134,6 +136,8 @@ class BackupRulesTest {
         // Excluded above, with the grants it owns.
         "app/src/main/java/baby/freedom/mobile/browser/SwarmProviderBridge.kt" to "File(app.filesDir, \"swarm-manifests.json\")",
         "app/src/main/java/baby/freedom/mobile/agent/AgentFiles.kt" to "File(app.filesDir, \"agent/downloads.json\")",
+        // Excluded above, with the chats it names.
+        "app/src/main/java/baby/freedom/mobile/agent/SwarmPublishTool.kt" to "filesDir, \"agent-publications.json\")",
     )
 
     private data class Pin(val source: String, val text: String, val path: String?)

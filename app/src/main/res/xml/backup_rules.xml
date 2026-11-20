@@ -5,8 +5,9 @@
   providers' keys and connections (AgentStore, #573), the dictation
   picks beside them (#578: the language, and whether the phone's speech
   service may hear the audio), and Freedom
-  Agent's chats (`freedom_agent.db`, #574) and which downloads each
-  made (`agent/downloads.json`, #600), the stores
+  Agent's chats (`freedom_agent.db`, #574), which downloads each made
+  (`agent/downloads.json`, #600) and their Swarm publication journal
+  (`agent-publications.json`, #597), the stores
   that let a site act on the wallet or node without asking (#229), and
   the Swarm permission manifests' record of which of those grants it owns,
   and the embedded nodes' data dirs (ant, radicle, ipfs, tor and the
@@ -28,6 +29,8 @@
     <exclude domain="database" path="freedom_agent.db-journal" />
     <exclude domain="file" path="agent/downloads.json" />
     <exclude domain="file" path="agent/downloads.json.tmp" />
+    <exclude domain="file" path="agent-publications.json" />
+    <exclude domain="file" path="agent-publications.json.tmp" />
     <exclude domain="file" path="datastore/freedom_dapp_grants.preferences_pb" />
     <exclude domain="file" path="datastore/freedom_dapp_auto_approve.preferences_pb" />
     <exclude domain="file" path="datastore/freedom_x402.preferences_pb" />

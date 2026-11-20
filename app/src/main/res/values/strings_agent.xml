@@ -50,7 +50,8 @@
     <string name="agent_desc_anthropic">Claude models with an API key</string>
     <string name="agent_desc_xai">Grok models with an API key</string>
     <string name="agent_desc_meta">Muse models with an API key</string>
-    <string name="agent_desc_codex">Sign in with your ChatGPT plan</string>
+    <string name="agent_desc_chatgpt">Sign in with your ChatGPT account in the browser</string>
+    <string name="agent_desc_codex">Sign in with a code from your ChatGPT plan</string>
     <string name="agent_desc_meta_subscription">Sign in with your Meta account</string>
     <string name="agent_desc_openrouter">Models from many providers through one key</string>
     <string name="agent_desc_venice">Models with privacy options</string>
@@ -61,6 +62,7 @@
     <string name="agent_privacy_openai">Requests go to OpenAI under its API data policy.</string>
     <string name="agent_privacy_anthropic">Requests go to Anthropic under its API data policy.</string>
     <string name="agent_privacy_xai">Requests go to xAI. Standard API retention applies; this connection doesn\'t turn on account-level zero retention.</string>
+    <string name="agent_privacy_chatgpt">Uses Sign in with ChatGPT. Requests go to OpenAI through its Responses API.</string>
     <string name="agent_privacy_codex">Uses your ChatGPT subscription. Requests go to OpenAI.</string>
     <string name="agent_privacy_meta_subscription">Uses Sign in with Meta. Requests go to Meta through its Model API.</string>
     <string name="agent_privacy_meta">Requests go to the Meta Model API under your developer account\'s data policy.</string>
@@ -257,7 +259,7 @@
     <string name="agent_tab_take_back">Take back</string>
     <string name="agent_tab_take_back_description">Take this tab back from Freedom Agent</string>
 
-    <!-- Subscription sign-in by device code (#576). -->
+    <!-- Subscription sign-in by device code (#576) and, below, Sign in with ChatGPT (#602). -->
     <string name="agent_sign_in">Sign in</string>
     <string name="agent_sign_in_again">Sign in again</string>
     <string name="agent_signing_in">Starting…</string>
@@ -294,6 +296,32 @@
     <string name="agent_sign_in_timed_out">The provider didn\'t answer in time. Try again.</string>
     <string name="agent_sign_in_bad_reply">The provider\'s answer couldn\'t be used, so nothing was opened or saved.</string>
     <string name="agent_sign_in_save_failed">Signed in, but couldn\'t save it. Try again.</string>
+    <string name="agent_sign_in_bad_grant">OpenAI\'s answer couldn\'t be used, so nothing was saved. Sign in again.</string>
+    <string name="agent_sign_in_unexpected">Something went wrong on this phone and the sign-in stopped. Try again.</string>
+    <string name="agent_sign_in_no_device_id">Freedom couldn\'t save this phone\'s sign-in id. Try again.</string>
+    <string name="agent_sign_in_port_busy">Something else on this phone is using the sign-in port (1455), maybe another sign-in. Close it and try again.</string>
+    <string name="agent_sign_in_no_callback">The browser didn\'t come back in time. Sign in again.</string>
+    <string name="agent_sign_in_not_completed">The sign-in wasn\'t finished on OpenAI\'s page. Try again.</string>
+    <string name="agent_sign_in_not_accepted">OpenAI didn\'t accept the sign-in, so nothing was saved. Sign in again.</string>
+    <string name="agent_chatgpt_how">Freedom opens OpenAI\'s sign-in page in your browser. Sign in there, then come back to Freedom: this page finishes by itself.</string>
+    <string name="agent_chatgpt_waiting">Sign in on OpenAI\'s page in your browser, then come back to Freedom. This page finishes by itself.</string>
+    <string name="agent_chatgpt_finishing">Finishing the sign-in…</string>
+    <string name="agent_chatgpt_paste_label">Address the browser ended on</string>
+    <string name="agent_chatgpt_paste_help">Only if the sign-in doesn\'t finish by itself: copy the address from the browser\'s address bar and paste it here. It starts with %1$s</string>
+    <string name="agent_chatgpt_paste_continue">Continue</string>
+    <string name="agent_chatgpt_paste_invalid">That address isn\'t this sign-in\'s. Copy the whole address the browser ended on, or sign in again.</string>
+    <string name="agent_sign_in_channel_name">AI sign-in</string>
+    <string name="agent_sign_in_channel_description">Shown while Freedom waits for you to finish signing in to an AI provider in the browser.</string>
+    <string name="agent_sign_in_notification_title">Signing in to ChatGPT</string>
+    <string name="agent_sign_in_notification_text">Freedom is waiting for the browser to come back once you\'ve signed in.</string>
+    <string name="agent_chatgpt_page_success_title">ChatGPT connected</string>
+    <string name="agent_chatgpt_page_success">Go back to Freedom to continue. You can close this tab.</string>
+    <string name="agent_chatgpt_page_cancelled_title">Connection cancelled</string>
+    <string name="agent_chatgpt_page_cancelled">ChatGPT wasn\'t connected to Freedom. Close this tab and try again from Settings → AI.</string>
+    <string name="agent_chatgpt_page_failed_title">Connection unsuccessful</string>
+    <string name="agent_chatgpt_page_failed">ChatGPT couldn\'t be connected to Freedom. Go back to Settings → AI and try again.</string>
+    <string name="agent_chatgpt_page_invalid_title">Invalid sign-in link</string>
+    <string name="agent_chatgpt_page_invalid">This link doesn\'t match the sign-in under way. Go back to Freedom and finish that sign-in, or start again.</string>
 
     <!-- Voice dictation in the chat's composer (#578). -->
     <string name="agent_dictate_on_device">Dictate with Android\'s on-device recognizer</string>
@@ -336,9 +364,134 @@
     <string name="agent_dictation_language_title">Language</string>
     <string name="agent_dictation_app_language">App language</string>
     <string name="agent_dictation_save_failed">Couldn\'t change this. Try again.</string>
+    <!-- Freedom Agent's Swarm publishing (#597): the approval card. -->
+    <string name="agent_publish_headline">Publish text on Swarm, publicly</string>
+    <string name="agent_publish_permanent">Anyone with the link can read it. It can\'t be taken back: nothing published on Swarm can be deleted.</string>
+    <string name="agent_publish_text_label">Text · %1$s · %2$s</string>
+    <string name="agent_publish_text_cut">Shows the first %1$s of %2$s characters. All of them are published.</string>
+    <string name="agent_publish_findings_title">What the check found</string>
+    <string name="agent_publish_findings_none">The check found no keys, passwords or personal data. It can\'t catch everything, so read the text.</string>
+    <string name="agent_publish_findings_blocking">Keys, passwords and recovery phrases block publishing. Tick each one to publish it anyway, or ask the agent to fix them.</string>
+    <string name="agent_publish_finding_line">%1$s · line %2$d</string>
+    <!-- A finding past the part of the text the card shows: the text around it. -->
+    <string name="agent_publish_finding_context">Past the preview: %1$s</string>
+    <string name="agent_publish_kind_secret">Secret</string>
+    <string name="agent_publish_kind_personal">Personal data</string>
+    <string name="agent_publish_kind_third_party">Loads from another site</string>
+    <string name="agent_publish_kind_metadata">Metadata</string>
+    <string name="agent_publish_anyway">Publish this anyway</string>
+    <string name="agent_publish_postage_title">Postage stamp</string>
+    <string name="agent_publish_postage_ready">Stamp %1$s. This takes about %2$s of the %3$s it has left.</string>
+    <string name="agent_publish_postage_ttl">It lasts %1$s more.</string>
+    <string name="agent_publish_postage_ttl_unknown">How long it lasts couldn\'t be read.</string>
+    <string name="agent_publish_postage_soon">The stamp runs out in under a week. After that, the text may no longer be reachable.</string>
+    <string name="agent_publish_postage_critical">The stamp runs out in under a day. After that, the text may no longer be reachable.</string>
+    <string name="agent_publish_postage_blocked">Nothing can be published until then.</string>
+    <string name="agent_publish_postage_unknown">Couldn\'t read the Swarm node\'s stamps, so nothing can be published now.</string>
+    <string name="agent_publish_no_buy">Nothing is bought: the agent can only use a stamp you already have.</string>
+    <string name="agent_publish_button">Publish publicly</string>
+    <string name="agent_publish_fix">Ask Agent to fix</string>
+    <string name="agent_publish_rule_private_key_block">Private key block</string>
+    <string name="agent_publish_rule_aws_access_key">AWS access key</string>
+    <string name="agent_publish_rule_openai_api_key">OpenAI-style API key</string>
+    <string name="agent_publish_rule_github_token">GitHub token</string>
+    <string name="agent_publish_rule_slack_token">Slack token</string>
+    <string name="agent_publish_rule_jwt">JSON Web Token</string>
+    <string name="agent_publish_rule_url_credentials">Password in a URL</string>
+    <string name="agent_publish_rule_credential_assignment">Password or key assignment</string>
+    <string name="agent_publish_rule_ethereum_private_key">Ethereum private key</string>
+    <string name="agent_publish_rule_bip39_seed_phrase">Wallet recovery phrase</string>
+    <string name="agent_publish_rule_keystore_json">Encrypted wallet keystore</string>
+    <string name="agent_publish_rule_rpc_url_key">RPC URL with an embedded key</string>
+    <string name="agent_publish_rule_stripe_secret_key">Stripe secret key</string>
+    <string name="agent_publish_rule_google_api_key">Google API key</string>
+    <string name="agent_publish_rule_slack_webhook">Slack webhook URL</string>
+    <string name="agent_publish_rule_discord_webhook">Discord webhook URL</string>
+    <string name="agent_publish_rule_twilio_api_key">Twilio API key</string>
+    <string name="agent_publish_rule_sendgrid_api_key">SendGrid API key</string>
+    <string name="agent_publish_rule_email_address">Email address</string>
+    <string name="agent_publish_rule_phone_number">Phone number</string>
+    <string name="agent_publish_rule_iban">Bank account number (IBAN)</string>
+    <string name="agent_publish_rule_postal_address">Street address</string>
+    <string name="agent_publish_rule_possible_credential">Possible password or key</string>
+    <string name="agent_publish_rule_scan_incomplete">Couldn\'t be fully checked</string>
+    <string name="agent_publish_rule_third_party_script">Script from another site</string>
+    <string name="agent_publish_rule_third_party_link">Stylesheet or file from another site</string>
+    <string name="agent_publish_rule_third_party_image">Image from another site</string>
+    <string name="agent_publish_rule_external_form">Form that sends what\'s typed to another site</string>
+    <string name="agent_publish_rule_third_party_fetch">Request to another site (fetch)</string>
+    <string name="agent_publish_hidden">Value hidden</string>
+    <string name="agent_publish_incomplete">The check stopped before the end of the text, so it\'s treated as a secret.</string>
+    <plurals name="agent_publish_words">
+        <item quantity="one">%1$s (%2$d word)</item>
+        <item quantity="other">%1$s (%2$d words)</item>
+    </plurals>
+    <plurals name="agent_publish_chars">
+        <item quantity="one">%1$s (%2$d character)</item>
+        <item quantity="other">%1$s (%2$d characters)</item>
+    </plurals>
+    <plurals name="agent_publish_earlier_unknown">
+        <item quantity="one">An earlier publication from this chat may already be on Swarm: it didn\'t finish, but some of it had already been sent.</item>
+        <item quantity="other">%1$d earlier publications from this chat may already be on Swarm: they didn\'t finish, but some of each had already been sent.</item>
+    </plurals>
     <!-- Freedom Agent's wallet_transfer sheet (#596). -->
     <string name="agent_transfer_title">Freedom Agent wants to send funds</string>
     <string name="agent_transfer_note">Freedom Agent proposed this transfer. Check the recipient and the amount: nothing is sent until you confirm.</string>
     <string name="agent_transfer_locked">Confirming asks for your screen lock first, to open the wallet.</string>
     <string name="agent_transfer_decline">Don\'t send</string>
+
+    <!-- Node actions Freedom Agent asks about (#598) -->
+    <string name="agent_node_service_ant">the Swarm node</string>
+    <string name="agent_node_service_ipfs">the IPFS node</string>
+    <string name="agent_node_service_radicle">the Radicle node</string>
+    <string name="agent_node_service_tor">Tor</string>
+    <string name="agent_node_service_myotis_ethereum">the Ethereum light client</string>
+    <string name="agent_node_service_myotis_gnosis">the Gnosis light client</string>
+    <string name="agent_node_start">Start %1$s</string>
+    <string name="agent_node_stop">Stop %1$s</string>
+    <string name="agent_node_restart">Restart %1$s</string>
+    <string name="agent_node_now">Now</string>
+    <string name="agent_node_state_running">Running</string>
+    <string name="agent_node_state_starting">Starting</string>
+    <string name="agent_node_state_syncing">Syncing</string>
+    <string name="agent_node_state_stopping">Stopping</string>
+    <string name="agent_node_state_stopped">Stopped</string>
+    <string name="agent_node_state_disabled">Off in Settings</string>
+    <string name="agent_node_state_error">Not working</string>
+    <string name="agent_node_ant_start_note">This turns on Run node in Settings. The node keeps running in the background, with a notification, until it\'s turned off.</string>
+    <string name="agent_node_ant_stop_note">This turns off Run node in Settings. If a postage payment is running, the node stops once it ends.</string>
+    <string name="agent_node_ant_restart_note">This turns Run node off and on again.</string>
+    <string name="agent_node_also_stops">Stopping it also stops %1$s, since IPFS and Radicle run inside the Swarm node.</string>
+    <string name="agent_node_allow_start">Start</string>
+    <string name="agent_node_allow_stop">Stop</string>
+    <string name="agent_node_allow_restart">Restart</string>
+    <string name="agent_node_request_read">Read from %1$s</string>
+    <string name="agent_node_request_write">Send a change to %1$s</string>
+    <string name="agent_node_request_label">Request</string>
+    <string name="agent_node_request_headers">Headers</string>
+    <string name="agent_node_request_body">Body</string>
+    <string name="agent_node_request_body_empty">Empty</string>
+    <string name="agent_node_request_body_blank">Only spaces (%1$d)</string>
+    <string name="agent_node_request_write_note">Freedom sends this once. If the node doesn\'t answer, it isn\'t sent again.</string>
+    <string name="agent_node_allow_request">Send request</string>
+    <string name="agent_node_effect">What it does</string>
+    <string name="agent_node_effect_read">Reads the node\'s state</string>
+    <string name="agent_node_effect_reversible">Changes the node in a way that can be undone</string>
+    <string name="agent_node_effect_persistent">Makes a lasting change to the node</string>
+    <string name="agent_node_effect_financial">Spends or moves funds</string>
+    <string name="agent_node_effect_destructive">Deletes or overwrites something</string>
+    <string name="agent_node_effect_unknown">Not known</string>
+    <string name="agent_node_diagnostics">Share recent logs of %1$s</string>
+    <string name="agent_node_diagnostics_light_clients">Share recent logs of the light clients (Gnosis and Ethereum, which write one log)</string>
+    <string name="agent_node_diagnostics_to">Shared with</string>
+    <string name="agent_node_diagnostics_provider_unknown">The chat\'s model provider</string>
+    <string name="agent_node_diagnostics_amount">How much</string>
+    <string name="agent_node_diagnostics_amount_value">Up to the last %1$d lines (%2$d KB), with the node\'s status and the app and Android versions</string>
+    <string name="agent_node_diagnostics_note">Logs can name peers, addresses and what the node fetched. They go to the model provider with the rest of the chat.</string>
+    <string name="agent_node_allow_share">Share logs</string>
+
+    <!-- Freedom Agent's name transactions (#599): agent/DomainToolsUi.kt -->
+    <string name="agent_domain_title">Freedom Agent wants to send a name transaction</string>
+    <string name="agent_domain_note">Freedom Agent prepared this from your request. Check the name and what it changes: nothing is sent until you confirm.</string>
+    <string name="agent_domain_repriced">The network fee was priced again since the last review.</string>
 </resources>

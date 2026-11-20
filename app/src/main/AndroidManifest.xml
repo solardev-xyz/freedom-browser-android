@@ -239,6 +239,17 @@
             android:exported="false" />
 
         <!--
+          Holds the app's process while Sign in with ChatGPT waits for the
+          browser to come back to its loopback listener (#602); see
+          SignInService. A shortService: no permission beyond
+          FOREGROUND_SERVICE, and none of the node's dataSync time.
+        -->
+        <service
+            android:name=".agent.SignInService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
+
+        <!--
           NodeService lives in its own `:node` process so we can exit
           that process (and everything native inside it — ant's tokio
           runtime, the freedom-ipfs store) when the user toggles the node

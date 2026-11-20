@@ -56,7 +56,8 @@ import baby.freedom.mobile.browser.restartsTapGuard
  * such. Its buttons, a swipe down, a tap outside and Back ignore input
  * until it has been on screen untouched for
  * [PromptTapGuard.PROTECTION_MS], like the app's other approval sheets;
- * dismissing it is Don't allow. Each answer settles the one request the
+ * dismissing it is Don't allow. A publish ([AgentAction.Publish], #597)
+ * has its own card and buttons ([PublishApprovalContent]). Each answer settles the one request the
  * card was shown for.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -64,9 +65,11 @@ import baby.freedom.mobile.browser.restartsTapGuard
 internal fun AgentApprovalHost() {
     val approval by AgentApprovals.shown.collectAsState()
     val transfer by AgentTransfers.shown.collectAsState()
+    val node by AgentNodeAsks.shown.collectAsState()
+    val domain by AgentDomains.shown.collectAsState()
     val shown = approval ?: return
-    // A wallet transfer's sheet asked earlier (#596) comes first: never both at once.
-    if (transfer.let { it != null && it.id < shown.id }) return
+    // A wallet transfer's (#596), node action's (#598) or name transaction's (#599) sheet asked earlier comes first: never two at once.
+    if (!agentSheetFirst(shown.id, transfer?.id, node?.id, domain?.id)) return
     androidx.compose.runtime.key(shown.id) {
         val tap = rememberArmedTapGuard(shown.id)
         val guard = tap.guard
@@ -93,6 +96,13 @@ internal fun AgentApprovalHost() {
                     .padding(horizontal = 24.dp)
                     .padding(bottom = 16.dp),
             ) {
+                val publish = shown.action as? AgentAction.Publish
+                if (publish != null) {
+                    PublishApprovalContent(shown, publish, tap) { outcome ->
+                        if (guard.accepts()) AgentApprovals.settle(shown.id, outcome)
+                    }
+                    return@Column
+                }
                 Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                     ApprovalBody(shown)
                 }
@@ -180,6 +190,8 @@ private fun ApprovalBody(approval: AgentApproval) {
             TargetRows(action.target)
         }
         is AgentAction.Scroll -> action.target?.takeIf { it.role != "viewport" }?.let { TargetRows(it) }
+        // Shown by PublishApprovalContent instead.
+        is AgentAction.Publish -> Unit
         is AgentAction.Dialog -> {
             Field(stringResource(R.string.agent_approve_message), action.message.ifEmpty { "—" })
             if (action.accept && action.promptText != null) {
@@ -244,6 +256,7 @@ private fun headline(action: AgentAction): String = when (action) {
     is AgentAction.Dialog -> stringResource(if (action.accept) R.string.agent_approve_dialog_ok else R.string.agent_approve_dialog_cancel)
     is AgentAction.Upload -> stringResource(R.string.agent_approve_upload)
     is AgentAction.Download -> stringResource(R.string.agent_approve_download)
+    is AgentAction.Publish -> stringResource(R.string.agent_publish_headline)
 }
 
 @Composable

@@ -2,6 +2,10 @@
   "own": [
     "adblock/README.md",
     "agent/page.js",
+    "agent/skills/dweb-domains/SKILL.md",
+    "agent/skills/dweb-domains/ens.md",
+    "agent/skills/dweb-domains/gwei.md",
+    "agent/skills/dweb-domains/wei.md",
     "agent/system_prompt.md",
     "error/error.html",
     "openlv/shell.html",

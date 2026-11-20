@@ -19,7 +19,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -63,6 +65,9 @@ class SubscriptionProvidersTest {
     private val routes = HashMap<String, () -> MockResponse>()
     private val seen = ConcurrentLinkedQueue<RecordedRequest>()
 
+    /** Sign in with ChatGPT's listener port (#602): a free one, not 1455. */
+    private val chatPort = ChatGptLoginTest.freePort()
+
     @Volatile
     private var now = 1_000_000_000L
     private lateinit var providers: AgentProviders
@@ -88,6 +93,7 @@ class SubscriptionProvidersTest {
             ),
             wallClock = { now },
             loginScope = scope,
+            chatgpt = ChatGptLogin(::chatGptPageCopy, authBase = "$root/chatgpt-auth", port = chatPort, wallClock = { now }),
         )
     }
 
@@ -685,5 +691,103 @@ class SubscriptionProvidersTest {
         assertFalse(body.has("max_output_tokens"))
         routes["/openai-codex/codex/responses"] = { json(JSONObject().put("output", JSONArray())) }
         assertEquals(TestResult.BadReply, providers.testConnection(SubscriptionAuth.CODEX, "gpt-6-astra"))
+    }
+
+    // --- Sign in with ChatGPT (#602) ---
+
+    private fun chatGptServer(access: String = "at-1") {
+        routes["/chatgpt-auth/api/accounts/oauth/token"] = {
+            json(
+                JSONObject().put("access_token", access).put("refresh_token", "rt-1").put("id_token", "id-1")
+                    .put("scope", "openid offline_access chatgpt.tokens.use.direct").put("expires_in", 3600),
+            )
+        }
+    }
+
+    /** The browser coming back to the phone's listener: the status of the page it's shown. */
+    private fun browserReturns(url: String): Int {
+        val state = url.toHttpUrl().queryParameter("state")
+        return java.net.Socket("127.0.0.1", chatPort).use { s ->
+            s.soTimeout = 15_000
+            s.getOutputStream().write(
+                ("GET /auth/callback?state=$state&code=code-1&client_id=issued-client HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1:$chatPort\r\nConnection: close\r\n\r\n").toByteArray(),
+            )
+            s.getInputStream().readBytes().toString(Charsets.UTF_8).substringAfter(' ').take(3).toInt()
+        }
+    }
+
+    /** Whether the sign-in's listener holds its port: nothing else can bind it. */
+    private fun listening(): Boolean = !ChatGptLoginTest.canBind(chatPort)
+
+    private suspend fun browserState(): LoginState.Browser =
+        withTimeout(5_000) { providers.login.first { it is LoginState.Browser } } as LoginState.Browser
+
+    @Test
+    fun `sign in with chatgpt is saved and chats on OpenAI's API with its token, renewed as the issued client`() = runBlocking {
+        chatGptServer()
+        assertTrue(providers.setEnabled(true))
+        assertTrue(providers.startLogin(ChatGptLogin.PROVIDER))
+        val browser = browserState()
+        assertTrue(ChatGptLogin.isAuthorizeUrl(browser.url))
+        // Opened by itself once only.
+        assertTrue(providers.claimOpen(browser))
+        assertFalse(providers.claimOpen(browser))
+        val page = async(Dispatchers.IO) { browserReturns(browser.url) }
+        assertEquals(LoginState.Done(ChatGptLogin.PROVIDER), withTimeout(10_000) { providers.login.first { it is LoginState.Done || it is LoginState.Failed } })
+        assertEquals(200, page.await())
+        withTimeout(5_000) { while (listening()) delay(20) }
+        val c = state.connection(ChatGptLogin.PROVIDER)!!
+        assertTrue(c.hasKey)
+        assertEquals(ModelRef(ChatGptLogin.PROVIDER, "gpt-6.1-sol"), state.defaultModel)
+
+        routes["/openai-chatgpt/responses"] = { reply("Hello") }
+        val target = providers.chatTarget(ModelRef(c.id, "gpt-6.1-sol")) as ChatTarget.Ready
+        assertNull(target.accountId)
+        assertTrue(providers.streamStep(target, request) {} is StepOutcome.Ok)
+        val sent = requests("/openai-chatgpt/responses").single()
+        assertEquals("Bearer at-1", sent.getHeader("Authorization"))
+        assertNull(sent.getHeader("chatgpt-account-id"))
+        assertNull(sent.getHeader("originator"))
+
+        // Past its expiry: renewed as the client OpenAI issued.
+        chatGptServer(access = "at-2")
+        now += 3600_000
+        val renewed = providers.chatTarget(ModelRef(c.id, "gpt-6.1-sol")) as ChatTarget.Ready
+        assertEquals("at-2", renewed.key)
+        val refresh = requests("/chatgpt-auth/api/accounts/oauth/token").last().body.clone().readUtf8()
+        assertTrue(refresh, refresh.contains("grant_type=refresh_token"))
+        assertTrue(refresh, refresh.contains("client_id=issued-client"))
+    }
+
+    @Test
+    fun `signing in with chatgpt again rebinds the port, and cancelling or AI off frees it unsaved`() = runBlocking {
+        chatGptServer()
+        assertTrue(providers.setEnabled(true))
+        assertTrue(providers.startLogin(ChatGptLogin.PROVIDER))
+        val first = browserState()
+        // Straight away again: the first listener lets go before the second binds.
+        assertTrue(providers.startLogin(ChatGptLogin.PROVIDER))
+        val second = withTimeout(5_000) {
+            providers.login.first { it is LoginState.Browser && it.attempt != first.attempt } ?: error("none")
+        } as LoginState.Browser
+        assertTrue(listening())
+        // The first sign-in's return isn't this one's.
+        assertEquals(400, withContext(Dispatchers.IO) { browserReturns(first.url) })
+        assertEquals(second, providers.login.value)
+        for (end in listOf<suspend () -> Unit>(
+            { providers.cancelLogin(ChatGptLogin.PROVIDER) },
+            { providers.setEnabled(false); providers.setEnabled(true) },
+        )) {
+            if (providers.login.value !is LoginState.Browser) {
+                assertTrue(providers.startLogin(ChatGptLogin.PROVIDER))
+                browserState()
+            }
+            end()
+            assertNull(providers.login.value)
+            withTimeout(5_000) { while (listening()) delay(20) }
+        }
+        assertNull(state.connection(ChatGptLogin.PROVIDER))
+        assertTrue(requests("/chatgpt-auth/api/accounts/oauth/token").isEmpty())
     }
 }

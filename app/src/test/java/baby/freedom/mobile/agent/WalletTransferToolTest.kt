@@ -103,7 +103,7 @@ class WalletTransferToolTest {
         assertEquals(listOf("recipient", "amount", "asset"), (0 until params.getJSONArray("required").length()).map { params.getJSONArray("required").getString(it) })
         assertEquals(setOf("recipient", "amount", "asset", "chainId", "walletIndex"), params.getJSONObject("properties").keys().asSequence().toSet())
         assertFalse(params.getBoolean("additionalProperties"))
-        assertTrue(ToolRegistry.forChat("s").specs.any { it.name == "wallet_transfer" })
+        assertTrue(ToolRegistry.forChat("s") { error("not needed to list the tools") }.specs.any { it.name == "wallet_transfer" })
     }
 
     @Test
