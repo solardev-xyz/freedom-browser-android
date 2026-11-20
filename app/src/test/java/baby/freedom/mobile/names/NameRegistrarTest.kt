@@ -851,12 +851,16 @@ class NameRegistrarTest {
         val b = async { runCatching { r.startRecord("alice.wei", Intent.SET_TEXT, text("b"), me, 0, chat = "chat-2") } }
         chain.openGate(readers = 2)
         val results = listOf(a.await(), b.await())
-        assertEquals(1, results.count { it.isSuccess })
-        assertEquals(NameException.Code.CONFLICT, (results.single { it.isFailure }.exceptionOrNull() as NameException).code)
+        // The later chat is handed the earlier chat's operation, unchanged, for it to refuse unread (never its refusal text).
+        val ops = results.map { it.getOrThrow() }
+        assertEquals(ops[0].id, ops[1].id)
         assertEquals(1, r.operations.value!!.count { it.name == "alice.wei" && !it.state.terminal })
+        // The Names page, though, is told why: the open operation is named.
+        val page = runCatching { r.startRecord("alice.wei", Intent.SET_TEXT, text("d"), me, 0) }
+        assertEquals(NameException.Code.CONFLICT, (page.exceptionOrNull() as NameException).code)
 
         // The same choice, prepared twice at once, is one operation handed to both.
-        r.dismiss(results.single { it.isSuccess }.getOrThrow().id)
+        r.dismiss(ops[0].id)
         chain.gate = CompletableDeferred()
         val c = async { r.startRecord("alice.wei", Intent.SET_TEXT, text("c"), me, 0) }
         val d = async { r.startRecord("alice.wei", Intent.SET_TEXT, text("c"), me, 0) }

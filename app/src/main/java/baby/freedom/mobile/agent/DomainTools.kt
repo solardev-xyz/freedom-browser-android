@@ -252,8 +252,9 @@ internal class DomainToolset(
                     chat = sessionId, publicationId = publication?.publicationId, reference = publication?.reference,
                 )
             }
-            // The registrar hands back an open operation that another chat or the Names page saved for this name while
-            // this one read the chain (it checks again under its lock): refused as above, never handed over or dropped below.
+            // The registrar hands back, whatever its choice, an open operation that another chat or the Names page saved for
+            // this name while this one read the chain (it checks again under its lock): refused as above, without its details
+            // (its own refusal names the account and term), never handed over or dropped below.
             if (op.chat != sessionId) throw policy(OPEN_ELSEWHERE)
             // Desktop builds the first step when it prepares: one that can't be built now (refused, would revert) is dropped again — nothing was sent.
             try {

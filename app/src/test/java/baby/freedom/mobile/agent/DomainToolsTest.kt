@@ -401,6 +401,28 @@ class DomainToolsTest {
     }
 
     @Test
+    fun `a different choice the Names page saves while a chat prepares is refused without its details`() = runBlocking {
+        // The user starts a 2-year registration on the Names page while this chat's 1-year prepare reads the chain.
+        val pageCheck = registrar.check("fresh.eth", 2 * NameContracts.YEAR)
+        chain.gate = CompletableDeferred()
+        val t = tools()
+        val prep = async { t["domain_prepare"]!!.run(JSONObject("""{"name":"fresh.eth","intent":"register"}""")) }
+        while (chain.atGate.get() < 1) kotlinx.coroutines.yield()
+        val page = registrar.start(pageCheck, Intent.REGISTER, second.address, second.index)
+        chain.openGate(readers = 1)
+        val out = prep.await()
+        assertEquals("POLICY_DENIED", code(out))
+        assertTrue(out.output, out.output.contains("outside this conversation"))
+        // Not the registrar's own refusal: no account, no term.
+        assertFalse(out.output, out.output.contains("0x3333", ignoreCase = true) || out.output.contains("3333"))
+        assertFalse(out.output, out.output.contains("2 years") || out.output.contains("year"))
+        assertEquals(listOf(page.id), registrar.operations.value!!.filter { it.name == "fresh.eth" }.map { it.id })
+        assertNull(registrar.get(page.id)!!.chat)
+        assertTrue(asked.isEmpty())
+        assertTrue(wallet.prepared.isEmpty())
+    }
+
+    @Test
     fun `with no browser screen up nothing is read, prepared or asked`() {
         val out = runBlocking { tools(backend = null)["domain_prepare"]!!.run(JSONObject("""{"name":"fresh.wei","intent":"register"}""")) }
         assertEquals("CAPABILITY_UNAVAILABLE", code(out))

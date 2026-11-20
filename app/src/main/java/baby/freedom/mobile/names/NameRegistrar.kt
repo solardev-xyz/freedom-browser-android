@@ -123,7 +123,9 @@ class NameRegistrar internal constructor(
      * is refused ([NameException.Code.CONFLICT]) naming the open one, which
      * the user finishes or dismisses first — never silently swapped in.
      * [chat]: the agent chat that prepared it (#599), so its
-     * `domain_operation_status` lists its own; null from the screen.
+     * `domain_operation_status` lists its own; null from the screen. An
+     * open one another chat or the Names page started is returned to a
+     * chat whatever its choice ([elsewhere]): the chat refuses it unread.
      */
     suspend fun start(check: Check, intent: Intent, account: String, accountIndex: Int, chat: String? = null): NameOperation {
         loaded.await()
@@ -131,7 +133,9 @@ class NameRegistrar internal constructor(
         checkDuration(parsed.space, check.duration)
         // The same choice carries on where it is; a different one (account, term, register or renew) is told why it can't start.
         val existing = { open: NameOperation ->
-            if (open.intent == intent && open.account.equals(account, ignoreCase = true) && open.duration == check.duration) {
+            if (elsewhere(open, chat) ||
+                open.intent == intent && open.account.equals(account, ignoreCase = true) && open.duration == check.duration
+            ) {
                 open
             } else {
                 if (open.intent.recordWrite) refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
@@ -214,7 +218,9 @@ class NameRegistrar internal constructor(
      * unsent no-op would otherwise read as done, since an outcome nobody
      * could tell is settled by the record's value on chain). An open
      * operation for the name from [account] that is the same write is
-     * returned instead of a second; any other is refused naming it.
+     * returned instead of a second; any other is refused naming it — but
+     * one another chat or the Names page started goes back to a chat as
+     * is ([elsewhere]), for it to refuse unread.
      */
     suspend fun startRecord(
         input: String,
@@ -230,7 +236,7 @@ class NameRegistrar internal constructor(
         checkRecord(intent, record, reference)
         val parsed = NameContracts.parse(input)
         val existing = { open: NameOperation ->
-            if (open.intent == intent && open.record == record && open.account.equals(account, ignoreCase = true)) {
+            if (elsewhere(open, chat) || open.intent == intent && open.record == record && open.account.equals(account, ignoreCase = true)) {
                 open
             } else {
                 refuse(NameException.Code.CONFLICT, Strings.said(R.string.namereg_error_open_operation, open.name))
@@ -869,6 +875,15 @@ class NameRegistrar internal constructor(
      */
     private suspend fun save(op: NameOperation, expectedRevision: Int?): NameOperation = writing.withLock { saveLocked(op, expectedRevision) }
 
+    /**
+     * Whether [open] belongs to someone other than the agent [chat] asking
+     * (the Names page, or another chat): handed back as is, whatever its
+     * choice, so the chat refuses it without its details — the refusal
+     * text names its account and term, which that chat mustn't read.
+     * Never for the Names page itself ([chat] null), which shows the user why.
+     */
+    private fun elsewhere(open: NameOperation, chat: String?) = chat != null && open.chat != chat
+
     /** [name]'s unresolved operation, if it has one: at most one is open per name. */
     private fun openOn(name: String) = _operations.value.orEmpty().firstOrNull { it.name == name && !it.state.terminal }
 
@@ -877,7 +892,8 @@ class NameRegistrar internal constructor(
      * was being built (the chain reads suspend, and another chat or the
      * Names page may prepare the same name meanwhile): checked again under
      * the writing lock, that one goes to [existing] — returned when it's
-     * the same choice, else refused — so a name never has two open.
+     * the same choice or (to a chat) not that chat's own, else refused —
+     * so a name never has two open.
      */
     private suspend fun saveNew(op: NameOperation, existing: (NameOperation) -> NameOperation): NameOperation = writing.withLock {
         openOn(op.name)?.let { return@withLock existing(it) }
