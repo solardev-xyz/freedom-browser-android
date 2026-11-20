@@ -463,40 +463,6 @@ internal fun SwarmSitesSection(
                             modifier = Modifier.testTag("swarm-ask-each-time"),
                         ) { Text(stringResource(R.string.send_ask_each_time)) }
                     }
-                    if (grant.act.isNotEmpty()) {
-                        Text(
-                            stringResource(R.string.send_swarm_act_rules),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
-                    grant.act.forEach { rule ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("swarm-act-rule")) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(rule.publicKey, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                                SwarmAct.publisher(rule.publicKey)?.let {
-                                    Text(
-                                        it.address,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                            TextButton(
-                                onClick = { onRemoveAct(grant.origin, rule.publicKey) },
-                                modifier = Modifier.testTag("swarm-act-remove"),
-                            ) { Text(stringResource(R.string.common_remove)) }
-                        }
-                        if (actRemoveFailed == grant.origin to rule.publicKey) {
-                            Text(
-                                stringResource(R.string.send_swarm_act_remove_failed),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        }
-                    }
                     if (askEachTimeFailed == grant.origin) {
                         Text(
                             stringResource(R.string.send_ask_each_time_failed),
@@ -513,6 +479,42 @@ internal fun SwarmSitesSection(
                     }
                 }
                 TextButton(onClick = { onRevoke(grant.origin) }) { Text(stringResource(R.string.common_disconnect)) }
+            }
+            if (grant.act.isNotEmpty()) {
+                Text(
+                    stringResource(R.string.send_swarm_act_rules),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            grant.act.forEach { rule ->
+                val address = SwarmAct.publisher(rule.publicKey)?.address
+                val removeLabel = stringResource(R.string.send_swarm_act_remove_cd, address ?: rule.publicKey)
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag("swarm-act-rule")) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(rule.publicKey, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                        address?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    TextButton(
+                        onClick = { onRemoveAct(grant.origin, rule.publicKey) },
+                        modifier = Modifier.testTag("swarm-act-remove").semantics { contentDescription = removeLabel },
+                    ) { Text(stringResource(R.string.common_remove)) }
+                }
+                if (actRemoveFailed == grant.origin to rule.publicKey) {
+                    Text(
+                        stringResource(R.string.send_swarm_act_remove_failed),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
     }

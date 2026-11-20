@@ -398,7 +398,7 @@ class SwarmManifests(
          * disconnecting would take with it — an ACT rule (#540) — so a
          * connection the manifest no longer owns stays, as the user's.
          */
-        suspend fun keepsConnection(origin: String): Boolean = false
+        suspend fun keepsConnection(origin: String): Boolean
     }
 
     class Ack(val decision: String, val source: String, val whyShown: String?, val decidedAt: Long)

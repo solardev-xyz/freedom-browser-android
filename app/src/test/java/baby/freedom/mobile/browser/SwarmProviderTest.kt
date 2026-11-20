@@ -33,7 +33,14 @@ class SwarmProviderTest {
     private class MemoryGrants : SwarmProvider.Grants {
         val connected = HashSet<String>()
         val auto = HashSet<Pair<String, SwarmProvider.AutoApprove>>()
-        override suspend fun connected(origin: String) = origin in connected
+        var connectedReads = 0
+        /** Suspends the n-th [connected] read (1-based) until completed, as the app's DataStore read can. */
+        var holdConnectedRead: Pair<Int, kotlinx.coroutines.CompletableDeferred<Unit>>? = null
+        override suspend fun connected(origin: String): Boolean {
+            val n = ++connectedReads
+            holdConnectedRead?.takeIf { it.first == n }?.second?.await()
+            return origin in connected
+        }
         override suspend fun connect(origin: String) = connected.add(origin).let { true }
         override suspend fun autoApprove(origin: String, kind: SwarmProvider.AutoApprove) = (origin to kind) in auto
         override suspend fun setAutoApprove(origin: String, kind: SwarmProvider.AutoApprove) = auto.add(origin to kind).let { true }
@@ -2627,6 +2634,28 @@ class SwarmProviderTest {
         replies.forEach { okJson(it) }
         assertEquals(1, asked.size)
         assertEquals(2, actRequests().size)
+    }
+
+    @Test
+    fun `an ACT read cancelled with its page while the site's limits are read keeps no join slot`() {
+        connect()
+        grants.act += site to actKey
+        serveAct()
+        // The reads of the connection: the dispatch, the request charge, then the byte limit.
+        for (held in 2..3) {
+            grants.connectedReads = 0
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            grants.holdConnectedRead = held to gate
+            runBlocking {
+                val job = async { provider.request(site, "swarm_openAct", actParams(), {}, page) { SwarmProvider.Answer(true) } }
+                while (grants.connectedReads < held) kotlinx.coroutines.yield()
+                job.cancelAndJoin()
+            }
+            grants.holdConnectedRead = null
+            assertEquals("cancelled at read $held", 0, provider.joinShareOrigins())
+        }
+        // The slots are all there: eight reads in a row still open.
+        repeat(SwarmProvider.MAX_CONCURRENT_JOINS + 1) { okJson(call("swarm_openAct", actParams())) }
     }
 
     @Test

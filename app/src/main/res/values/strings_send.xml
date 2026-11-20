@@ -334,6 +334,8 @@
     <string name="send_connected_to_swarm">Connected to Swarm</string>
     <!-- Above a connected Swarm site's ACT rules (#540): each a publisher whose shared content the site opens without asking -->
     <string name="send_swarm_act_rules">Opens content these publishers shared with you without asking:</string>
+    <!-- TalkBack label for an ACT rule's Remove button; %1$s: the publisher's address -->
+    <string name="send_swarm_act_remove_cd">Remove the rule for publisher %1$s</string>
     <string name="send_swarm_act_remove_failed">Couldn\'t remove that rule. Try again.</string>
     <string name="send_ask_each_time">Ask each time</string>
 

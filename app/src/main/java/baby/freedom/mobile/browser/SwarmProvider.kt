@@ -1123,16 +1123,19 @@ class SwarmProvider(
         calls.committed()
         spendBudget(origin, requests = 1)
         reachableOrFail()
+        // Before the slot is taken: nothing that can suspend sits between taking it and the
+        // finally that gives it back, so a read cancelled with its page never keeps one.
+        val maxBytes = readMaxBytes(origin)
         val started = System.nanoTime()
         fun left() = SwarmAct.READ_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000
         var slot = false
-        withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) {
-            acquireJoin(origin)
-            slot = true
-        }
-        if (!slot) return Reply.Err(INTERNAL, "The share can't be opened: too many Swarm reads are in progress. Try again.")
-        val maxBytes = readMaxBytes(origin)
         val answer = try {
+            // Flagged inside the block, as readData does.
+            withTimeoutOrNull((left() - MIN_JOIN_MS).coerceAtLeast(0)) {
+                acquireJoin(origin)
+                slot = true
+            }
+            if (!slot) return Reply.Err(INTERNAL, "The share can't be opened: too many Swarm reads are in progress. Try again.")
             withContext(io) {
                 node.request(
                     "GET", SwarmAct.nodePath(share), SwarmAct.headers(share), null,
@@ -1147,7 +1150,7 @@ class SwarmProvider(
         } catch (e: Http.AnswerCutShort) {
             return cutShort("The share can't be opened: the node's answer broke off")
         } finally {
-            releaseJoin(origin)
+            if (slot) releaseJoin(origin)
         }
         if (!answer.ok) {
             val message = answer.message()
