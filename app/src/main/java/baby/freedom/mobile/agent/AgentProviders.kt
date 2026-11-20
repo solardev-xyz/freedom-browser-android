@@ -114,8 +114,9 @@ internal class AgentProviders(
      * Saves a LAN server: Ollama (one, `ollama`) or an OpenAI-compatible
      * one ([connectionId] null adds a new one). [url] must have passed
      * [ProviderUrls]; [key] is optional (`null` keeps the saved one for
-     * the same URL and drops it for a new one, `""` removes it). Returns
-     * the connection's id, or null if not saved.
+     * the same URL and drops it for a new one, `""` removes it). A new URL
+     * also drops the old server's models, favourites and the default model
+     * if it was one of them. Returns the connection's id, or null if not saved.
      */
     suspend fun saveLan(
         providerId: String,
