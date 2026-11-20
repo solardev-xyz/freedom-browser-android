@@ -278,6 +278,8 @@ class SwarmProviderTest {
     /** Run when a sheet is answered allowed: stands in for what approving it does (setting up a wallet). */
     private var onApproved: () -> Unit = {}
     private var commits = 0
+    /** Whether Freedom Agent holds the asking tab (#591): read live by the provider, as the bridge's lambda is. */
+    private var held = false
     private val events = mutableListOf<Triple<String, String, Any>>()
 
     init {
@@ -285,7 +287,7 @@ class SwarmProviderTest {
     }
 
     private fun call(method: String, params: JSONObject = JSONObject(), origin: String = site, subscriber: SwarmSubscriptions.Subscriber? = page) = runBlocking {
-        provider.request(origin, method, params, { commits++ }, subscriber) { ask ->
+        provider.request(origin, method, params, { commits++ }, subscriber, agentHeld = { held }) { ask ->
             asked += ask
             answer.also { if (it.allowed) onApproved() }
         }
@@ -864,7 +866,7 @@ class SwarmProviderTest {
         }
         val reads = (1..8).map {
             async(Dispatchers.IO) {
-                provider.request(other, "swarm_readFeedEntry", entryParams()) { SwarmProvider.Answer.REJECTED }
+                provider.request(other, "swarm_readFeedEntry", entryParams(), agentHeld = { false }) { SwarmProvider.Answer.REJECTED }
                     .also { finished.incrementAndGet() }
             }
         }
@@ -1103,7 +1105,7 @@ class SwarmProviderTest {
         }
         val reads = (1..8).map {
             async(Dispatchers.IO) {
-                provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED }
+                provider.request(other, "swarm_readData", dataParams(ref), agentHeld = { false }) { SwarmProvider.Answer.REJECTED }
                     .also { finished.incrementAndGet() }
             }
         }
@@ -1136,7 +1138,7 @@ class SwarmProviderTest {
         // Spread over enough sites that their shares together cover every slot.
         val sites = (0 until count).map { "https://s${it % (cap / SwarmProvider.MAX_JOINS_PER_ORIGIN + 2)}.example" }
         val reads = sites.map { origin ->
-            async(Dispatchers.IO) { provider.request(origin, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+            async(Dispatchers.IO) { provider.request(origin, "swarm_readData", dataParams(ref), agentHeld = { false }) { SwarmProvider.Answer.REJECTED } }
         }
         val deadline = System.currentTimeMillis() + 5_000
         while (inJoin.get() < cap && System.currentTimeMillis() < deadline) Thread.sleep(10)
@@ -1165,7 +1167,7 @@ class SwarmProviderTest {
             }
         }
         fun read(origin: String, reference: String) = async(Dispatchers.IO) {
-            provider.request(origin, "swarm_readData", dataParams(reference)) { SwarmProvider.Answer.REJECTED }
+            provider.request(origin, "swarm_readData", dataParams(reference), agentHeld = { false }) { SwarmProvider.Answer.REJECTED }
         }
         // A burst of slow reads from one site, well past the global cap.
         val slow = (1..SwarmProvider.MAX_CONCURRENT_JOINS * 3).map { read(other, slowRef) }
@@ -1195,12 +1197,12 @@ class SwarmProviderTest {
         }
         val share = SwarmProvider.MAX_JOINS_PER_ORIGIN
         val holding = (1..share).map {
-            async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+            async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref), agentHeld = { false }) { SwarmProvider.Answer.REJECTED } }
         }
         val deadline = System.currentTimeMillis() + 5_000
         while (joining.get() < share && System.currentTimeMillis() < deadline) Thread.sleep(10)
         val held = provider.budgetBytes(other)
-        val waiting = async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref)) { SwarmProvider.Answer.REJECTED } }
+        val waiting = async(Dispatchers.IO) { provider.request(other, "swarm_readData", dataParams(ref), agentHeld = { false }) { SwarmProvider.Answer.REJECTED } }
         // Its root chunk (span + 4096 bytes) is paid for whatever happens; the rest is reserved.
         val root = 8L + 4096
         while (provider.budgetBytes(other) < held + blob.size && System.currentTimeMillis() < deadline) Thread.sleep(10)
@@ -2490,7 +2492,7 @@ class SwarmProviderTest {
             // The app's disconnect holds the gate while it revokes.
             gate.lock()
             val r = async {
-                gated.request(site, "swarm_createFeed", JSONObject().put("name", "posts"), {}, page) {
+                gated.request(site, "swarm_createFeed", JSONObject().put("name", "posts"), {}, page, agentHeld = { false }) {
                     asked += it
                     SwarmProvider.Answer(true, always = true)
                 }
@@ -2603,6 +2605,61 @@ class SwarmProviderTest {
     }
 
     @Test
+    fun `no always-allow answers in a tab Freedom Agent holds, and each does again once it's taken back (#591)`() {
+        connect()
+        serveAct()
+        feeds.granted += site
+        grants.messaging += site
+        for (kind in SwarmProvider.AutoApprove.entries) grants.auto += site to kind
+        grants.act += site to actKey
+        val calls = listOf(
+            "swarm_publishData" to JSONObject().put("data", "hello").put("contentType", "text/plain"),
+            "swarm_createFeed" to JSONObject().put("name", "posts"),
+            "swarm_getSigningIdentity" to JSONObject(),
+            "swarm_sendPss" to pssParams(),
+            "swarm_openAct" to actParams(),
+        )
+        held = true
+        answer = SwarmProvider.Answer.REJECTED
+        for ((method, params) in calls) assertEquals(method, 4001, err(call(method, params)).code)
+        assertEquals(
+            listOf(
+                SwarmAsk.Publish::class to null,
+                SwarmAsk.Sign::class to SwarmProvider.AutoApprove.Feeds,
+                SwarmAsk.Sign::class to SwarmProvider.AutoApprove.Signing,
+                SwarmAsk.Message::class to null,
+                SwarmAsk.Act::class to null,
+            ),
+            asked.map { it::class to (it as? SwarmAsk.Sign)?.kind },
+        )
+        assertTrue("a held tab's send sheet is the per-send one", (asked[3] as SwarmAsk.Message).send != null)
+        assertTrue("nothing went out", node.uploads().isEmpty())
+        assertEquals(0, commits)
+
+        // Taken back: every rule answers again, without a sheet.
+        held = false
+        asked.clear()
+        for ((method, params) in calls) ok(call(method, params))
+        assertTrue(asked.isEmpty())
+        assertEquals(calls.size, commits)
+    }
+
+    @Test
+    fun `a held tab's sheet still saves its always-allow, which answers once the tab is the user's (#591)`() {
+        connect()
+        held = true
+        answer = SwarmProvider.Answer(true, always = true)
+        okJson(call("swarm_publishData", JSONObject().put("data", "one").put("contentType", "text/plain")))
+        assertTrue("the user's own switch, as on desktop", (site to SwarmProvider.AutoApprove.Publish) in grants.auto)
+        answer = SwarmProvider.Answer(true)
+        okJson(call("swarm_publishData", JSONObject().put("data", "two").put("contentType", "text/plain")))
+        assertEquals("still held: asked again", 2, asked.size)
+        held = false
+        okJson(call("swarm_publishData", JSONObject().put("data", "three").put("contentType", "text/plain")))
+        assertEquals(2, asked.size)
+    }
+
+    @Test
     fun `a site disconnected while its ACT sheet was up gets no rule and nothing opened`() {
         connect()
         serveAct()
@@ -2623,8 +2680,8 @@ class SwarmProviderTest {
                 asked += it
                 first.await()
             }
-            val a = async { provider.request(site, "swarm_openAct", actParams(), {}, page, ask) }
-            val b = async { provider.request(site, "swarm_openAct", actParams(), {}, page, ask) }
+            val a = async { provider.request(site, "swarm_openAct", actParams(), {}, page, agentHeld = { false }, ask = ask) }
+            val b = async { provider.request(site, "swarm_openAct", actParams(), {}, page, agentHeld = { false }, ask = ask) }
             while (asked.isEmpty()) kotlinx.coroutines.yield()
             repeat(5) { kotlinx.coroutines.yield() }
             assertEquals("the second waits for the first's answer", 1, asked.size)
@@ -2644,11 +2701,11 @@ class SwarmProviderTest {
         val onScreen = FakeSubscriber(tab = 2)
         val replies = runBlocking {
             val a = async {
-                provider.request(site, "swarm_openAct", actParams(), {}, page) { asked += it; background.await() }
+                provider.request(site, "swarm_openAct", actParams(), {}, page, agentHeld = { false }) { asked += it; background.await() }
             }
             while (asked.isEmpty()) kotlinx.coroutines.yield()
             // Tab 1's sheet is still up, unanswered: tab 2 gets its own at once and is answered.
-            val b = provider.request(site, "swarm_openAct", actParams(publisher = otherActKey), {}, onScreen) {
+            val b = provider.request(site, "swarm_openAct", actParams(publisher = otherActKey), {}, onScreen, agentHeld = { false }) {
                 asked += it
                 SwarmProvider.Answer(true)
             }
@@ -2668,8 +2725,8 @@ class SwarmProviderTest {
         serveAct()
         runBlocking {
             val never = kotlinx.coroutines.CompletableDeferred<SwarmProvider.Answer>()
-            val held = async { provider.request(site, "swarm_openAct", actParams(), {}, page) { asked += it; never.await() } }
-            val waiting = async { provider.request(site, "swarm_openAct", actParams(), {}, page) { asked += it; never.await() } }
+            val held = async { provider.request(site, "swarm_openAct", actParams(), {}, page, agentHeld = { false }) { asked += it; never.await() } }
+            val waiting = async { provider.request(site, "swarm_openAct", actParams(), {}, page, agentHeld = { false }) { asked += it; never.await() } }
             while (asked.isEmpty()) kotlinx.coroutines.yield()
             repeat(5) { kotlinx.coroutines.yield() }
             assertEquals(1, provider.actConsentLocks())
@@ -2697,7 +2754,7 @@ class SwarmProviderTest {
             val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
             grants.holdConnectedRead = held to gate
             runBlocking {
-                val job = async { provider.request(site, "swarm_openAct", actParams(), {}, page) { SwarmProvider.Answer(true) } }
+                val job = async { provider.request(site, "swarm_openAct", actParams(), {}, page, agentHeld = { false }) { SwarmProvider.Answer(true) } }
                 while (grants.connectedReads < held) kotlinx.coroutines.yield()
                 job.cancelAndJoin()
             }

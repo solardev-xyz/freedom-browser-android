@@ -128,9 +128,11 @@ class RadicleProviderTest {
     private var always: Boolean? = null
     /** The prompt is taken down (a navigation, the tab closing, time running out) rather than answered. */
     private var withdrawn = false
+    /** Whether Freedom Agent holds the asking tab (#591): read live by the provider, as the bridge's lambda is. */
+    private var held = false
 
     private fun req(method: String, params: JSONObject = JSONObject(), origin: String = site) = runBlocking {
-        provider.request(origin, method, params) { a ->
+        provider.request(origin, method, params, agentHeld = { held }) { a ->
             asked += a
             when {
                 withdrawn -> RadicleAnswer.REFUSED
@@ -594,6 +596,67 @@ class RadicleProviderTest {
     }
 
     @Test
+    fun `in a tab Freedom Agent holds the rule answers no write and the prompt changes no rule (#591)`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        held = true
+        val before = writes()
+        // Asked, with no switch and no "unsaved"/"used up" wording; refused, nothing is written.
+        answer = false
+        err(req("radicle_commentIssue", comment()))
+        val ask = asked.single() as RadicleAsk.Write
+        assertTrue(ask.agentHeld)
+        assertFalse(ask.ruleOn)
+        assertFalse(ask.limited)
+        assertEquals(radiclePromptCopy(ask.copy(agentHeld = false)).detail, radiclePromptCopy(ask).detail)
+        assertEquals(before, writes())
+        // Nothing charged to the rule: the prompted write isn't the rule's.
+        assertTrue(grants.counted[site].orEmpty().isEmpty())
+        // A switch value in the answer is ignored either way: off doesn't turn the rule off...
+        answer = true
+        always = false
+        ok(req("radicle_commentIssue", comment()))
+        assertEquals(ME, grants.rules[site])
+        // ...and with no rule, on doesn't turn one on.
+        grants.rules.clear()
+        always = true
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue(grants.rules.isEmpty())
+        assertTrue(grants.counted[site].orEmpty().isEmpty())
+        // Taken back: the rule answers again, without a prompt.
+        grants.rules[site] = ME
+        held = false
+        always = null
+        asked.clear()
+        ok(req("radicle_commentIssue", comment()))
+        assertTrue(asked.isEmpty())
+        assertEquals(1, grants.counted[site]!!.size)
+    }
+
+    @Test
+    fun `custody is read at the write, after the rule (#591)`() {
+        grants.map[site] = ME
+        grants.rules[site] = ME
+        var reads = 0
+        // Held from the second read on: a tab the agent takes between two writes is prompted on the next.
+        val r = runBlocking {
+            provider.request(site, "radicle_commentIssue", comment(), agentHeld = { reads++ > 0 }) { a ->
+                asked += a
+                RadicleAnswer(true, null)
+            }
+        }
+        ok(r)
+        assertTrue(asked.isEmpty())
+        runBlocking {
+            provider.request(site, "radicle_commentIssue", comment(), agentHeld = { reads++ > 0 }) { a ->
+                asked += a
+                RadicleAnswer(true, null)
+            }
+        }
+        assertTrue((asked.single() as RadicleAsk.Write).agentHeld)
+    }
+
+    @Test
     fun `rejecting with the switch off turns the rule off, a withdrawn prompt leaves it`() {
         grants.map[site] = ME
         grants.rules[site] = ME
@@ -625,7 +688,7 @@ class RadicleProviderTest {
         grants.map[site] = ME
         var during: () -> Unit = {}
         fun ask() = runBlocking {
-            provider.request(site, "radicle_commentIssue", comment()) { a ->
+            provider.request(site, "radicle_commentIssue", comment(), agentHeld = { false }) { a ->
                 during()
                 RadicleAnswer(true, a is RadicleAsk.Write)
             }
@@ -992,7 +1055,7 @@ class RadicleProviderTest {
         grants.map[site] = ""
         val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
         val r = runBlocking {
-            provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) {
+            provider.request(site, "radicle_seed", JSONObject().put("rid", rid), agentHeld = { false }) {
                 // Another tab (or the Radicle page) starts a fetch meanwhile.
                 node.state.value = RadicleInfo(status = RadicleStatus.Running, seed = RadicleSeed(other, "connecting", "a (1/3)"))
                 RadicleAnswer.ALLOWED
@@ -1010,8 +1073,8 @@ class RadicleProviderTest {
         val other = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
         // B's prompt is up while A's seed is allowed; A's line hasn't arrived over IPC.
         val r = runBlocking {
-            provider.request(siteB, "radicle_seed", JSONObject().put("rid", other)) {
-                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED }
+            provider.request(siteB, "radicle_seed", JSONObject().put("rid", other), agentHeld = { false }) {
+                val a = provider.request(site, "radicle_seed", JSONObject().put("rid", rid), agentHeld = { false }) { RadicleAnswer.ALLOWED }
                 assertTrue((ok(a) as JSONObject).getBoolean("seeded"))
                 RadicleAnswer.ALLOWED
             }
@@ -1180,11 +1243,11 @@ class RadicleProviderTest {
             override fun seed(rid: String) = false
         }
         val p = RadicleProvider(grants, failing, clock = { now }, io = Dispatchers.Unconfined)
-        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED } }
+        val r = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", rid), agentHeld = { false }) { RadicleAnswer.ALLOWED } }
         assertEquals("seed_failed", err(r).reason)
-        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other)) { RadicleAnswer.ALLOWED } }
+        val r2 = runBlocking { p.request(site, "radicle_seed", JSONObject().put("rid", other), agentHeld = { false }) { RadicleAnswer.ALLOWED } }
         assertEquals("seed_failed", err(r2).reason)
-        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid)) { RadicleAnswer.ALLOWED } }
+        val status = runBlocking { p.request(site, "radicle_getSeedStatus", JSONObject().put("rid", rid), agentHeld = { false }) { RadicleAnswer.ALLOWED } }
         assertEquals(0, (ok(status) as JSONObject).getInt("attemptCount"))
     }
 

@@ -542,7 +542,11 @@ object SwarmProviders {
                     val p = provider ?: throw IllegalStateException("provider not ready")
                     val approved = { approved(reply, id) }
                     manifestFresh(bridge, doc, origin, method, deadline)
-                        ?: p.request(origin, method, request.params, approved, Subscriber(tab.id, doc, reply)) { ask ->
+                        // Read live, by this tab: the same site in a tab of the user's keeps its rules (#591).
+                        ?: p.request(
+                            origin, method, request.params, approved, Subscriber(tab.id, doc, reply),
+                            agentHeld = { baby.freedom.mobile.agent.AgentTabs.isHeld(tab.id) },
+                        ) { ask ->
                             askOnTab(tab, doc, ask, deadline - SystemClock.elapsedRealtime(), p::current, approved = approved)
                         }
                 } catch (e: CancellationException) {
