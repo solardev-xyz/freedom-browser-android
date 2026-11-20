@@ -348,6 +348,67 @@ class AgentFilesTest {
     }
 
     @Test
+    fun `an earlier link's late download during another link's wait is late, and that wait goes on`() {
+        AgentDownloads.holderOf = { if (it == 1L) "chat" else null }
+        val a = intent("https://example.com/a.zip")
+        assertTrue(AgentDownloads.arm(a))
+        assertTrue(AgentDownloads.lapse(a))
+        val b = intent("https://example.com/b.zip")
+        assertTrue(AgentDownloads.arm(b))
+        // A's download comes while B waits: late, not B's unapproved one.
+        assertNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertFalse(b.start.isCompleted)
+        assertFalse(AgentDownloads.takeHeld(1))
+        // B's own download still starts.
+        val claim = AgentDownloads.claim(1, "https://example.com/b.zip")
+        assertNotNull(claim)
+        claim!!.started(7)
+        assertEquals(DownloadIntent.Start.Started(7, "https://example.com/b.zip"), b.start.getCompleted())
+        assertFalse(AgentDownloads.takeHeld(1))
+        // A is said (with B's result), once.
+        assertEquals("https://example.com/a.zip", AgentDownloads.takeLate(1))
+        assertNull(AgentDownloads.takeLate(1))
+    }
+
+    @Test
+    fun `an earlier link's late download in a window the tab opened doesn't end another link's wait`() {
+        AgentDownloads.holderOf = { if (it == 1L || it == 2L) "chat" else null }
+        AgentDownloads.openerOf = { if (it == 2L) 1L else null }
+        val a = intent("https://example.com/a.zip")
+        assertTrue(AgentDownloads.arm(a))
+        assertTrue(AgentDownloads.lapse(a))
+        val b = intent("https://example.com/b.zip")
+        assertTrue(AgentDownloads.arm(b))
+        assertNull(AgentDownloads.claim(2, "https://example.com/a.zip"))
+        assertFalse(b.start.isCompleted)
+        assertFalse(AgentDownloads.takeHeld(1))
+        assertFalse(AgentDownloads.takeHeld(2))
+        assertEquals("https://example.com/a.zip", AgentDownloads.takeLate(1))
+        val claim = AgentDownloads.claim(1, "https://example.com/b.zip")
+        assertNotNull(claim)
+        claim!!.started(8)
+        assertEquals(DownloadIntent.Start.Started(8, "https://example.com/b.zip"), b.start.getCompleted())
+        // Another address from the popup still ends a waiting intent, as before.
+        val c = intent("https://example.com/c.zip")
+        assertTrue(AgentDownloads.arm(c))
+        assertNull(AgentDownloads.claim(2, "https://example.com/other.zip"))
+        assertEquals(DownloadIntent.Start.InPopup, c.start.getCompleted())
+    }
+
+    @Test
+    fun `a new intent for the same link ends that link's lapse`() {
+        AgentDownloads.holderOf = { if (it == 1L) "chat" else null }
+        val a = intent()
+        assertTrue(AgentDownloads.arm(a))
+        assertTrue(AgentDownloads.lapse(a))
+        val again = intent()
+        assertTrue(AgentDownloads.arm(again))
+        assertNotNull(AgentDownloads.claim(1, "https://example.com/a.zip"))
+        assertTrue(again.claimed.isCompleted)
+        assertNull(AgentDownloads.takeLate(1))
+    }
+
+    @Test
     fun `a tab taken back before its download comes is the user's`() {
         val i = intent()
         AgentDownloads.arm(i)

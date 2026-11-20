@@ -172,7 +172,10 @@ internal object AgentDownloads {
      * Arms [intent] on its tab; false if one is already armed there, or
      * if an earlier intent's download of the same link came late ([lapse])
      * and hasn't been said yet ([takeLate]): that file already waits for
-     * the user. A late download of another link doesn't stop it.
+     * the user. A late download of another link doesn't stop it. A lapse
+     * of the same link ends here (the new intent covers that link now);
+     * one of another link stays, so its late download, coming while this
+     * intent waits, is noted as late ([claim]) rather than ending it.
      */
     @Synchronized
     fun arm(intent: DownloadIntent): Boolean {
@@ -180,7 +183,9 @@ internal object AgentDownloads {
         if (late[intent.tabId]?.let { DownloadIntentMatch.matches(it, intent.expectedUrl) } == true) return false
         armed[intent.tabId] = intent
         held.remove(intent.tabId)
-        lapsed.remove(intent.tabId)
+        if (lapsed[intent.tabId]?.let { DownloadIntentMatch.matches(it.first.expectedUrl, intent.expectedUrl) } == true) {
+            lapsed.remove(intent.tabId)
+        }
         return true
     }
 
@@ -247,9 +252,11 @@ internal object AgentDownloads {
      * met an armed intent and didn't match also ends that intent. One from
      * a popup the chat holds with its opener is noted on the opener too,
      * and ends an intent armed there ([DownloadIntent.Start.InPopup]): the
-     * approved tap's link may have opened that window. The approved link's
+     * approved tap's link may have opened that window. An earlier link's
      * download after its wait ran out ([lapse]), in the tab or in a window
-     * it opened, is noted as late on the tab it was asked on instead.
+     * it opened, is noted as late on the tab it was asked on instead, and
+     * leaves an intent armed there for another link waiting: that one's
+     * own download may still come.
      */
     @Synchronized
     fun claim(tabId: Long, url: String): AgentDownloadClaim? {
@@ -257,11 +264,10 @@ internal object AgentDownloads {
         if (intent == null) {
             val holder = holderOf(tabId) ?: return null
             val opener = openerOf(tabId)?.takeIf { it != tabId && holderOf(it) == holder }
-            if (!lateOn(tabId, holder, url) && (opener == null || !lateOn(opener, holder, url))) {
-                held += tabId
-                if (opener != null) held += opener
-            }
+            if (lateOn(tabId, holder, url) || (opener != null && lateOn(opener, holder, url))) return null
+            held += tabId
             if (opener != null) {
+                held += opener
                 val waiting = armed[opener]
                 if (waiting != null && waiting.sessionId == holder) {
                     armed.remove(opener)
@@ -270,8 +276,13 @@ internal object AgentDownloads {
             }
             return null
         }
+        val holder = holderOf(tabId)
+        // The lapsed link's late download, not this intent's: noted, and this one waits on.
+        if (holder == intent.sessionId && !DownloadIntentMatch.matches(intent.expectedUrl, url) && lateOn(tabId, holder, url)) {
+            return null
+        }
         armed.remove(tabId)
-        if (holderOf(tabId) != intent.sessionId) {
+        if (holder != intent.sessionId) {
             intent.start.complete(DownloadIntent.Start.TakenBack)
             return null
         }
