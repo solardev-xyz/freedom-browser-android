@@ -1,5 +1,6 @@
 package baby.freedom.mobile.browser
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -37,6 +38,13 @@ class ProbeCoverTest {
         webViewDocumentCommitted()
         url = newAddress
         addressBarText = newAddress
+    }
+
+    /** The chrome's Stop. */
+    private fun BrowserState.userStop() {
+        cancelPendingProbe()
+        stopProgress()
+        stopProbeCover()
     }
 
     @Test
@@ -119,7 +127,7 @@ class ProbeCoverTest {
     @Test
     fun `Stop uncovers the page on screen`() {
         val tab = probingTab()
-        tab.stopProgress()
+        tab.userStop()
         assertFalse(tab.coversPageForProbe)
         // …for good: a later load of the same generation doesn't bring
         // it back.
@@ -130,7 +138,7 @@ class ProbeCoverTest {
     @Test
     fun `Stop doesn't keep a later submit's probe uncovered`() {
         val tab = probingTab()
-        tab.stopProgress()
+        tab.userStop()
         // The stopped probe arming late changes nothing…
         tab.coverPageForProbe(tab.loadGeneration)
         assertFalse(tab.coversPageForProbe)
@@ -165,10 +173,80 @@ class ProbeCoverTest {
         tab.coverPageForProbe(tab.loadGeneration)
         // The cancelled first probe's late callbacks: nothing was handed
         // for the new one yet.
-        tab.webViewDocumentCommitted()
         tab.webViewLoadSettled(samePage = true)
         tab.webViewLoadSettled(samePage = false)
         assertTrue(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a navigation already in flight that commits mid-probe uncovers its page`() {
+        // A slow link the WebView was following when the user submitted
+        // the dweb address: it lands while the probe still polls, and the
+        // bar takes its address.
+        val tab = probingTab()
+        tab.webViewDocumentCommitted()
+        tab.url = "http://127.0.0.1:8720/slowpage"
+        tab.addressBarText = tab.url
+        assertFalse(tab.coversPageForProbe)
+        // Its paint and finish change nothing more, and the probe's own
+        // answer later loads as usual, uncovered.
+        tab.webViewLoadSettled(samePage = true)
+        tab.handOff()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a redirect of a navigation already in flight keeps the old page covered until it commits`() {
+        val tab = probingTab()
+        // The in-flight link's 302: still the old page on screen.
+        tab.beginLoad(inWebView = true, redirect = true)
+        assertTrue(tab.coversPageForProbe)
+        // The hop's target lands: its own page, uncovered.
+        tab.webViewDocumentCommitted()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a redirect of a navigation already in flight hands the cover on to the probe's load`() {
+        val tab = probingTab()
+        tab.beginLoad(inWebView = true, redirect = true)
+        // The probe answers before the hop's target commits: the hand-off
+        // stops that navigation, and the cover is the probe's load's.
+        tab.handOff()
+        tab.webViewLoadSettled(samePage = true)
+        assertTrue(tab.coversPageForProbe)
+        tab.commit()
+        assertTrue(tab.coversPageForProbe)
+        tab.webViewLoadSettled(samePage = true)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a navigation already in flight that ends without a document keeps the probe covered`() {
+        val tab = probingTab()
+        // A 204, or a load the WebView turned into a download.
+        tab.webViewLoadSettled(samePage = false)
+        tab.stopProgress()
+        assertTrue(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `the covered load ending without a page uncovers the page on screen`() {
+        // It became a download, went to another app, or the page on
+        // screen refused to be left.
+        val tab = probingTab()
+        tab.handOff()
+        tab.stopProgress()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `the loading screen names the address the cover was armed for`() {
+        val tab = probingTab()
+        // The old page rewrites the bar (`pushState`) under the cover.
+        tab.addressBarText = "freemap.eth/elsewhere"
+        assertTrue(tab.coversPageForProbe)
+        assertEquals(newAddress, tab.probeCoverAddress)
     }
 
     @Test

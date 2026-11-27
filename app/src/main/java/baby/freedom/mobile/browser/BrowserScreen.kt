@@ -2612,6 +2612,9 @@ fun BrowserScreen(
                     tabs = tabs,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     covered = overlayShown,
+                    // The probe's loading screen hides the page (#616):
+                    // out of reach of the keyboard and TalkBack too.
+                    pageHidden = state.coversPageForProbe && state.rendererGone == null,
                     // Closing the last private tab clears the nodes' logs (#276).
                     onPrivateSessionEnded = clearNodeLogs,
                 )
@@ -2675,7 +2678,7 @@ fun BrowserScreen(
             if (state.coversPageForProbe && rendererGone == null) {
                 PrivateTheme(private = state.private) {
                     ProbeLoadingScreen(
-                        address = state.addressBarText,
+                        address = state.probeCoverAddress,
                         ipfs = state.ipfsLoad,
                         bottomContentPadding = capsuleOverlap,
                         modifier = Modifier.fillMaxSize(),
@@ -2901,6 +2904,8 @@ fun BrowserScreen(
                         state.cancelPendingProbe()
                         tabs.stopLoading?.invoke(state)
                         state.stopProgress()
+                        // The loading screen goes, for this load (#616).
+                        state.stopProbeCover()
                         // …and give the label back to the page that is
                         // actually on screen if the cancelled navigation
                         // never got to commit (#39).

@@ -888,6 +888,10 @@ fun BrowserWebViewHost(
     tabs: TabsState,
     modifier: Modifier = Modifier,
     covered: Boolean = false,
+    // The active tab's page is hidden behind a screen of the tab's own
+    // (the dweb probe's loading screen, #616): as out of reach as under
+    // a panel, for the keyboard and for TalkBack alike.
+    pageHidden: Boolean = false,
     onPrivateSessionEnded: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -1472,10 +1476,22 @@ fun BrowserWebViewHost(
     // panel (the Wallet page's recovery phrase, above all) would go to a
     // page nobody can see. Blocking descendants makes those requests
     // fail for as long as the panel is up, not just when it opens.
+    // The probe's loading screen ([pageHidden], #616) hides the page the
+    // same way.
+    val blocksFocus = covered || pageHidden
     SideEffect {
+        // Out of the accessibility tree too while the probe's loading
+        // screen is up (#616): its touches are blocked, but TalkBack's
+        // swipe navigation and double-tap (ACTION_CLICK) would still
+        // reach the page's links under it.
+        frame.importantForAccessibility = if (pageHidden) {
+            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        } else {
+            View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        }
         val blocked = frame.descendantFocusability == ViewGroup.FOCUS_BLOCK_DESCENDANTS
-        if (covered == blocked) return@SideEffect
-        if (covered) {
+        if (blocksFocus == blocked) return@SideEffect
+        if (blocksFocus) {
             frame.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
             frame.findFocus()?.clearFocus()
         } else {
