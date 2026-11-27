@@ -30,7 +30,7 @@ class ProbeCoverTest {
     /** The probe answered and handed its load to the WebView. */
     private fun BrowserState.handOff() {
         loadUrl(newAddress)
-        handLoadToWebView()
+        handLoadToWebView(newAddress)
     }
 
     /** `onPageStarted` of the handed load: the bar takes its address. */
@@ -73,7 +73,7 @@ class ProbeCoverTest {
         tab.commit()
         assertTrue(tab.coversPageForProbe)
         // `onPageCommitVisible`.
-        tab.webViewLoadSettled(samePage = true)
+        tab.webViewPageDrawn()
         assertFalse(tab.coversPageForProbe)
     }
 
@@ -81,8 +81,9 @@ class ProbeCoverTest {
     fun `a load that ends without a document uncovers the page on screen`() {
         val tab = probingTab()
         tab.handOff()
-        // A 204: the finish is of the handed URL, which never committed.
-        tab.webViewLoadSettled(samePage = false)
+        // A 204: the finish is of the handed URL, which never committed —
+        // as Chromium spells it, with a slash added.
+        assertEquals(null, tab.webViewLoadSettled("$newAddress/"))
         assertFalse(tab.coversPageForProbe)
     }
 
@@ -91,24 +92,82 @@ class ProbeCoverTest {
         val tab = probingTab()
         tab.handOff()
         tab.beginLoad(inWebView = true, redirect = true)
+        tab.webViewNavigating("https://gateway.example/bzz/moved")
         assertTrue(tab.coversPageForProbe)
         tab.commit()
-        tab.webViewLoadSettled(samePage = true)
+        tab.webViewPageDrawn()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a redirect hop of the handed load that ends without a document uncovers`() {
+        val tab = probingTab()
+        tab.handOff()
+        tab.beginLoad(inWebView = true, redirect = true)
+        tab.webViewNavigating("https://gateway.example/bzz/moved")
+        tab.webViewLoadSettled("https://gateway.example/bzz/moved")
         assertFalse(tab.coversPageForProbe)
     }
 
     @Test
     fun `a late callback of the old page doesn't uncover the probe`() {
         val tab = probingTab()
-        // The old page's own finish arrives while the probe is still
-        // polling…
-        tab.webViewLoadSettled(samePage = true)
-        tab.webViewLoadSettled(samePage = false)
+        // The old page's own finish and paint arrive while the probe is
+        // still polling…
+        tab.webViewLoadSettled(oldPage)
+        tab.webViewPageDrawn()
         assertTrue(tab.coversPageForProbe)
         // …or once the load was handed over, posted by the hand-off's
         // stopLoading().
         tab.handOff()
-        tab.webViewLoadSettled(samePage = true)
+        assertEquals(null, tab.webViewLoadSettled(oldPage))
+        tab.webViewPageDrawn()
+        assertTrue(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `the covered page's finish before its first paint keeps it covered`() {
+        // R4-F2: `onPageFinished` can come ahead of `onPageCommitVisible`,
+        // while the WebView still draws the old page.
+        val tab = probingTab()
+        tab.handOff()
+        tab.commit()
+        val token = tab.webViewLoadSettled(newAddress)
+        assertTrue(tab.coversPageForProbe)
+        tab.webViewPageDrawn()
+        assertFalse(tab.coversPageForProbe)
+        // The fallback then finds nothing to do.
+        tab.probeCoverPaintOverdue(token!!)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a covered page no paint is reported for is uncovered after the grace`() {
+        val tab = probingTab()
+        tab.handOff()
+        tab.commit()
+        val token = tab.webViewLoadSettled(newAddress)!!
+        assertTrue(tab.coversPageForProbe)
+        tab.probeCoverPaintOverdue(token)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a stale paint fallback doesn't uncover a newer covered load`() {
+        val tab = probingTab()
+        tab.handOff()
+        tab.commit()
+        val token = tab.webViewLoadSettled(newAddress)!!
+        // The user submits another dweb address before the grace ran out.
+        tab.addressBarText = "bzz://" + "cd".repeat(32)
+        tab.beginLoad()
+        tab.coverPageForProbe(tab.loadGeneration)
+        tab.probeCoverPaintOverdue(token)
+        assertTrue(tab.coversPageForProbe)
+        // Nor one of the same load before it committed.
+        tab.loadUrl(tab.addressBarText)
+        tab.handLoadToWebView(tab.addressBarText)
+        tab.probeCoverPaintOverdue(tab.loadGeneration)
         assertTrue(tab.coversPageForProbe)
     }
 
@@ -173,8 +232,9 @@ class ProbeCoverTest {
         tab.coverPageForProbe(tab.loadGeneration)
         // The cancelled first probe's late callbacks: nothing was handed
         // for the new one yet.
-        tab.webViewLoadSettled(samePage = true)
-        tab.webViewLoadSettled(samePage = false)
+        tab.webViewLoadSettled(oldPage)
+        tab.webViewLoadSettled(newAddress)
+        tab.webViewPageDrawn()
         assertTrue(tab.coversPageForProbe)
     }
 
@@ -190,7 +250,8 @@ class ProbeCoverTest {
         assertFalse(tab.coversPageForProbe)
         // Its paint and finish change nothing more, and the probe's own
         // answer later loads as usual, uncovered.
-        tab.webViewLoadSettled(samePage = true)
+        tab.webViewPageDrawn()
+        tab.webViewLoadSettled(tab.url)
         tab.handOff()
         assertFalse(tab.coversPageForProbe)
     }
@@ -210,43 +271,57 @@ class ProbeCoverTest {
     fun `a redirect of a navigation already in flight hands the cover on to the probe's load`() {
         val tab = probingTab()
         tab.beginLoad(inWebView = true, redirect = true)
+        tab.webViewNavigating("https://example.org/new")
         // The probe answers before the hop's target commits: the hand-off
         // stops that navigation, and the cover is the probe's load's.
         tab.handOff()
-        tab.webViewLoadSettled(samePage = true)
+        tab.webViewLoadSettled("https://example.org/new")
         assertTrue(tab.coversPageForProbe)
         tab.commit()
         assertTrue(tab.coversPageForProbe)
-        tab.webViewLoadSettled(samePage = true)
+        tab.webViewPageDrawn()
         assertFalse(tab.coversPageForProbe)
     }
 
     @Test
-    fun `the finish of a navigation the hand-off aborted doesn't uncover the probe`() {
-        // A link to a slow page was on its way when the address was
-        // submitted (R3-F1).
-        val slow = "https://example.org/slowpage"
-        val tab = probingTab()
-        tab.webViewNavigating(slow)
-        // The probe answers first: the hand-off's stopLoading() aborts
-        // the link, whose finish comes in after the hand-off.
-        tab.handOff()
-        tab.webViewLoadSettled(samePage = false, url = slow)
-        assertTrue(tab.coversPageForProbe)
-        tab.commit()
-        assertTrue(tab.coversPageForProbe)
-        tab.webViewLoadSettled(samePage = true)
-        assertFalse(tab.coversPageForProbe)
+    fun `the finish of any navigation the hand-off aborted doesn't uncover the probe`() {
+        // A navigation was on its way when the address was submitted: a
+        // link (R3-F1), or one the WebView was handed itself — a typed or
+        // bookmarked address, a History entry, Back / Forward (R4-F1) — or
+        // a form POST, none of which the cover was told of.
+        for (aborted in listOf("https://example.org/slowpage", "http://slow-host/slowpage", oldPage + "/before")) {
+            val tab = probingTab()
+            // The probe answers first: the hand-off's stopLoading()
+            // aborts it, and its finish comes in after the hand-off.
+            tab.handOff()
+            tab.webViewLoadSettled(aborted)
+            assertTrue(aborted, tab.coversPageForProbe)
+            tab.commit()
+            assertTrue(tab.coversPageForProbe)
+            // Even once the covered load committed: no early uncover.
+            tab.webViewLoadSettled(aborted)
+            assertTrue(tab.coversPageForProbe)
+            tab.webViewPageDrawn()
+            assertFalse(tab.coversPageForProbe)
+        }
     }
 
     @Test
-    fun `the finish of a redirect hop the hand-off aborted doesn't uncover the probe`() {
-        val tab = probingTab()
-        tab.webViewNavigating("https://example.org/old")
-        tab.beginLoad(inWebView = true, redirect = true)
-        tab.webViewNavigating("https://example.org/new")
+    fun `a browser-initiated load handed before the probe's isn't the covered load`() {
+        // The typed slow address was handed to the WebView before the
+        // dweb submit: its URL isn't the covered load's (R4-F1).
+        val slow = "http://slow-host/slowpage"
+        val tab = BrowserState(id = 1L)
+        tab.url = oldPage
+        tab.addressBarText = slow
+        tab.beginLoad()
+        tab.loadUrl(slow)
+        tab.handLoadToWebView(slow)
+        tab.addressBarText = newAddress
+        tab.beginLoad()
+        tab.coverPageForProbe(tab.loadGeneration)
         tab.handOff()
-        tab.webViewLoadSettled(samePage = false, url = "https://example.org/new")
+        tab.webViewLoadSettled(slow)
         assertTrue(tab.coversPageForProbe)
     }
 
@@ -254,32 +329,25 @@ class ProbeCoverTest {
     fun `the handed load's own end without a document still uncovers after an aborted one`() {
         val slow = "https://example.org/slowpage"
         val tab = probingTab()
-        tab.webViewNavigating(slow)
         tab.handOff()
-        tab.webViewLoadSettled(samePage = false, url = slow)
+        tab.webViewLoadSettled(slow)
         // The probe's load answers 204: the page on screen stays.
-        tab.webViewLoadSettled(samePage = false, url = "https://gateway.example/bzz/x")
+        tab.webViewLoadSettled(newAddress)
         assertFalse(tab.coversPageForProbe)
     }
 
     @Test
-    fun `a navigation that finished before the hand-off isn't taken for an aborted one`() {
-        val other = "https://example.org/204"
-        val tab = probingTab()
-        tab.webViewNavigating(other)
-        // It ended without a document while the probe still ran.
-        tab.webViewLoadSettled(samePage = false, url = other)
-        tab.handOff()
-        // The covered load answers 204 from the same address.
-        tab.webViewLoadSettled(samePage = false, url = other)
-        assertFalse(tab.coversPageForProbe)
+    fun `the cover's URL match ignores a trailing slash and the scheme and host case only`() {
+        assertEquals(probeCoverUrlKey("bzz://abc"), probeCoverUrlKey("BZZ://ABC/"))
+        assertEquals(probeCoverUrlKey("https://Example.org/a/"), probeCoverUrlKey("https://example.org/a"))
+        assertFalse(probeCoverUrlKey("https://example.org/A") == probeCoverUrlKey("https://example.org/a"))
     }
 
     @Test
     fun `a navigation already in flight that ends without a document keeps the probe covered`() {
         val tab = probingTab()
         // A 204, or a load the WebView turned into a download.
-        tab.webViewLoadSettled(samePage = false)
+        tab.webViewLoadSettled("https://example.org/204")
         tab.stopProgress()
         assertTrue(tab.coversPageForProbe)
     }

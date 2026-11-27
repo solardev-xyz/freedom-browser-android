@@ -230,6 +230,14 @@ internal fun committedNameTrust(
 
 private val CONTENT_ROOT_SCHEMES = listOf("bzz://", "ipfs://", "ipns://")
 
+/**
+ * Runs the probe cover's paint fallback (#616 R4-F2,
+ * [BrowserState.probeCoverPaintOverdue]) on the main thread, whether or
+ * not the tab's WebView is attached (a detached view's own queue waits
+ * for its next attach).
+ */
+private val probeCoverHandler = Handler(Looper.getMainLooper())
+
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
     if (code == "ens_lookup_failed" || code == "ens_ccip_disabled") 502 else 404
@@ -1434,7 +1442,7 @@ fun BrowserWebViewHost(
                             val load = {
                                 // From here the WebView is on this load, not
                                 // the one it was showing (#94).
-                                tab.handLoadToWebView()
+                                tab.handLoadToWebView(pending)
                                 if (bypassCache) {
                                     tab.bypassCacheForHandedLoad()
                                     (wv as PageWebView).hardReload(pending, namedByUser)
@@ -3538,7 +3546,7 @@ private fun buildRefreshableWebView(
             override fun onPageCommitVisible(view: WebView?, url: String?) {
                 // The covered load's page is drawn: no loading screen
                 // over it any more (#616).
-                state.webViewLoadSettled(samePage = true)
+                state.webViewPageDrawn()
                 showFailedLoadPage(view, url)
                 // The error page's text, in the app's language (#280).
                 errorPageStrings(view, url)
@@ -3580,9 +3588,13 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
-                // The covered load is over (#616): its page loaded, or it
-                // ended without one (a 204) and the page on screen stays.
-                state.webViewLoadSettled(samePage = url == committedPageUrl, url = url)
+                // The covered load is over (#616): it ended without a
+                // page (a 204) and the page on screen stays, or its page
+                // loaded, and is drawn at its first paint — if none is
+                // reported, the cover comes off after a grace (R4-F2).
+                state.webViewLoadSettled(url)?.let { token ->
+                    probeCoverHandler.postDelayed({ state.probeCoverPaintOverdue(token) }, PROBE_COVER_PAINT_GRACE_MS)
+                }
                 // A Hard reload's page has loaded: the cache is used
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)
@@ -4068,9 +4080,8 @@ private fun buildRefreshableWebView(
                     onSubmitUrl(state, target)
                     return true
                 }
-                // The WebView follows it itself: if a probe's load is
-                // handed over first, its `stopLoading()` aborts this one,
-                // whose finish then isn't that load's (#616 R3-F1).
+                // A redirect hop of the probe cover's load is that load's
+                // own: its finish is that load ending (#616 R4-F1).
                 if (request.isForMainFrame) state.webViewNavigating(target)
                 // A page's own navigation — a link, a script's
                 // `location` change, or a redirect of either — goes on

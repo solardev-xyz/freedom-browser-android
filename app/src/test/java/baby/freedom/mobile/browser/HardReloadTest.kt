@@ -266,7 +266,7 @@ class HardReloadTest {
         assertFalse(tab.takeFreshFetch(tab.webViewGeneration, target))
 
         tab.beginLoad()
-        tab.handLoadToWebView()
+        tab.handLoadToWebView("https://example.org/")
         tab.bypassCacheForHandedLoad()
         val generation = tab.webViewGeneration
         assertTrue(tab.takeFreshFetch(generation, target))
@@ -283,7 +283,7 @@ class HardReloadTest {
 
         // The next navigation is an ordinary one.
         tab.beginLoad()
-        tab.handLoadToWebView()
+        tab.handLoadToWebView("https://example.org/")
         assertFalse(tab.takeFreshFetch(tab.webViewGeneration, "http://127.0.0.1:1633/bzz/abc/new.js"))
         assertFalse(tab.fetchedFresh(tab.webViewGeneration, target))
     }
@@ -293,10 +293,10 @@ class HardReloadTest {
         val reloaded = BrowserState(id = 1L)
         val other = BrowserState(id = 2L)
         reloaded.beginLoad()
-        reloaded.handLoadToWebView()
+        reloaded.handLoadToWebView("https://example.org/")
         reloaded.bypassCacheForHandedLoad()
         other.beginLoad()
-        other.handLoadToWebView()
+        other.handLoadToWebView("https://example.org/")
         val target = "http://127.0.0.1:1633/bzz/abc/video.mp4"
         assertFalse(other.takeFreshFetch(other.webViewGeneration, target))
         assertTrue(reloaded.takeFreshFetch(reloaded.webViewGeneration, target))

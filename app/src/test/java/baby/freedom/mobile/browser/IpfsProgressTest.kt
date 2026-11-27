@@ -421,7 +421,7 @@ class IpfsProgressTest {
         assertEquals(2, tab.loadGeneration)
         assertEquals(1, tab.webViewGeneration)
         assertFalse(mainFrameNoteApplies(tab.webViewGeneration, tab.loadGeneration))
-        tab.handLoadToWebView()
+        tab.handLoadToWebView("https://example.org/")
         assertTrue(mainFrameNoteApplies(tab.webViewGeneration, tab.loadGeneration))
         assertEquals(1, tab.documentGeneration)
     }
@@ -433,7 +433,7 @@ class IpfsProgressTest {
         tab.mainFrameAnswered(tab.mainFrameRequested(), replacesDocument = true)
         val oldAsset = tab.gatewayWork.start(tab.documentGeneration)
         tab.beginLoad()
-        tab.handLoadToWebView()
+        tab.handLoadToWebView("https://example.org/")
         val generation = tab.mainFrameRequested()
         val mainFrame = tab.gatewayWork.start(generation)
         // Still fetching the main frame: the page on screen is superseded.
@@ -469,7 +469,7 @@ class IpfsProgressTest {
         // Back onto a hash entry: a history update with no main frame.
         val script = tab.gatewayWork.start(tab.documentGeneration)
         tab.beginLoad()
-        tab.handLoadToWebView()
+        tab.handLoadToWebView("https://example.org/")
         assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
         tab.historyUpdated(isHome = false)
         assertEquals(3, tab.documentGeneration)
@@ -542,7 +542,7 @@ class IpfsProgressTest {
         // Home loads without a request but replaces the page all the same.
         val asset = tab.gatewayWork.start(tab.documentGeneration)
         tab.beginLoad()
-        tab.handLoadToWebView()
+        tab.handLoadToWebView("https://example.org/")
         tab.historyUpdated(isHome = true)
         assertEquals(2, tab.documentGeneration)
         assertTrue(tab.gatewayWork.activeBefore(tab.loadGeneration))
