@@ -236,7 +236,10 @@ jobs:
 
   colibri:
     name: libc4.so
-    runs-on: ubuntu-latest
+    # Pinned: on ubuntu-26.04 (ubuntu-latest since Nov 2026) CMake finds
+    # the host GCC 15's C++ std modules and the NDK cross build of evmone
+    # fails scanning them ('stdbit.h' / 'bits/stdc++.h' not found).
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
