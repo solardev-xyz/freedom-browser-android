@@ -326,6 +326,21 @@ class ProbeCoverTest {
     }
 
     @Test
+    fun `a load handed again within the covered load takes over its own URLs`() {
+        val fallback = "https://gateway.example/bzz/fallback"
+        val tab = probingTab()
+        tab.handOff()
+        // A second `loadUrl` of the same load: the first one is aborted.
+        tab.loadUrl(fallback)
+        tab.handLoadToWebView(fallback)
+        tab.webViewLoadSettled(newAddress)
+        assertTrue(tab.coversPageForProbe)
+        // The second one's 204 is that load ending without a document.
+        tab.webViewLoadSettled(fallback)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
     fun `the handed load's own end without a document still uncovers after an aborted one`() {
         val slow = "https://example.org/slowpage"
         val tab = probingTab()

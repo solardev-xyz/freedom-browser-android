@@ -436,10 +436,14 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      */
     internal fun handLoadToWebView(url: String) {
         webViewGeneration = loadGeneration
-        if (probeCoverGeneration == loadGeneration && !probeCoverHanded) {
+        if (probeCoverGeneration == loadGeneration) {
             // From here, the covered load's finish is one of its own
-            // URLs' (#616 R4-F1, [probeCoverUrls]).
+            // URLs' (#616 R4-F1, [probeCoverUrls]). Handed again (a
+            // fallback's `loadUrl` within the same load), the earlier
+            // URL is aborted like any other, and the new one is drawn
+            // once it commits.
             probeCoverHanded = true
+            probeCoverCommitted = false
             probeCoverUrls.clear()
             probeCoverUrls += probeCoverUrlKey(url)
         }
@@ -1507,7 +1511,8 @@ private val ASSERTING_SCHEMES = setOf("bzz", "ipfs", "ipns")
 /**
  * How long the probe cover (#616) waits for the covered page's first
  * paint once its load has finished ([BrowserState.probeCoverPaintOverdue]).
- * `onPageFinished` was seen 15-155 ms ahead of `onPageCommitVisible`.
+ * `onPageFinished` was seen 39-485 ms ahead of `onPageCommitVisible`
+ * on the emulator.
  */
 internal const val PROBE_COVER_PAINT_GRACE_MS = 1_000L
 
