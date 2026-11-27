@@ -182,18 +182,22 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /**
      * The WebView committed a document, or finished a load without one
-     * (#616). Only one of the covered load or a later one ends the cover:
-     * a late callback of the page that was on screen before the WebView
-     * was handed that load must not uncover it mid-probe.
+     * (#616). Only once it has been handed the covered load: a late
+     * callback of the page that was on screen must not uncover the probe.
      */
     internal fun webViewLoadSettled() {
         val generation = probeCoverGeneration ?: return
         if (webViewGeneration >= generation) probeCoverGeneration = null
     }
 
-    /** Whether the page area shows the loading screen ([probeCoverGeneration]). */
+    /**
+     * Whether the page area shows the loading screen ([probeCoverGeneration]).
+     * Not over the page whose own address is being loaded again — a
+     * Reload, or the error page's — which is the page asked for.
+     */
     internal val coversPageForProbe: Boolean
-        get() = probeCoverGeneration == loadGeneration && !loadAborted && !isHome
+        get() = probeCoverGeneration == loadGeneration && !loadAborted && !isHome &&
+            addressBarText != url
 
     /**
      * How the name the page on screen was reached through was checked
@@ -298,7 +302,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * — a new generation, but not a new [loadStarts].
      */
     internal fun beginLoad(inWebView: Boolean = false, redirect: Boolean = false) {
+        // A server redirect of a covered load is still that load (#616).
+        val carriesCover = redirect && probeCoverGeneration == loadGeneration
         loadGeneration++
+        if (carriesCover) probeCoverGeneration = loadGeneration
         if (!redirect) loadStarts++
         if (inWebView) webViewGeneration = loadGeneration
     }

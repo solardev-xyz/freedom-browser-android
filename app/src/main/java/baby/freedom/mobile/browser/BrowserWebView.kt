@@ -3562,8 +3562,10 @@ private fun buildRefreshableWebView(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 // A load that ended without committing (a 204) leaves the
-                // page on screen, uncovered (#616).
-                state.webViewLoadSettled()
+                // page on screen, uncovered (#616) — but not that page's
+                // own finish, which the hand-off's stopLoading() can post
+                // after the covered load was handed over.
+                if (url != committedPageUrl) state.webViewLoadSettled()
                 // A Hard reload's page has loaded: the cache is used
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)

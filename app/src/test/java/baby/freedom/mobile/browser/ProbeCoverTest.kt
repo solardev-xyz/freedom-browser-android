@@ -58,6 +58,28 @@ class ProbeCoverTest {
     }
 
     @Test
+    fun `a server redirect of the handed load keeps it covered`() {
+        val tab = probingTab()
+        tab.handOff()
+        tab.beginLoad(inWebView = true, redirect = true)
+        assertTrue(tab.coversPageForProbe)
+        tab.webViewLoadSettled()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `reloading the page on screen doesn't cover it`() {
+        // Reload, Hard reload, or the chrome's Reload on an error page:
+        // the bar names the page that is on screen.
+        val tab = BrowserState(id = 1L)
+        tab.url = newAddress
+        tab.addressBarText = newAddress
+        tab.beginLoad()
+        tab.coverPageForProbe(tab.loadGeneration)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
     fun `a late callback of the old page doesn't uncover the probe`() {
         val tab = probingTab()
         // The old page's own finish (or a commit of a load it had going)
