@@ -236,22 +236,19 @@ jobs:
 
   colibri:
     name: libc4.so
-    # Pinned: on ubuntu-26.04 (ubuntu-latest since Nov 2026) CMake finds
-    # the host GCC 15's C++ std modules and the NDK cross build of evmone
-    # fails scanning them ('stdbit.h' / 'bits/stdc++.h' not found).
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # libc4.so is a function of COLIBRI_REF (whose CMake pins the
       # evmone, intx and blst it fetches), scripts/build-colibri.sh, and
-      # the runner's NDK, CMake and Ninja.
+      # the NDK, CMake and Ninja that script picks (the Android SDK's,
+      # not the runner image's, #621).
       - name: Cache key
         id: key
         run: |
-          ndk="$(sed -n 's/^Pkg.Revision *= *//p' "$ANDROID_NDK_ROOT/source.properties")"
-          tools="NDK $ndk; $(cmake --version | head -1); ninja $(ninja --version)"
+          tools="$(scripts/build-colibri.sh --tools)"
           echo "$tools"
           echo "key=colibri-v1-$COLIBRI_REF-$(printf '%s' "$tools" | sha256sum | cut -c1-16)-${{ hashFiles('scripts/build-colibri.sh') }}" >> "$GITHUB_OUTPUT"
 

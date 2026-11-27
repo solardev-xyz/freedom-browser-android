@@ -28,6 +28,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: check-ffi-ref.sh rules (offline tests)
         run: scripts/test-check-ffi-ref.sh
+      - name: build-colibri.sh picks the SDK's CMake (offline tests)
+        run: scripts/test-build-colibri.sh
       - name: FFI_REF is a tagged freedom-mobile-ffi release
         run: scripts/check-ffi-ref.sh
 
