@@ -128,6 +128,24 @@ class ProbeCoverTest {
     }
 
     @Test
+    fun `Stop doesn't keep a later submit's probe uncovered`() {
+        val tab = probingTab()
+        tab.stopProgress()
+        // The stopped probe arming late changes nothing…
+        tab.coverPageForProbe(tab.loadGeneration)
+        assertFalse(tab.coversPageForProbe)
+        // …but the user's next dweb submit is covered for its whole probe,
+        // though the Stop latch only opens at that probe's own loadUrl.
+        tab.cancelPendingProbe()
+        tab.beginLoad()
+        tab.coverPageForProbe(tab.loadGeneration)
+        assertTrue(tab.loadAborted)
+        assertTrue(tab.coversPageForProbe)
+        tab.handOff()
+        assertTrue(tab.coversPageForProbe)
+    }
+
+    @Test
     fun `a newer load takes the cover away from the superseded one`() {
         val tab = probingTab()
         val superseded = tab.loadGeneration

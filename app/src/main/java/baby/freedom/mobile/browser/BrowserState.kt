@@ -183,12 +183,21 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     private var probeCoverCommitted = false
 
     /**
+     * The [loadGeneration] the user last stopped ([stopProgress]): its
+     * probe arming late doesn't cover the page again. Scoped to that load,
+     * not the ambient [loadAborted] latch, which only the next [loadUrl]
+     * opens — after a new submit's probe has already run for minutes.
+     */
+    private var probeCoverStoppedGeneration: Int? = null
+
+    /**
      * Cover the page while load [generation]'s dweb probe runs (#616) —
      * not when the address is the page's own (a Reload, or the error
      * page's), which is the page asked for.
      */
     internal fun coverPageForProbe(generation: Int) {
         if (generation != loadGeneration || addressBarText == url) return
+        if (generation == probeCoverStoppedGeneration) return
         probeCoverGeneration = generation
         probeCoverCommitted = false
     }
@@ -216,7 +225,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
 
     /** Whether the page area shows the loading screen ([probeCoverGeneration]). */
     internal val coversPageForProbe: Boolean
-        get() = probeCoverGeneration == loadGeneration && !loadAborted && !isHome
+        get() = probeCoverGeneration == loadGeneration && !isHome
 
     /**
      * How the name the page on screen was reached through was checked
@@ -1299,8 +1308,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         // …and keep it cleared: see [loadAborted] for the late
         // callback this latches out.
         loadAborted = true
-        // Nothing takes the page's place now (#616).
+        // Nothing takes the page's place now, and this load's probe
+        // can't put it back (#616).
         probeCoverGeneration = null
+        probeCoverStoppedGeneration = loadGeneration
     }
 
     /**
