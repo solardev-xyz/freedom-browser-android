@@ -171,6 +171,41 @@ class TabsStoreTest {
     }
 
     @Test
+    fun `an empty tab list saves as no tabs instead of throwing`() = runBlocking {
+        val tabs = threeTabs()
+        tabs.tabs.clear()
+        val saved = tabs.saveForProcessDeath()
+        assertEquals(TabsState.SavedTabs(tabs = emptyList(), activeIndex = 0), saved)
+        assertTrue(saved.isJustHome())
+        // On disk it's a lone home tab: the saved list goes.
+        val store = store()
+        store.save(threeTabs().saveForProcessDeath())
+        store.save(saved)
+        assertFalse(savedFile().exists())
+        assertSame(TabsStore.Found.Nothing, store.load())
+    }
+
+    /**
+     * A read of the tab list from another thread can land in the moment
+     * a reopen or restore has it empty (#615): the session's save on
+     * every change mustn't die there, or nothing is written after it.
+     */
+    @Test
+    fun `the session keeps saving after it reads an empty tab list`() = runBlocking {
+        val session = session()
+        withTimeout(5_000) { session.ready.await() }
+        session.tabs.tabs.clear()
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        kotlinx.coroutines.delay(50)
+        session.tabs.newTab().visit("x")
+        androidx.compose.runtime.snapshots.Snapshot.sendApplyNotifications()
+        kotlinx.coroutines.delay(50)
+        main.scheduler.advanceTimeBy(2 * TabsStore.SAVE_DEBOUNCE_MS)
+        withTimeout(5_000) { while (!savedFile().exists()) kotlinx.coroutines.delay(10) }
+        assertEquals(listOf("x"), TabsStore.decode(savedFile().readText())!!.tabs.map { it.title })
+    }
+
+    @Test
     fun `the last save wins and leaves no temp file behind`() = runBlocking {
         val store = store()
         store.save(threeTabs().saveForProcessDeath())

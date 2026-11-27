@@ -1070,8 +1070,15 @@ class TabsState(
      * [MAX_SAVED_TITLE] (it's only shown until the page loads again),
      * and the whole list stops at [MAX_SAVED_CHARS], the active tab
      * counted first (R1-F1).
+     *
+     * An empty list saves as no tabs (#615), which reads back like a
+     * lone home tab. Between main-thread steps the list is never empty,
+     * but a reopen in place of the blank placeholder ([reopen]) and
+     * [restoreAfterProcessDeath] empty it for a moment, and a read from
+     * another thread can land there.
      */
     fun saveForProcessDeath(): SavedTabs {
+        if (tabs.isEmpty()) return SavedTabs(tabs = emptyList(), activeIndex = 0)
         val at = activeIndex.coerceIn(0, tabs.lastIndex)
         val candidates = tabs.withIndex().filter { !it.value.private }.mapNotNull { (index, tab) ->
             val (url, address) = tab.restorableAddress()
