@@ -163,6 +163,39 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The [loadGeneration] of a dweb address the user named (#616) whose
+     * page hasn't committed yet: its probe can poll the node for minutes,
+     * and all that time the previous page would sit under the new address
+     * in the bar. While [coversPageForProbe], the page area shows a
+     * loading screen for the new address instead.
+     *
+     * Ended by the load committing (its page, or its error page), by Stop
+     * or a load that ends without a page ([stopProgress]), and by any
+     * newer navigation, which moves [loadGeneration] on.
+     */
+    private var probeCoverGeneration by mutableStateOf<Int?>(null)
+
+    /** Cover the page while load [generation]'s dweb probe runs (#616). */
+    internal fun coverPageForProbe(generation: Int) {
+        if (generation == loadGeneration) probeCoverGeneration = generation
+    }
+
+    /**
+     * The WebView committed a document, or finished a load without one
+     * (#616). Only one of the covered load or a later one ends the cover:
+     * a late callback of the page that was on screen before the WebView
+     * was handed that load must not uncover it mid-probe.
+     */
+    internal fun webViewLoadSettled() {
+        val generation = probeCoverGeneration ?: return
+        if (webViewGeneration >= generation) probeCoverGeneration = null
+    }
+
+    /** Whether the page area shows the loading screen ([probeCoverGeneration]). */
+    internal val coversPageForProbe: Boolean
+        get() = probeCoverGeneration == loadGeneration && !loadAborted && !isHome
+
+    /**
      * How the name the page on screen was reached through was checked
      * (#96) — the trust shield on the protocol badge (#97, [TrustShield]).
      * Taken at each document's commit from the answer it was served
@@ -678,6 +711,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         cancelPendingProbe()
         progress = -1
         resolving = false
+        probeCoverGeneration = null
         find.close()
         playingAudio = false
     }
@@ -1239,6 +1273,8 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         // …and keep it cleared: see [loadAborted] for the late
         // callback this latches out.
         loadAborted = true
+        // Nothing takes the page's place now (#616).
+        probeCoverGeneration = null
     }
 
     /**

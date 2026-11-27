@@ -3264,6 +3264,8 @@ private fun buildRefreshableWebView(
                 // JavaScript dialog block (#466, R1-F1); any other commit
                 // keeps it.
                 state.jsDialogGate.committed(byUser = (view as? PageWebView)?.commitIsUsersOwn(url) == true)
+                // A document in place: no loading screen over it (#616).
+                state.webViewLoadSettled()
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -3559,6 +3561,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // A load that ended without committing (a 204) leaves the
+                // page on screen, uncovered (#616).
+                state.webViewLoadSettled()
                 // A Hard reload's page has loaded: the cache is used
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)

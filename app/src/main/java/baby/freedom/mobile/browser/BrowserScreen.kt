@@ -1166,8 +1166,14 @@ fun BrowserScreen(
         bypassCache: Boolean = false,
         // This load is the error page's own retry of [contentUri] (#536).
         continuesRetryStreak: Boolean = false,
+        // The bar shows this address already (a submit that names it,
+        // not a page's): the page under it is covered until it commits
+        // (#616). Never the error page's own retries, whose countdown
+        // stays in view.
+        coverPage: Boolean = false,
     ) {
         val generation = target.loadGeneration
+        if (coverPage) target.coverPageForProbe(generation)
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
         // The one place that knows where an ENS name leads: the
         // chrome's IPFS progress line follows this load from here (#94).
@@ -1688,6 +1694,7 @@ fun BrowserScreen(
                                     loadUri = "ens://$name$suffix",
                                     namedByUser = namedByUser,
                                     bypassCache = bypassCache,
+                                    coverPage = source.namesDestination,
                                 )
                             } else {
                                 ensError(
@@ -1786,6 +1793,7 @@ fun BrowserScreen(
                         namedByUser = namedByUser,
                         bypassCache = bypassCache,
                         continuesRetryStreak = errorPageRetried == contentUri,
+                        coverPage = source.namesDestination,
                     )
                 } finally {
                     target.resolving = false
@@ -2660,6 +2668,19 @@ fun BrowserScreen(
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                 )
+            }
+            // A dweb address the user named is still being looked for
+            // (#616): its loading screen, not the previous page under
+            // the new address.
+            if (state.coversPageForProbe && rendererGone == null) {
+                PrivateTheme(private = state.private) {
+                    ProbeLoadingScreen(
+                        address = state.addressBarText,
+                        ipfs = state.ipfsLoad,
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
 
