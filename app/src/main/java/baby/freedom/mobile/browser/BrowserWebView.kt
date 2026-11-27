@@ -3264,8 +3264,8 @@ private fun buildRefreshableWebView(
                 // JavaScript dialog block (#466, R1-F1); any other commit
                 // keeps it.
                 state.jsDialogGate.committed(byUser = (view as? PageWebView)?.commitIsUsersOwn(url) == true)
-                // A document in place: no loading screen over it (#616).
-                state.webViewLoadSettled()
+                // The covered load's document, not drawn yet (#616).
+                state.webViewDocumentCommitted()
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -3520,6 +3520,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
+                // The covered load's page is drawn: no loading screen
+                // over it any more (#616).
+                state.webViewLoadSettled(samePage = true)
                 showFailedLoadPage(view, url)
                 // The error page's text, in the app's language (#280).
                 errorPageStrings(view, url)
@@ -3561,11 +3564,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
-                // A load that ended without committing (a 204) leaves the
-                // page on screen, uncovered (#616) — but not that page's
-                // own finish, which the hand-off's stopLoading() can post
-                // after the covered load was handed over.
-                if (url != committedPageUrl) state.webViewLoadSettled()
+                // The covered load is over (#616): its page loaded, or it
+                // ended without one (a 204) and the page on screen stays.
+                state.webViewLoadSettled(samePage = url == committedPageUrl)
                 // A Hard reload's page has loaded: the cache is used
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)

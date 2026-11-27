@@ -8,7 +8,7 @@ import org.junit.Test
  * #616: while a dweb address the user named is still being probed, the
  * tab shows a loading screen for it ([BrowserState.coversPageForProbe]),
  * not the previous page under the new address — until the new load's
- * page (or error page) commits, the user stops it, or a newer load
+ * page (or error page) is drawn, the user stops it, or a newer load
  * takes over.
  */
 class ProbeCoverTest {
@@ -32,6 +32,13 @@ class ProbeCoverTest {
         handLoadToWebView()
     }
 
+    /** `onPageStarted` of the handed load: the bar takes its address. */
+    private fun BrowserState.commit() {
+        webViewDocumentCommitted()
+        url = newAddress
+        addressBarText = newAddress
+    }
+
     @Test
     fun `the previous page is covered while the new address is probed`() {
         assertTrue(probingTab().coversPageForProbe)
@@ -47,13 +54,27 @@ class ProbeCoverTest {
     }
 
     @Test
-    fun `the cover stays from the probe's answer until the page commits`() {
+    fun `the cover stays from the probe's answer until the new page is drawn`() {
         val tab = probingTab()
         tab.handOff()
         // Handed, not yet committed: the old page is still what the
         // WebView draws.
         assertTrue(tab.coversPageForProbe)
-        tab.webViewLoadSettled()
+        // Committed: still the old page's pixels until the new document
+        // first paints.
+        tab.commit()
+        assertTrue(tab.coversPageForProbe)
+        // `onPageCommitVisible`.
+        tab.webViewLoadSettled(samePage = true)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a load that ends without a document uncovers the page on screen`() {
+        val tab = probingTab()
+        tab.handOff()
+        // A 204: the finish is of the handed URL, which never committed.
+        tab.webViewLoadSettled(samePage = false)
         assertFalse(tab.coversPageForProbe)
     }
 
@@ -63,8 +84,24 @@ class ProbeCoverTest {
         tab.handOff()
         tab.beginLoad(inWebView = true, redirect = true)
         assertTrue(tab.coversPageForProbe)
-        tab.webViewLoadSettled()
+        tab.commit()
+        tab.webViewLoadSettled(samePage = true)
         assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a late callback of the old page doesn't uncover the probe`() {
+        val tab = probingTab()
+        // The old page's own finish arrives while the probe is still
+        // polling…
+        tab.webViewLoadSettled(samePage = true)
+        tab.webViewLoadSettled(samePage = false)
+        assertTrue(tab.coversPageForProbe)
+        // …or once the load was handed over, posted by the hand-off's
+        // stopLoading().
+        tab.handOff()
+        tab.webViewLoadSettled(samePage = true)
+        assertTrue(tab.coversPageForProbe)
     }
 
     @Test
@@ -77,15 +114,6 @@ class ProbeCoverTest {
         tab.beginLoad()
         tab.coverPageForProbe(tab.loadGeneration)
         assertFalse(tab.coversPageForProbe)
-    }
-
-    @Test
-    fun `a late callback of the old page doesn't uncover the probe`() {
-        val tab = probingTab()
-        // The old page's own finish (or a commit of a load it had going)
-        // arrives while the probe is still polling.
-        tab.webViewLoadSettled()
-        assertTrue(tab.coversPageForProbe)
     }
 
     @Test
@@ -119,7 +147,9 @@ class ProbeCoverTest {
         tab.coverPageForProbe(tab.loadGeneration)
         // The cancelled first probe's late callbacks: nothing was handed
         // for the new one yet.
-        tab.webViewLoadSettled()
+        tab.webViewDocumentCommitted()
+        tab.webViewLoadSettled(samePage = true)
+        tab.webViewLoadSettled(samePage = false)
         assertTrue(tab.coversPageForProbe)
     }
 
