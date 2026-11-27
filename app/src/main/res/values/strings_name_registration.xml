@@ -72,6 +72,8 @@
     <string name="namereg_intro">Check a .eth, .wei or .gwei name, then register it to this wallet or renew it. Each step is a wallet transaction you review first.</string>
     <string name="namereg_name_label">Name</string>
     <string name="namereg_name_hint">alice.eth</string>
+    <!-- %1$s: the typed label with .eth added, e.g. alice.eth. Above chips for .eth, .wei and .gwei. -->
+    <string name="namereg_ending_hint">Check looks up %1$s. Or pick an ending:</string>
     <string name="namereg_check">Check</string>
     <string name="namereg_checking">Checking on Ethereum…</string>
     <string name="namereg_term_label">Term</string>

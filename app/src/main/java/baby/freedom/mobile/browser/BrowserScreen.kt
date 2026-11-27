@@ -580,6 +580,8 @@ fun BrowserScreen(
     // page; null from the menu. [settingsSectionRequest] moves a Settings
     // that's already open (under the overview) to a card.
     var settingsInitialSection by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
+    // Settings opened at AI → Models & providers, from the agent chat's "No model yet" (#617).
+    var settingsAiProviders by rememberSaveable { mutableStateOf(false) }
     var settingsSectionRequest by remember { mutableStateOf<SettingsSection?>(null) }
     // The Nodes & networks overview (#416), and the node page over it (or
     // over Settings, or straight from the home warm-up row).
@@ -2850,6 +2852,7 @@ fun BrowserScreen(
                     onExpandCapsule = { state.capsuleCollapse.expand() },
                     onOpenSettings = {
                         settingsInitialSection = null
+                        settingsAiProviders = false
                         showSettings = true
                     },
                     onOpenNode = { showNodes = true },
@@ -3166,6 +3169,7 @@ fun BrowserScreen(
             onDismiss = {
                 showSettings = false
                 settingsInitialSection = null
+                settingsAiProviders = false
                 // Opened from a node page: Back goes back to it.
                 if (settingsBackToNodes || settingsBackToDetail != null) {
                     showNodes = settingsBackToNodes
@@ -3183,6 +3187,7 @@ fun BrowserScreen(
                 showBookmarks = true
             },
             initialSection = settingsInitialSection,
+            openAiProviders = settingsAiProviders,
             sectionRequest = settingsSectionRequest,
             onSectionRequestTaken = { depth ->
                 settingsSectionRequest = null
@@ -3225,6 +3230,7 @@ fun BrowserScreen(
     LaunchedEffect(showSettings) {
         if (!showSettings) {
             settingsInitialSection = null
+            settingsAiProviders = false
             settingsSectionRequest = null
             settingsBackToNodes = false
             settingsBackToDetail = null
@@ -3704,8 +3710,12 @@ fun BrowserScreen(
             // microphone stops, as for an agent approval.
             covered = showWallet || walletRequest != null || linkSend != null || remoteSigning != null,
             onDismiss = { showAgent = false },
+            // "No model yet → Open Settings" (#617): straight to AI → Models
+            // & providers, where a model is added; Back goes up to AI.
             onOpenSettings = {
                 showAgent = false
+                settingsInitialSection = SettingsSection.Ai
+                settingsAiProviders = true
                 showSettings = true
             },
         )

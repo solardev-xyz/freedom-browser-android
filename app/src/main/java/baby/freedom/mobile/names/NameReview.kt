@@ -22,6 +22,34 @@ import java.util.Date
 /** [wei] in ETH, every digit kept: a review is where the price is checked. */
 internal fun ethText(wei: BigInteger): String = "${SendAmounts.exact(wei, 18)} ETH"
 
+/**
+ * A price on the check card (#617): ETH rounded *up* to six decimals, the
+ * way the wallet shows other amounts — a price never reads lower than it
+ * is. The review ([ethText]) keeps every digit.
+ */
+internal fun ethPriceText(wei: BigInteger): String {
+    if (wei.signum() == 0) return "0 ETH"
+    val v = java.math.BigDecimal(wei, 18).setScale(PRICE_DECIMALS, java.math.RoundingMode.UP).stripTrailingZeros()
+    return "${v.toPlainString()} ETH"
+}
+
+private const val PRICE_DECIMALS = 6
+
+/**
+ * The name the check card prices for [input] (#617): a bare label (no
+ * dot), like `alice`, is `alice.eth`; anything else is checked as typed.
+ */
+internal fun completedName(input: String): String {
+    val t = input.trim()
+    return if (t.isNotEmpty() && '.' !in t) "$t.${NameSpace.ETH.tld}" else t
+}
+
+/** The endings offered under a bare label (#617): `.eth` first, then `.wei` and `.gwei`; none once it has a dot. */
+internal fun endingChoices(input: String): List<NameSpace> {
+    val t = input.trim()
+    return if (t.isNotEmpty() && '.' !in t) NameSpace.entries.toList() else emptyList()
+}
+
 /** "1 year", "2 years". */
 internal fun yearsText(duration: Long): String {
     val years = (duration / NameContracts.YEAR).toInt()
