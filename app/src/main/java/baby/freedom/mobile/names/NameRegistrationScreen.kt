@@ -161,7 +161,9 @@ fun NameRegistrationScreen(
         val name = completedName(input)
         if (name.isEmpty()) return
         // The field shows the name being priced (#617). Set directly: [onInput] would clear the check.
-        if (name != input) input = name
+        // A completion past the field's limit stays out of it: the check refuses it as too long, and
+        // the field keeps what was typed rather than a name its next keystroke would cut short.
+        if (name != input && name.length <= NameContracts.MAX_NAME_LENGTH) input = name
         checked = Checked.Loading
         error = null
         notice = null
@@ -491,7 +493,7 @@ private fun CheckCard(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = input,
-                onValueChange = { onInput(it.take(255)) },
+                onValueChange = { onInput(it.take(NameContracts.MAX_NAME_LENGTH)) },
                 label = { Text(stringResource(R.string.namereg_name_label)) },
                 placeholder = { Text(stringResource(R.string.namereg_name_hint)) },
                 singleLine = true,

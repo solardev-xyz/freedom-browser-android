@@ -1,6 +1,8 @@
 package baby.freedom.mobile.names
 
 import baby.freedom.mobile.R
+import baby.freedom.mobile.browser.feeText
+import baby.freedom.mobile.chains.BuiltInChains
 import baby.freedom.mobile.l10n.Strings
 import baby.freedom.mobile.names.NameOperation.Intent
 import baby.freedom.mobile.names.NameOperation.State
@@ -23,15 +25,11 @@ import java.util.Date
 internal fun ethText(wei: BigInteger): String = "${SendAmounts.exact(wei, 18)} ETH"
 
 /**
- * A price on the check card (#617): ETH rounded *up* to six decimals, the
- * way the wallet shows other amounts — a price never reads lower than it
- * is. The review ([ethText]) keeps every digit.
+ * A price on the check card (#617): ETH rounded *up* to six decimals by the
+ * wallet's own [feeText] — a price never reads lower than it is. The review
+ * ([ethText]) keeps every digit.
  */
-internal fun ethPriceText(wei: BigInteger): String {
-    if (wei.signum() == 0) return "0 ETH"
-    val v = java.math.BigDecimal(wei, 18).setScale(PRICE_DECIMALS, java.math.RoundingMode.UP).stripTrailingZeros()
-    return "${v.toPlainString()} ETH"
-}
+internal fun ethPriceText(wei: BigInteger): String = feeText(wei, BuiltInChains.ETHEREUM, PRICE_DECIMALS)
 
 private const val PRICE_DECIMALS = 6
 
@@ -44,10 +42,15 @@ internal fun completedName(input: String): String {
     return if (t.isNotEmpty() && '.' !in t) "$t.${NameSpace.ETH.tld}" else t
 }
 
-/** The endings offered under a bare label (#617): `.eth` first, then `.wei` and `.gwei`; none once it has a dot. */
+/**
+ * The endings offered under a bare label (#617): `.eth` first, then `.wei`
+ * and `.gwei`; none once it has a dot. An ending that would take the name
+ * past [NameContracts.MAX_NAME_LENGTH] isn't offered.
+ */
 internal fun endingChoices(input: String): List<NameSpace> {
     val t = input.trim()
-    return if (t.isNotEmpty() && '.' !in t) NameSpace.entries.toList() else emptyList()
+    if (t.isEmpty() || '.' in t) return emptyList()
+    return NameSpace.entries.filter { t.length + 1 + it.tld.length <= NameContracts.MAX_NAME_LENGTH }
 }
 
 /** "1 year", "2 years". */

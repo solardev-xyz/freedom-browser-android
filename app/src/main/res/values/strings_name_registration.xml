@@ -7,6 +7,7 @@
 <resources>
     <!-- names/NameContracts.kt, NameChain.kt, NameRegistrar.kt -->
     <string name="namereg_error_full_name">Enter a full .eth, .wei or .gwei name, like alice.eth.</string>
+    <string name="namereg_error_too_long">That name is too long: a full name, ending included, has at most %1$d characters.</string>
     <string name="namereg_error_not_valid">That name isn\'t valid under the naming rules. Check the spelling.</string>
     <string name="namereg_error_legacy_unicode">This name is written in a form its registry keeps as typed, and Freedom won\'t change its spelling. Use the registry\'s own app for it.</string>
     <string name="namereg_error_top_level_only">Only names with one label before the ending, like alice.eth, can be registered or renewed here.</string>

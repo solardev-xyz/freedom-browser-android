@@ -84,6 +84,9 @@ object NameContracts {
     /** The longest `.eth` term one transaction buys or adds (desktop's ten years). */
     const val MAX_YEARS = 10
 
+    /** The longest full name [parse] takes; the name field holds no more. */
+    const val MAX_NAME_LENGTH = 255
+
     /**
      * What a payment sends on top of the quote, in percent (desktop's
      * `PRICE_BUFFER_PERCENT`, the ENS app's 2%): a price update between
@@ -135,7 +138,8 @@ object NameContracts {
      */
     fun parse(value: String): ParsedName {
         val invalid = Strings.said(R.string.namereg_error_full_name)
-        if (value.length > 255 || value != value.trim() || CONTROLS.containsMatchIn(value)) refuse(NameException.Code.INVALID, invalid)
+        if (value.length > MAX_NAME_LENGTH) refuse(NameException.Code.INVALID, Strings.said(R.string.namereg_error_too_long, MAX_NAME_LENGTH))
+        if (value != value.trim() || CONTROLS.containsMatchIn(value)) refuse(NameException.Code.INVALID, invalid)
         val labels = value.split('.')
         val space = NameSpace.of(labels.last().lowercase())
         if (space == null || labels.size < 2 || labels.any { it.isEmpty() }) refuse(NameException.Code.INVALID, invalid)
