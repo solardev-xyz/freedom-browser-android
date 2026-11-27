@@ -24,10 +24,10 @@ ndk="${ANDROID_NDK_ROOT:-$sdk/ndk/27.0.12077973}"
 # The Android SDK's CMake, not the system one, so the build doesn't change
 # with the runner image (#621: ubuntu-26.04's CMake 4.5 broke it). The
 # 3.22.1 Gradle uses for swarmnode if it's there, else the newest 3.x the
-# SDK has (3.31.5 on GitHub's runners; 4.x drops compatibility with the
-# old cmake_minimum_required of fetched deps), else its newest of any
-# version, and only then whatever cmake is on PATH. Its own ninja if it
-# ships one, else the system's.
+# SDK has (3.31.5 on GitHub's runners, which also have 4.1.2: the series
+# the released library was built with, and it reproduces that build byte
+# for byte), else its newest of any version, and only then whatever cmake
+# is on PATH. Its own ninja if it ships one, else the system's.
 sdk_cmake=""
 if [[ -x "$sdk/cmake/3.22.1/bin/cmake" ]]; then
   sdk_cmake="$sdk/cmake/3.22.1"
