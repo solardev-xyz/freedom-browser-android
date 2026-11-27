@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -70,6 +71,8 @@ import baby.freedom.mobile.browser.TotalFigure
 import baby.freedom.mobile.browser.feeDetail
 import baby.freedom.mobile.browser.feeFootnote
 import baby.freedom.mobile.browser.feeText
+import baby.freedom.mobile.browser.fiatNative
+import baby.freedom.mobile.browser.rememberFiatQuotes
 import baby.freedom.mobile.browser.nonceDetail
 import baby.freedom.mobile.browser.protectedPress
 import baby.freedom.mobile.browser.rememberArmedTapGuard
@@ -83,6 +86,7 @@ import baby.freedom.mobile.names.NameOperation.State
 import baby.freedom.mobile.names.NameOperation.Step
 import baby.freedom.mobile.wallet.BiometricVaultAuthenticator
 import baby.freedom.mobile.wallet.DappCall
+import baby.freedom.mobile.wallet.FiatQuotes
 import baby.freedom.mobile.wallet.NameCallLabel
 import baby.freedom.mobile.wallet.SendQuote
 import baby.freedom.mobile.wallet.SendRequest
@@ -135,6 +139,8 @@ fun NameRegistrationScreen(
     }
     val operations by registrar.operations.collectAsState()
     val sendStatus by sender.status.collectAsState()
+    // The price's approximate value (#617), with Show prices on.
+    val fiat = rememberFiatQuotes()
 
     var input by rememberSaveable { mutableStateOf(start.orEmpty()) }
     var years by rememberSaveable { mutableIntStateOf(1) }
@@ -147,12 +153,17 @@ fun NameRegistrationScreen(
     var carriedOn by remember { mutableStateOf<String?>(null) }
     var dismissing by remember { mutableStateOf<NameOperation?>(null) }
 
-    val space = input.trim().substringAfterLast('.', "").lowercase().let(NameSpace::of)
+    // A bare label is checked as its .eth name (#617), so its term is an .eth one.
+    val space = completedName(input).substringAfterLast('.', "").lowercase().let(NameSpace::of)
     val duration = if (space == null || space.nft) NameContracts.YEAR else years * NameContracts.YEAR
 
     fun runCheck() {
-        val name = input.trim()
+        val name = completedName(input)
         if (name.isEmpty()) return
+        // The field shows the name being priced (#617). Set directly: [onInput] would clear the check.
+        // A completion past the field's limit stays out of it: the check refuses it as too long, and
+        // the field keeps what was typed rather than a name its next keystroke would cut short.
+        if (name != input && name.length <= NameContracts.MAX_NAME_LENGTH) input = name
         checked = Checked.Loading
         error = null
         notice = null
@@ -374,6 +385,8 @@ fun NameRegistrationScreen(
                             payer = payer,
                             busy = busy,
                             onCheck = ::runCheck,
+                            chain = chain,
+                            fiat = fiat,
                             onRegister = { c -> begin(c, Intent.REGISTER) },
                             onRenew = { c -> begin(c, Intent.RENEW) },
                         )
@@ -471,6 +484,8 @@ private fun CheckCard(
     payer: WalletAccount?,
     busy: Boolean,
     onCheck: () -> Unit,
+    chain: Chain,
+    fiat: FiatQuotes?,
     onRegister: (NameRegistrar.Check) -> Unit,
     onRenew: (NameRegistrar.Check) -> Unit,
 ) {
@@ -478,7 +493,7 @@ private fun CheckCard(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = input,
-                onValueChange = { onInput(it.take(255)) },
+                onValueChange = { onInput(it.take(NameContracts.MAX_NAME_LENGTH)) },
                 label = { Text(stringResource(R.string.namereg_name_label)) },
                 placeholder = { Text(stringResource(R.string.namereg_name_hint)) },
                 singleLine = true,
@@ -486,6 +501,20 @@ private fun CheckCard(
                 keyboardActions = KeyboardActions(onSearch = { onCheck() }),
                 modifier = Modifier.fillMaxWidth(),
             )
+            // A label typed without its ending (#617): Check looks up its
+            // .eth name; .wei and .gwei are a tap away.
+            val endings = endingChoices(input)
+            if (endings.isNotEmpty()) {
+                MutedText(stringResource(R.string.namereg_ending_hint, completedName(input)))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (ending in endings) {
+                        AssistChip(
+                            onClick = { onInput("${input.trim()}.${ending.tld}") },
+                            label = { Text(".${ending.tld}") },
+                        )
+                    }
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 48.dp)) {
                 Text(stringResource(R.string.namereg_term_label), modifier = Modifier.weight(1f))
                 if (space == null || space == NameSpace.ETH) {
@@ -515,7 +544,7 @@ private fun CheckCard(
                         MutedText(stringResource(R.string.namereg_checking))
                     }
                     is Checked.Failed -> Text(checked.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                    is Checked.Ready -> CheckResult(checked.check, payer, busy, onRegister, onRenew)
+                    is Checked.Ready -> CheckResult(checked.check, payer, busy, chain, fiat, onRegister, onRenew)
                 }
             }
         }
@@ -527,6 +556,8 @@ private fun CheckResult(
     check: NameRegistrar.Check,
     payer: WalletAccount?,
     busy: Boolean,
+    chain: Chain,
+    fiat: FiatQuotes?,
     onRegister: (NameRegistrar.Check) -> Unit,
     onRenew: (NameRegistrar.Check) -> Unit,
 ) {
@@ -546,8 +577,10 @@ private fun CheckResult(
         )
         check.priceWei?.let { price ->
             if (check.canRegister) {
-                TotalFigure(ethText(price))
-                MutedText(stringResource(R.string.namereg_price_for, ethText(price), yearsText(check.duration)))
+                // Rounded like the wallet's other amounts (#617); the review shows every digit.
+                TotalFigure(ethPriceText(price))
+                fiatNative(fiat, chain, price)?.let { MutedText(it) }
+                MutedText(stringResource(R.string.namereg_price_for, ethPriceText(price), yearsText(check.duration)))
             }
         }
         if (!check.canRegister) {
@@ -562,7 +595,12 @@ private fun CheckResult(
                     ReviewRow(stringResource(R.string.namereg_owner), null, address = s.owner)
                 }
             }
-            if (check.canRenew) check.priceWei?.let { MutedText(stringResource(R.string.namereg_renew_price, ethText(it), yearsText(check.duration))) }
+            if (check.canRenew) {
+                check.priceWei?.let {
+                    MutedText(stringResource(R.string.namereg_renew_price, ethPriceText(it), yearsText(check.duration)))
+                    fiatNative(fiat, chain, it)?.let { v -> MutedText(v) }
+                }
+            }
         }
         if (payer == null && (check.canRegister || check.canRenew)) MutedText(stringResource(R.string.namereg_set_up_wallet))
         if (check.canRegister) {

@@ -194,6 +194,12 @@ internal fun SettingsScreen(
      */
     initialSection: SettingsSection? = null,
     /**
+     * With [initialSection] [SettingsSection.Ai]: open on its Models &
+     * providers page (#617), the agent chat's way to add a model; Back
+     * from it goes up to the AI page.
+     */
+    openAiProviders: Boolean = false,
+    /**
      * A card to go to while already open (the overview was opened from
      * this Settings' Node status row, over it); [onSectionRequestTaken]
      * says it's been taken, with its depth among the requests still
@@ -331,7 +337,7 @@ internal fun SettingsScreen(
     val passkeys = remember(context) { Passkeys.availability(context) }
     // Settings → AI (#573), and its Models & providers or Voice dictation (#578) page standing in for the list.
     val agentState by remember(context) { AgentProviders.get(context).state }.collectAsState(initial = AgentState())
-    var aiProvidersOpen by rememberSaveable { mutableStateOf(false) }
+    var aiProvidersOpen by rememberSaveable { mutableStateOf(openAiProviders) }
     var aiDictationOpen by rememberSaveable { mutableStateOf(false) }
     val aiPageOpen = aiProvidersOpen || aiDictationOpen
 
