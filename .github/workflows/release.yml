@@ -216,7 +216,7 @@ jobs:
           echo "committed bindings match the build"
 
       - name: Upload the library
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ffi-${{ matrix.abi }}
           path: native-out/jniLibs/
@@ -228,7 +228,7 @@ jobs:
 
       - name: Upload native diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: jniLibs-debug-${{ matrix.abi }}
           path: freedom-mobile-ffi/target/android/
@@ -285,7 +285,7 @@ jobs:
           key: ${{ steps.key.outputs.key }}
 
       - name: Upload the library
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: colibri
           path: colibri-out/
@@ -405,7 +405,7 @@ jobs:
       # output too (#310). The lint report lists every finding.
       - name: Upload unit test and lint reports on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unit-test-reports
           path: |
@@ -495,7 +495,7 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Hand the unsigned APKs to the sign job
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned
           path: app/build/outputs/apk/release/app-*-release-unsigned.apk
@@ -557,7 +557,7 @@ jobs:
       # of an arbitrary branch aren't put up for download.
       - name: Hand the release to the publish job
         if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
           path: dist/
