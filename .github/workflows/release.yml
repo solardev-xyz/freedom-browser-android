@@ -116,13 +116,13 @@ jobs:
         abi: [arm64-v8a, x86_64]
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: FFI_REF is a tagged freedom-mobile-ffi release
         run: scripts/check-ffi-ref.sh
 
       - name: Checkout freedom-mobile-ffi
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: solardev-xyz/freedom-mobile-ffi
           ref: ${{ env.FFI_REF }}
@@ -239,7 +239,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # libc4.so is a function of COLIBRI_REF (whose CMake pins the
       # evmone, intx and blst it fetches), scripts/build-colibri.sh, and
@@ -261,7 +261,7 @@ jobs:
 
       - name: Checkout colibri-stateless
         if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: corpus-core/colibri-stateless
           ref: ${{ env.COLIBRI_REF }}
@@ -308,7 +308,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Read the pins
         id: pins
@@ -317,7 +317,7 @@ jobs:
           echo "colibri=$(sed -n 's/^  COLIBRI_REF: *//p' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout freedom-mobile-ffi
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: solardev-xyz/freedom-mobile-ffi
           ref: ${{ steps.pins.outputs.ffi }}
@@ -325,7 +325,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout colibri-stateless
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: corpus-core/colibri-stateless
           ref: ${{ steps.pins.outputs.colibri }}
@@ -366,7 +366,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up JDK 17
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
@@ -421,7 +421,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download libfreedom_mobile_ffi.so
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
