@@ -163,6 +163,162 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         internal set
 
     /**
+     * The [loadGeneration] of a dweb address the user named (#616) whose
+     * page hasn't painted yet: its probe can poll the node for minutes,
+     * and all that time the previous page would sit under the new address
+     * in the bar. While [coversPageForProbe], the page area shows a
+     * loading screen for the new address instead.
+     *
+     * Ended once the load's page (or its error page) is drawn, by the
+     * user's Stop ([stopProbeCover]), by the covered load ending without
+     * a page ([stopProgress]), by any other document committing under it
+     * (a navigation the WebView already had in flight when the probe
+     * started, or one the page under the cover started itself meanwhile,
+     * [webViewDocumentCommitted]), and by any newer navigation, which
+     * moves [loadGeneration] on.
+     */
+    private var probeCoverGeneration by mutableStateOf<Int?>(null)
+
+    /**
+     * The address the cover was armed for, as the bar showed it then
+     * ([coverPageForProbe]): what the loading screen names, whatever the
+     * page under it does to the bar meanwhile.
+     */
+    internal var probeCoverAddress by mutableStateOf("")
+        private set
+
+    /**
+     * The WebView has been handed the covered load ([handLoadToWebView]).
+     * Until then, any WebView callback belongs to another navigation: the
+     * page on screen, or one it was already making when the probe began
+     * (a slow link, its redirect hops) — never the covered load's own.
+     */
+    private var probeCoverHanded = false
+
+    /**
+     * The covered load has committed its document. The WebView goes on
+     * drawing the previous page until the new one first paints, so the
+     * cover stays until then ([webViewPageDrawn]).
+     */
+    private var probeCoverCommitted = false
+
+    /**
+     * The [loadGeneration] the user last stopped ([stopProbeCover]): its
+     * probe arming late doesn't cover the page again. Scoped to that load,
+     * not the ambient [loadAborted] latch, which only the next [loadUrl]
+     * opens — after a new submit's probe has already run for minutes.
+     */
+    private var probeCoverStoppedGeneration: Int? = null
+
+    /**
+     * The covered load's own main-frame URLs ([probeCoverUrlKey]): the
+     * one the WebView was handed ([handLoadToWebView]) and the server
+     * redirect hops it followed from there ([webViewNavigating]). Before
+     * its commit, only the finish of one of these is the covered load
+     * ending without a document (a 204). Any other finish is of a
+     * navigation the hand-off's `stopLoading()` aborted — a link, a typed
+     * address, a History entry or a Back / Forward the WebView was still
+     * making, a form POST, whatever started it (#616 R3-F1, R4-F1) — and
+     * leaves the page covered.
+     */
+    private val probeCoverUrls = mutableSetOf<String>()
+
+    /**
+     * A redirect hop of the covered load, after its hand-off (#616): the
+     * WebView follows [url] for it ([probeCoverUrls]). Any other
+     * navigation the WebView starts itself after the hand-off is a new
+     * [loadGeneration], which has already dropped the cover; one started
+     * before it (the page's own, [beginLoad]'s `byPage`) isn't added, as
+     * the covered load hasn't been handed yet.
+     */
+    internal fun webViewNavigating(url: String) {
+        if (probeCoverHanded && probeCoverGeneration == loadGeneration) probeCoverUrls += probeCoverUrlKey(url)
+    }
+
+    /**
+     * Cover the page while load [generation]'s dweb probe runs (#616) —
+     * not when the address is the page's own (a Reload, or the error
+     * page's), which is the page asked for.
+     */
+    internal fun coverPageForProbe(generation: Int) {
+        if (generation != loadGeneration || addressBarText == url) return
+        if (generation == probeCoverStoppedGeneration) return
+        probeCoverGeneration = generation
+        probeCoverAddress = addressBarText
+        probeCoverHanded = false
+        probeCoverCommitted = false
+        probeCoverUrls.clear()
+    }
+
+    /**
+     * The WebView committed a document (`onPageStarted`, #616). The
+     * covered load's: it is drawn at its first paint. Any other — a
+     * navigation the WebView already had in flight when the probe began,
+     * landing before the probe's answer — replaces the page the cover
+     * was hiding, and takes the bar with it: the cover would sit over a
+     * live page, naming an address that page isn't. It comes off.
+     */
+    internal fun webViewDocumentCommitted() {
+        if (probeCoverGeneration == null) return
+        if (probeCoverHanded) probeCoverCommitted = true else probeCoverGeneration = null
+    }
+
+    /**
+     * The WebView drew a committed document (`onPageCommitVisible`,
+     * #616): the covered load's page is on screen, and the loading
+     * screen comes off it. Not before the covered load committed: until
+     * then what's drawn is the page that was on screen.
+     */
+    internal fun webViewPageDrawn() {
+        if (probeCoverGeneration != null && probeCoverHanded && probeCoverCommitted) probeCoverGeneration = null
+    }
+
+    /**
+     * The WebView finished a load (`onPageFinished`, #616); [url] is the
+     * one it reports. Only the covered load's own end counts: not before
+     * the WebView was handed it (the page on screen, or a navigation it
+     * had in flight that ended without a document), and, before its
+     * commit, only a finish of one of its own URLs ([probeCoverUrls]): a
+     * 204, which leaves the page on screen, uncovered.
+     *
+     * After its commit, its finish can come before its first paint
+     * (R4-F2): the cover stays until [webViewPageDrawn]. This returns a
+     * token for a fallback the caller runs after
+     * [PROBE_COVER_PAINT_GRACE_MS] ([probeCoverPaintOverdue]), for a page
+     * no paint is ever reported for; `null` when there's none to run.
+     */
+    internal fun webViewLoadSettled(url: String?): Int? {
+        val generation = probeCoverGeneration ?: return null
+        if (!probeCoverHanded) return null
+        if (probeCoverCommitted) return generation
+        if (url != null && probeCoverUrlKey(url) in probeCoverUrls) probeCoverGeneration = null
+        return null
+    }
+
+    /**
+     * The covered load finished [PROBE_COVER_PAINT_GRACE_MS] ago with no
+     * paint reported since ([webViewLoadSettled]'s [token]): its page is
+     * what the WebView shows by now. A no-op once the cover is gone, or
+     * belongs to another load.
+     */
+    internal fun probeCoverPaintOverdue(token: Int) {
+        if (probeCoverGeneration == token && probeCoverCommitted) probeCoverGeneration = null
+    }
+
+    /**
+     * The user's Stop (#616): nothing takes the page's place now, and
+     * this load's probe arming late can't put the cover back.
+     */
+    internal fun stopProbeCover() {
+        probeCoverGeneration = null
+        probeCoverStoppedGeneration = loadGeneration
+    }
+
+    /** Whether the page area shows the loading screen ([probeCoverGeneration]). */
+    internal val coversPageForProbe: Boolean
+        get() = probeCoverGeneration == loadGeneration && !isHome
+
+    /**
      * How the name the page on screen was reached through was checked
      * (#96) — the trust shield on the protocol badge (#97, [TrustShield]).
      * Taken at each document's commit from the answer it was served
@@ -263,16 +419,47 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * a reload) rather than waiting for a probe to hand it the URL.
      * [redirect]: a server redirect hop of a navigation already under way
      * — a new generation, but not a new [loadStarts].
+     * [byPage]: a main-frame navigation the page on screen started itself
+     * (`shouldOverrideUrlLoading`: a link, a script's `location` change, a
+     * meta refresh).
      */
-    internal fun beginLoad(inWebView: Boolean = false, redirect: Boolean = false) {
+    internal fun beginLoad(inWebView: Boolean = false, redirect: Boolean = false, byPage: Boolean = false) {
+        // A server redirect hop keeps the cover (#616): of the covered
+        // load, it is still that load; of a navigation the WebView had in
+        // flight when the probe began, the page under the cover is still
+        // the old one until that navigation commits
+        // ([webViewDocumentCommitted]). So does a navigation the page
+        // under the cover starts while the probe still runs (R5-M1): the
+        // user can't have started it (the cover takes touches and keys),
+        // the probe goes on regardless and hands its load over it, and
+        // until it commits, what the WebView draws is still the old page.
+        // Like one already in flight, it uncovers only at its commit; one
+        // that ends without a document leaves the probe covered.
+        val carriesCover = probeCoverGeneration == loadGeneration &&
+            (redirect || (byPage && !probeCoverHanded))
         loadGeneration++
+        if (carriesCover) probeCoverGeneration = loadGeneration
         if (!redirect) loadStarts++
         if (inWebView) webViewGeneration = loadGeneration
     }
 
-    /** The WebView is being handed this tab's current navigation. */
-    internal fun handLoadToWebView() {
+    /**
+     * The WebView is being handed this tab's current navigation, to
+     * [url] (as given to `loadUrl`).
+     */
+    internal fun handLoadToWebView(url: String) {
         webViewGeneration = loadGeneration
+        if (probeCoverGeneration == loadGeneration) {
+            // From here, the covered load's finish is one of its own
+            // URLs' (#616 R4-F1, [probeCoverUrls]). Handed again (a
+            // fallback's `loadUrl` within the same load), the earlier
+            // URL is aborted like any other, and the new one is drawn
+            // once it commits.
+            probeCoverHanded = true
+            probeCoverCommitted = false
+            probeCoverUrls.clear()
+            probeCoverUrls += probeCoverUrlKey(url)
+        }
     }
 
     /**
@@ -678,6 +865,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         cancelPendingProbe()
         progress = -1
         resolving = false
+        probeCoverGeneration = null
         find.close()
         playingAudio = false
     }
@@ -1239,6 +1427,11 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         // …and keep it cleared: see [loadAborted] for the late
         // callback this latches out.
         loadAborted = true
+        // The covered load ended without a page (a download, a link
+        // handed to another app, a navigation that didn't leave): the
+        // page on screen stays, uncovered (#616). Not one the WebView
+        // still had in flight from before the probe: the probe goes on.
+        if (probeCoverHanded) probeCoverGeneration = null
     }
 
     /**
@@ -1327,3 +1520,22 @@ private fun startsWithPrefix(s: String, prefix: String): Boolean =
 
 /** Schemes that, typed in front of a name, assert its transport (#97). */
 private val ASSERTING_SCHEMES = setOf("bzz", "ipfs", "ipns")
+
+/**
+ * How long the probe cover (#616) waits for the covered page's first
+ * paint once its load has finished ([BrowserState.probeCoverPaintOverdue]).
+ * `onPageFinished` was seen 39-485 ms ahead of `onPageCommitVisible`
+ * on the emulator.
+ */
+internal const val PROBE_COVER_PAINT_GRACE_MS = 1_000L
+
+/**
+ * A main-frame URL as compared for the probe cover's own loads (#616):
+ * Chromium may report it with a trailing slash added, or its scheme and
+ * host lower-cased, where `loadUrl` was given neither.
+ */
+internal fun probeCoverUrlKey(url: String): String {
+    val key = url.trimEnd('/')
+    val authorityEnd = key.indexOf('/', startIndex = key.indexOf("://").let { if (it < 0) 0 else it + 3 })
+    return if (authorityEnd < 0) key.lowercase() else key.substring(0, authorityEnd).lowercase() + key.substring(authorityEnd)
+}

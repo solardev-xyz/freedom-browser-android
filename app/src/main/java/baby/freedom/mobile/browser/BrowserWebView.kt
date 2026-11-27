@@ -230,6 +230,14 @@ internal fun committedNameTrust(
 
 private val CONTENT_ROOT_SCHEMES = listOf("bzz://", "ipfs://", "ipns://")
 
+/**
+ * Runs the probe cover's paint fallback (#616 R4-F2,
+ * [BrowserState.probeCoverPaintOverdue]) on the main thread, whether or
+ * not the tab's WebView is attached (a detached view's own queue waits
+ * for its next attach).
+ */
+private val probeCoverHandler = Handler(Looper.getMainLooper())
+
 /** Status for the interceptor's refusal of an ENS document. */
 internal fun statusForNameResolutionError(code: String): Int =
     if (code == "ens_lookup_failed" || code == "ens_ccip_disabled") 502 else 404
@@ -888,6 +896,10 @@ fun BrowserWebViewHost(
     tabs: TabsState,
     modifier: Modifier = Modifier,
     covered: Boolean = false,
+    // The active tab's page is hidden behind a screen of the tab's own
+    // (the dweb probe's loading screen, #616): as out of reach as under
+    // a panel, for the keyboard and for TalkBack alike.
+    pageHidden: Boolean = false,
     onPrivateSessionEnded: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -1430,7 +1442,7 @@ fun BrowserWebViewHost(
                             val load = {
                                 // From here the WebView is on this load, not
                                 // the one it was showing (#94).
-                                tab.handLoadToWebView()
+                                tab.handLoadToWebView(pending)
                                 if (bypassCache) {
                                     tab.bypassCacheForHandedLoad()
                                     (wv as PageWebView).hardReload(pending, namedByUser)
@@ -1472,10 +1484,22 @@ fun BrowserWebViewHost(
     // panel (the Wallet page's recovery phrase, above all) would go to a
     // page nobody can see. Blocking descendants makes those requests
     // fail for as long as the panel is up, not just when it opens.
+    // The probe's loading screen ([pageHidden], #616) hides the page the
+    // same way.
+    val blocksFocus = covered || pageHidden
     SideEffect {
+        // Out of the accessibility tree too while the probe's loading
+        // screen is up (#616): its touches are blocked, but TalkBack's
+        // swipe navigation and double-tap (ACTION_CLICK) would still
+        // reach the page's links under it.
+        frame.importantForAccessibility = if (pageHidden) {
+            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        } else {
+            View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        }
         val blocked = frame.descendantFocusability == ViewGroup.FOCUS_BLOCK_DESCENDANTS
-        if (covered == blocked) return@SideEffect
-        if (covered) {
+        if (blocksFocus == blocked) return@SideEffect
+        if (blocksFocus) {
             frame.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
             frame.findFocus()?.clearFocus()
         } else {
@@ -3264,6 +3288,8 @@ private fun buildRefreshableWebView(
                 // JavaScript dialog block (#466, R1-F1); any other commit
                 // keeps it.
                 state.jsDialogGate.committed(byUser = (view as? PageWebView)?.commitIsUsersOwn(url) == true)
+                // The covered load's document, not drawn yet (#616).
+                state.webViewDocumentCommitted()
                 // The page that held a blob: download's file is gone, and
                 // its file with it: such a download fails now, not after
                 // a chunk times out.
@@ -3518,6 +3544,9 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
+                // The covered load's page is drawn: no loading screen
+                // over it any more (#616).
+                state.webViewPageDrawn()
                 showFailedLoadPage(view, url)
                 // The error page's text, in the app's language (#280).
                 errorPageStrings(view, url)
@@ -3559,6 +3588,13 @@ private fun buildRefreshableWebView(
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // The covered load is over (#616): it ended without a
+                // page (a 204) and the page on screen stays, or its page
+                // loaded, and is drawn at its first paint — if none is
+                // reported, the cover comes off after a grace (R4-F2).
+                state.webViewLoadSettled(url)?.let { token ->
+                    probeCoverHandler.postDelayed({ state.probeCoverPaintOverdue(token) }, PROBE_COVER_PAINT_GRACE_MS)
+                }
                 // A Hard reload's page has loaded: the cache is used
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)
@@ -4032,8 +4068,10 @@ private fun buildRefreshableWebView(
                     // A link the WebView follows itself is a new load
                     // (a detoured one gets this from the submit, #94);
                     // a redirect hop is a new generation of the same one
-                    // as far as the load bar is concerned (R3-F1).
-                    state.beginLoad(inWebView = true, redirect = request.isRedirect)
+                    // as far as the load bar is concerned (R3-F1). The
+                    // page's own: it doesn't take a probe's cover away
+                    // before it commits (#616 R5-M1).
+                    state.beginLoad(inWebView = true, redirect = request.isRedirect, byPage = true)
                 }
                 if (detoured) {
                     // The WebView's own navigation stops here; the submit
@@ -4044,6 +4082,9 @@ private fun buildRefreshableWebView(
                     onSubmitUrl(state, target)
                     return true
                 }
+                // A redirect hop of the probe cover's load is that load's
+                // own: its finish is that load ending (#616 R4-F1).
+                if (request.isForMainFrame) state.webViewNavigating(target)
                 // A page's own navigation — a link, a script's
                 // `location` change, or a redirect of either — goes on
                 // with the user agent in place, even across "Desktop

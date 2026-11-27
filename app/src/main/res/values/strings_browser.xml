@@ -280,4 +280,8 @@
     <!-- browser/BrowserWebView.kt: the 400/502 a dweb request gets when its path would leave its content root (#534). Shown in place of the page, and readable by any page, so always English. Plain text WebView doesn't wrap: keep lines short. -->
     <string name="dweb_path_refusal">Freedom didn\'t open this address:\nits path leaves the site\'s content\n(a \"..\" segment, an encoded\nslash or a backslash).</string>
     <string name="dweb_target_refusal">Freedom didn\'t open this name:\nits record points outside\nits own content.</string>
+    <!-- browser/ProbeLoadingScreen.kt: shown in place of the previous page while a Swarm/IPFS address the user entered is still being looked for (#616). -->
+    <string name="browser_probe_cover_title">Looking for this content…</string>
+    <string name="browser_probe_cover_swarm">Finding content on the Swarm network can take a few minutes. The page opens as soon as it\'s found.</string>
+    <string name="browser_probe_cover_ipfs">Finding content on the IPFS network can take a few minutes. The page opens as soon as it\'s found.</string>
 </resources>

@@ -1168,8 +1168,14 @@ fun BrowserScreen(
         bypassCache: Boolean = false,
         // This load is the error page's own retry of [contentUri] (#536).
         continuesRetryStreak: Boolean = false,
+        // The bar shows this address already (a submit that names it,
+        // not a page's): the page under it is covered until it commits
+        // (#616). Never the error page's own retries, whose countdown
+        // stays in view.
+        coverPage: Boolean = false,
     ) {
         val generation = target.loadGeneration
+        if (coverPage) target.coverPageForProbe(generation)
         val isIpfs = contentUri.startsWith("ipfs://") || contentUri.startsWith("ipns://")
         // The one place that knows where an ENS name leads: the
         // chrome's IPFS progress line follows this load from here (#94).
@@ -1690,6 +1696,7 @@ fun BrowserScreen(
                                     loadUri = "ens://$name$suffix",
                                     namedByUser = namedByUser,
                                     bypassCache = bypassCache,
+                                    coverPage = source.namesDestination,
                                 )
                             } else {
                                 ensError(
@@ -1788,6 +1795,7 @@ fun BrowserScreen(
                         namedByUser = namedByUser,
                         bypassCache = bypassCache,
                         continuesRetryStreak = errorPageRetried == contentUri,
+                        coverPage = source.namesDestination,
                     )
                 } finally {
                     target.resolving = false
@@ -2606,6 +2614,9 @@ fun BrowserScreen(
                     tabs = tabs,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     covered = overlayShown,
+                    // The probe's loading screen hides the page (#616):
+                    // out of reach of the keyboard and TalkBack too.
+                    pageHidden = state.coversPageForProbe && state.rendererGone == null,
                     // Closing the last private tab clears the nodes' logs (#276).
                     onPrivateSessionEnded = clearNodeLogs,
                 )
@@ -2662,6 +2673,19 @@ fun BrowserScreen(
                     bottomContentPadding = capsuleOverlap,
                     modifier = Modifier.fillMaxSize(),
                 )
+            }
+            // A dweb address the user named is still being looked for
+            // (#616): its loading screen, not the previous page under
+            // the new address.
+            if (state.coversPageForProbe && rendererGone == null) {
+                PrivateTheme(private = state.private) {
+                    ProbeLoadingScreen(
+                        address = state.probeCoverAddress,
+                        ipfs = state.ipfsLoad,
+                        bottomContentPadding = capsuleOverlap,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
 
@@ -2883,6 +2907,8 @@ fun BrowserScreen(
                         state.cancelPendingProbe()
                         tabs.stopLoading?.invoke(state)
                         state.stopProgress()
+                        // The loading screen goes, for this load (#616).
+                        state.stopProbeCover()
                         // …and give the label back to the page that is
                         // actually on screen if the cancelled navigation
                         // never got to commit (#39).
