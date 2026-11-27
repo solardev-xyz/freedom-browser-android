@@ -216,8 +216,10 @@ class ProbeCoverTest {
     fun `a newer load takes the cover away from the superseded one`() {
         val tab = probingTab()
         val superseded = tab.loadGeneration
-        // A link, Back / Forward or a page's own submit: a new generation
-        // the cover wasn't asked for.
+        // A load the WebView makes that isn't the page's own (a pull-to-
+        // refresh, a restored entry): a new generation the cover wasn't
+        // asked for. (Back / Forward and a submit are `beginLoad()`; the
+        // page's own navigation keeps the cover until it commits.)
         tab.beginLoad(inWebView = true)
         assertFalse(tab.coversPageForProbe)
         // The superseded probe arming late changes nothing.
@@ -253,6 +255,70 @@ class ProbeCoverTest {
         tab.webViewPageDrawn()
         tab.webViewLoadSettled(tab.url)
         tab.handOff()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a navigation the old page starts itself mid-probe keeps it covered until it commits`() {
+        // A timer's `location.href = '/next'`, or a meta refresh (R5-M1).
+        val tab = probingTab()
+        tab.beginLoad(inWebView = true, byPage = true)
+        // Still the old page's pixels under the dweb address.
+        assertTrue(tab.coversPageForProbe)
+        // `/next` lands: its own page, with its own address, uncovered.
+        tab.webViewDocumentCommitted()
+        tab.url = "https://example.org/next"
+        tab.addressBarText = tab.url
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a navigation the old page starts itself that ends without a document keeps the probe covered`() {
+        val tab = probingTab()
+        tab.beginLoad(inWebView = true, byPage = true)
+        tab.webViewNavigating("https://example.org/204")
+        // A 204: the old page stays, still under the cover.
+        tab.webViewLoadSettled("https://example.org/204")
+        tab.stopProgress()
+        assertTrue(tab.coversPageForProbe)
+        // The probe answers: its load is handed covered, and drawn as usual.
+        tab.handOff()
+        tab.webViewLoadSettled("https://example.org/204")
+        assertTrue(tab.coversPageForProbe)
+        tab.commit()
+        tab.webViewPageDrawn()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `the probe answering before the page's own navigation commits keeps the cover`() {
+        val tab = probingTab()
+        tab.beginLoad(inWebView = true, byPage = true)
+        // The hand-off stops `/next`; its finish isn't the covered load's.
+        tab.handOff()
+        tab.webViewLoadSettled("https://example.org/next")
+        assertTrue(tab.coversPageForProbe)
+        tab.commit()
+        assertTrue(tab.coversPageForProbe)
+        tab.webViewPageDrawn()
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a navigation of the page's own after the hand-off is a load of its own`() {
+        // The covered load was handed: a navigation started now supersedes
+        // it, and shows as its own.
+        val tab = probingTab()
+        tab.handOff()
+        tab.beginLoad(inWebView = true, byPage = true)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `the user's own navigation still takes the cover away from the probe`() {
+        // Back / Forward from the bar, or a submit.
+        val tab = probingTab()
+        tab.beginLoad()
         assertFalse(tab.coversPageForProbe)
     }
 

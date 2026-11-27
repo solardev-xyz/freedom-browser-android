@@ -4068,8 +4068,10 @@ private fun buildRefreshableWebView(
                     // A link the WebView follows itself is a new load
                     // (a detoured one gets this from the submit, #94);
                     // a redirect hop is a new generation of the same one
-                    // as far as the load bar is concerned (R3-F1).
-                    state.beginLoad(inWebView = true, redirect = request.isRedirect)
+                    // as far as the load bar is concerned (R3-F1). The
+                    // page's own: it doesn't take a probe's cover away
+                    // before it commits (#616 R5-M1).
+                    state.beginLoad(inWebView = true, redirect = request.isRedirect, byPage = true)
                 }
                 if (detoured) {
                     // The WebView's own navigation stops here; the submit

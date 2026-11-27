@@ -173,8 +173,9 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * user's Stop ([stopProbeCover]), by the covered load ending without
      * a page ([stopProgress]), by any other document committing under it
      * (a navigation the WebView already had in flight when the probe
-     * started, [webViewDocumentCommitted]), and by any newer navigation,
-     * which moves [loadGeneration] on.
+     * started, or one the page under the cover started itself meanwhile,
+     * [webViewDocumentCommitted]), and by any newer navigation, which
+     * moves [loadGeneration] on.
      */
     private var probeCoverGeneration by mutableStateOf<Int?>(null)
 
@@ -225,8 +226,10 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     /**
      * A redirect hop of the covered load, after its hand-off (#616): the
      * WebView follows [url] for it ([probeCoverUrls]). Any other
-     * navigation the WebView starts itself is a new [loadGeneration],
-     * which has already dropped the cover.
+     * navigation the WebView starts itself after the hand-off is a new
+     * [loadGeneration], which has already dropped the cover; one started
+     * before it (the page's own, [beginLoad]'s `byPage`) isn't added, as
+     * the covered load hasn't been handed yet.
      */
     internal fun webViewNavigating(url: String) {
         if (probeCoverHanded && probeCoverGeneration == loadGeneration) probeCoverUrls += probeCoverUrlKey(url)
@@ -416,14 +419,24 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * a reload) rather than waiting for a probe to hand it the URL.
      * [redirect]: a server redirect hop of a navigation already under way
      * — a new generation, but not a new [loadStarts].
+     * [byPage]: a main-frame navigation the page on screen started itself
+     * (`shouldOverrideUrlLoading`: a link, a script's `location` change, a
+     * meta refresh).
      */
-    internal fun beginLoad(inWebView: Boolean = false, redirect: Boolean = false) {
+    internal fun beginLoad(inWebView: Boolean = false, redirect: Boolean = false, byPage: Boolean = false) {
         // A server redirect hop keeps the cover (#616): of the covered
         // load, it is still that load; of a navigation the WebView had in
         // flight when the probe began, the page under the cover is still
         // the old one until that navigation commits
-        // ([webViewDocumentCommitted]).
-        val carriesCover = redirect && probeCoverGeneration == loadGeneration
+        // ([webViewDocumentCommitted]). So does a navigation the page
+        // under the cover starts while the probe still runs (R5-M1): the
+        // user can't have started it (the cover takes touches and keys),
+        // the probe goes on regardless and hands its load over it, and
+        // until it commits, what the WebView draws is still the old page.
+        // Like one already in flight, it uncovers only at its commit; one
+        // that ends without a document leaves the probe covered.
+        val carriesCover = probeCoverGeneration == loadGeneration &&
+            (redirect || (byPage && !probeCoverHanded))
         loadGeneration++
         if (carriesCover) probeCoverGeneration = loadGeneration
         if (!redirect) loadStarts++
