@@ -210,6 +210,26 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     private var probeCoverStoppedGeneration: Int? = null
 
     /**
+     * Main-frame URLs the WebView set off for itself (a link, a script's
+     * `location`, their redirect hops: [webViewNavigating]) that haven't
+     * committed or finished yet.
+     */
+    private val webViewPendingUrls = mutableSetOf<String>()
+
+    /**
+     * [webViewPendingUrls] as they stood when the covered load was
+     * handed over (#616 R3-F1): the hand-off's `stopLoading()` aborts
+     * them, and their `onPageFinished` arrives after the hand-off. That
+     * finish is theirs, not the covered load ending without a document.
+     */
+    private val probeCoverAbortedUrls = mutableSetOf<String>()
+
+    /** The WebView is following a main-frame navigation of its own to [url] (#616). */
+    internal fun webViewNavigating(url: String) {
+        webViewPendingUrls += url
+    }
+
+    /**
      * Cover the page while load [generation]'s dweb probe runs (#616) —
      * not when the address is the page's own (a Reload, or the error
      * page's), which is the page asked for.
@@ -221,6 +241,7 @@ class BrowserState(val id: Long, val private: Boolean = false) {
         probeCoverAddress = addressBarText
         probeCoverHanded = false
         probeCoverCommitted = false
+        probeCoverAbortedUrls.clear()
     }
 
     /**
@@ -232,6 +253,9 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * live page, naming an address that page isn't. It comes off.
      */
     internal fun webViewDocumentCommitted() {
+        // A commit ends every navigation the WebView was still making.
+        webViewPendingUrls.clear()
+        probeCoverAbortedUrls.clear()
         if (probeCoverGeneration == null) return
         if (probeCoverHanded) probeCoverCommitted = true else probeCoverGeneration = null
     }
@@ -243,11 +267,16 @@ class BrowserState(val id: Long, val private: Boolean = false) {
      * WebView was handed it (the page on screen, or a navigation it had
      * in flight that ended without a document), and not a callback of the
      * page that was on screen (which the hand-off's stopLoading() can
-     * post afterwards) before the covered load committed.
+     * post afterwards) before the covered load committed, nor the finish
+     * of a navigation the hand-off aborted (R3-F1): [url] is one the
+     * WebView was making for itself when the covered load was handed.
      */
-    internal fun webViewLoadSettled(samePage: Boolean) {
+    internal fun webViewLoadSettled(samePage: Boolean, url: String? = null) {
+        val aborted = !samePage && url != null && probeCoverAbortedUrls.remove(url)
+        if (!samePage && url != null) webViewPendingUrls -= url
         if (probeCoverGeneration == null || !probeCoverHanded) return
         if (samePage && !probeCoverCommitted) return
+        if (aborted) return
         probeCoverGeneration = null
     }
 
@@ -382,7 +411,12 @@ class BrowserState(val id: Long, val private: Boolean = false) {
     /** The WebView is being handed this tab's current navigation. */
     internal fun handLoadToWebView() {
         webViewGeneration = loadGeneration
-        if (probeCoverGeneration == loadGeneration) probeCoverHanded = true
+        if (probeCoverGeneration == loadGeneration) {
+            // The WebView's own navigations end here, aborted (R3-F1).
+            if (!probeCoverHanded) probeCoverAbortedUrls += webViewPendingUrls
+            probeCoverHanded = true
+        }
+        webViewPendingUrls.clear()
     }
 
     /**

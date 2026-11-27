@@ -222,6 +222,60 @@ class ProbeCoverTest {
     }
 
     @Test
+    fun `the finish of a navigation the hand-off aborted doesn't uncover the probe`() {
+        // A link to a slow page was on its way when the address was
+        // submitted (R3-F1).
+        val slow = "https://example.org/slowpage"
+        val tab = probingTab()
+        tab.webViewNavigating(slow)
+        // The probe answers first: the hand-off's stopLoading() aborts
+        // the link, whose finish comes in after the hand-off.
+        tab.handOff()
+        tab.webViewLoadSettled(samePage = false, url = slow)
+        assertTrue(tab.coversPageForProbe)
+        tab.commit()
+        assertTrue(tab.coversPageForProbe)
+        tab.webViewLoadSettled(samePage = true)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `the finish of a redirect hop the hand-off aborted doesn't uncover the probe`() {
+        val tab = probingTab()
+        tab.webViewNavigating("https://example.org/old")
+        tab.beginLoad(inWebView = true, redirect = true)
+        tab.webViewNavigating("https://example.org/new")
+        tab.handOff()
+        tab.webViewLoadSettled(samePage = false, url = "https://example.org/new")
+        assertTrue(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `the handed load's own end without a document still uncovers after an aborted one`() {
+        val slow = "https://example.org/slowpage"
+        val tab = probingTab()
+        tab.webViewNavigating(slow)
+        tab.handOff()
+        tab.webViewLoadSettled(samePage = false, url = slow)
+        // The probe's load answers 204: the page on screen stays.
+        tab.webViewLoadSettled(samePage = false, url = "https://gateway.example/bzz/x")
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
+    fun `a navigation that finished before the hand-off isn't taken for an aborted one`() {
+        val other = "https://example.org/204"
+        val tab = probingTab()
+        tab.webViewNavigating(other)
+        // It ended without a document while the probe still ran.
+        tab.webViewLoadSettled(samePage = false, url = other)
+        tab.handOff()
+        // The covered load answers 204 from the same address.
+        tab.webViewLoadSettled(samePage = false, url = other)
+        assertFalse(tab.coversPageForProbe)
+    }
+
+    @Test
     fun `a navigation already in flight that ends without a document keeps the probe covered`() {
         val tab = probingTab()
         // A 204, or a load the WebView turned into a download.

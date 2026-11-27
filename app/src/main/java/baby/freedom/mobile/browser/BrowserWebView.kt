@@ -3582,7 +3582,7 @@ private fun buildRefreshableWebView(
             override fun onPageFinished(view: WebView?, url: String?) {
                 // The covered load is over (#616): its page loaded, or it
                 // ended without one (a 204) and the page on screen stays.
-                state.webViewLoadSettled(samePage = url == committedPageUrl)
+                state.webViewLoadSettled(samePage = url == committedPageUrl, url = url)
                 // A Hard reload's page has loaded: the cache is used
                 // again from here (#262, [CacheBypass]).
                 (view as? PageWebView)?.cacheBypass?.pageFinished(url)
@@ -4068,6 +4068,10 @@ private fun buildRefreshableWebView(
                     onSubmitUrl(state, target)
                     return true
                 }
+                // The WebView follows it itself: if a probe's load is
+                // handed over first, its `stopLoading()` aborts this one,
+                // whose finish then isn't that load's (#616 R3-F1).
+                if (request.isForMainFrame) state.webViewNavigating(target)
                 // A page's own navigation — a link, a script's
                 // `location` change, or a redirect of either — goes on
                 // with the user agent in place, even across "Desktop
